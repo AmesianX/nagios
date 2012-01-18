@@ -1,8 +1,5 @@
 #ifndef INCLUDE_worker_h__
 #define INCLUDE_worker_h__
-#include "iobroker.h"
-#include "iocache.h"
-#include "kvvec.h"
 #include <errno.h>
 #include <sys/socket.h>
 #include <stdio.h>
@@ -10,6 +7,9 @@
 #include <sys/wait.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include "iobroker.h"
+#include "kvvec.h"
+#include "iocache.h"
 
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
 typedef struct iobuf
@@ -42,7 +42,5 @@ typedef struct worker_process {
 	struct worker_process *prev_wp, *next_wp;
 } worker_process;
 
-extern void enter_worker(int sd);
-extern void die(const char *msg);
-
+extern worker_process *spawn_worker(void);
 #endif /* INCLUDE_worker_h__ */

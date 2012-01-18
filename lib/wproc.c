@@ -7,8 +7,6 @@
  * seem to be.
  */
 
-#define _GNU_SOURCE
-#include "worker.h"
 #include <time.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -20,55 +18,21 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
-
-#include "iocache.h"
+#include "worker.h"
 
 static int sigreceived;
 static iobroker_set *iobs;
 
-
-static void sighandler(int sig)
-{
-	sigreceived = sig;
-	printf("%d: caught sig %d (%s)\n", getpid(), sig, strsignal(sig));
-}
-
-void die(const char *msg)
+static void die(const char *msg)
 {
 	perror(msg);
 	exit(EXIT_FAILURE);
 }
 
-static struct worker_process *spawn_worker(void)
+static void sighandler(int sig)
 {
-	int sv[2];
-	int pid;
-
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
-		die("socketpair()");
-
-	pid = fork();
-	if (pid < 0)
-		die("fork()");
-
-	/* parent leaves the child */
-	if (pid) {
-		worker_process *worker = calloc(1, sizeof(worker_process));
-		if (!worker) {
-			kill(SIGKILL, pid);
-			return NULL;
-		}
-		worker->sd = sv[0];
-		worker->pid = pid;
-		return worker;
-	}
-
-	/* child closes parent's end of socket and gets busy */
-	close(sv[0]);
-	enter_worker(sv[1]);
-
-	/* not reached */
-	exit(EXIT_FAILURE);
+	sigreceived = sig;
+	printf("%d: caught sig %d (%s)\n", getpid(), sig, strsignal(sig));
 }
 
 static int print_input(int sd, int events, void *wp_)

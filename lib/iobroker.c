@@ -1,4 +1,3 @@
-#include "iobroker.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -9,6 +8,7 @@
 #include <features.h>
 #include <stdio.h>
 #include <string.h>
+#include "iobroker.h"
 
 /*
  * epoll_*() is linux specific and was added to glibc 2.3.2, so we

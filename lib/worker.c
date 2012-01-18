@@ -1,17 +1,26 @@
 #define _GNU_SOURCE
-#include "worker.h"
-#include "runcmd.h"
-#include "kvvec.h"
-#include <signal.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <stdarg.h>
+#include "runcmd.h"
+#include "kvvec.h"
+#include "iobroker.h"
+#include "iocache.h"
+#include "worker.h"
 
 static iobroker_set *iobs;
 static child_process *last_cp;
 static unsigned int started, running_jobs;
 static int master_sd;
+
+static void worker_die(const char *msg)
+{
+	perror(msg);
+	exit(EXIT_FAILURE);
+}
 
 /*
  * contains all information sent in a particular request
@@ -438,7 +447,7 @@ static int receive_command(int sd, int events, void *discard)
 }
 
 
-void enter_worker(int sd)
+static void enter_worker(int sd)
 {
 	/* created with socketpair(), usually */
 	master_sd = sd;
@@ -453,7 +462,7 @@ void enter_worker(int sd)
 	iobs = iobroker_create();
 	if (!iobs) {
 		/* XXX: handle this a bit better */
-		die("Worker failed to create io broker socket set");
+		worker_die("Worker failed to create io broker socket set");
 	}
 	iobroker_register(iobs, master_sd, NULL, receive_command);
 	while (iobroker_get_num_fds(iobs)) {
@@ -463,4 +472,36 @@ void enter_worker(int sd)
 
 	/* not reached. we exit when the master closes our socket */
 	exit(EXIT_SUCCESS);
+}
+
+struct worker_process *spawn_worker(void)
+{
+	int sv[2];
+	int pid;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
+		return NULL;
+
+	pid = fork();
+	if (pid < 0)
+		return NULL;
+
+	/* parent leaves the child */
+	if (pid) {
+		worker_process *worker = calloc(1, sizeof(worker_process));
+		if (!worker) {
+			kill(SIGKILL, pid);
+			return NULL;
+		}
+		worker->sd = sv[0];
+		worker->pid = pid;
+		return worker;
+	}
+
+	/* child closes parent's end of socket and gets busy */
+	close(sv[0]);
+	enter_worker(sv[1]);
+
+	/* not reached, ever */
+	exit(EXIT_FAILURE);
 }
