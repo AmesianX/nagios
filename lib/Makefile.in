@@ -23,6 +23,9 @@ $(LIBNAME): $(SRC_O)
 wproc: wproc.o $(LIBNAME)
 	$(CC) $(ALL_CFLAGS) $(ALL_LDFLAGS) $^ -o $@
 
+distclean: clean
+	rm -f Makefile
+
 clean:
 	rm -f core.* *.o *~ wproc *.gcov *.gcda *.gcno gmon.out *.a
 
