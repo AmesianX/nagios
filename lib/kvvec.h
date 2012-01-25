@@ -10,6 +10,7 @@ struct kvvec_buf {
 	unsigned long buflen;
 	unsigned long bufsize;
 };
+typedef struct kvvec_buf kvvec_buf;
 
 struct kvvec {
 	struct key_value **kv;
@@ -18,13 +19,14 @@ struct kvvec {
 	int kvv_sorted;
 	int combined_len; /* used for kvvec_buf to avoid one loop */
 };
+typedef struct kvvec kvvec;
 
 /**
  * Initialize a key/value vector
  * @param hint Number of key/value pairs we expect to store
  * @return Pointer to a struct kvvec, properly initialized
  */
-extern struct kvvec *kvvec_init(int hint);
+extern kvvec *kvvec_init(int hint);
 
 /**
  * Grow a key/value vector. Used internally as needed by
@@ -34,14 +36,14 @@ extern struct kvvec *kvvec_init(int hint);
  * @param hint The new size we should grow to
  * @return 0 on success, < 0 on errors
  */
-extern int kvvec_grow(struct kvvec *kvv, int hint);
+extern int kvvec_grow(kvvec *kvv, int hint);
 
 /**
  * Sort a key/value vector alphabetically by key name
  * @param kvv The key/value vector to sort
  * @return 0
  */
-extern int kvvec_sort(struct kvvec *kvv);
+extern int kvvec_sort(kvvec *kvv);
 
 /**
  * Add a key/value pair to an existing key/value vector, with
@@ -53,7 +55,7 @@ extern int kvvec_sort(struct kvvec *kvv);
  * @param valuelen Length of the value
  * @return 0 on success, < 0 on errors
  */
-extern int kvvec_addkv_wlen(struct kvvec *kvv, char *key, int keylen, char *value, int valuelen);
+extern int kvvec_addkv_wlen(kvvec *kvv, char *key, int keylen, char *value, int valuelen);
 
 /**
  * Shortcut to kvvec_addkv_wlen() when lengths aren't known
@@ -74,7 +76,7 @@ extern int kvvec_addkv_wlen(struct kvvec *kvv, char *key, int keylen, char *valu
  * @param callback Callback function
  * @return 0 on success, < 0 on errors
  */
-extern int kvvec_foreach(struct kvvec *kvv, void *arg, int (*callback)(struct key_value *, void *));
+extern int kvvec_foreach(kvvec *kvv, void *arg, int (*callback)(struct key_value *, void *));
 
 /**
  * Destroy a key/value vector
@@ -82,7 +84,7 @@ extern int kvvec_foreach(struct kvvec *kvv, void *arg, int (*callback)(struct ke
  * @param free_kvs If set to 1, we'll free() all key/value pairs
  * @return 0 on success, < 0 on errors
  */
-extern int kvvec_destroy(struct kvvec *kvv, int free_kvs);
+extern int kvvec_destroy(kvvec *kvv, int free_kvs);
 
 /**
  * Create a linear buffer of all the key/value pairs and
@@ -99,7 +101,7 @@ extern int kvvec_destroy(struct kvvec *kvv, int free_kvs);
  *                  nul bytes.
  * @return A pointer to a newly created kvvec_buf structure
  */
-extern struct kvvec_buf *kvvec2buf(struct kvvec *kvv, char kv_sep, char pair_sep, int overalloc);
+extern kvvec_buf *kvvec2buf(kvvec *kvv, char kv_sep, char pair_sep, int overalloc);
 
 /**
  * Create a key/value vector from a pre-parsed buffer. Immensely
@@ -110,6 +112,6 @@ extern struct kvvec_buf *kvvec2buf(struct kvvec *kvv, char kv_sep, char pair_sep
  * @param kv_sep Character separating key and value
  * @param pair_sep Character separating key/value pairs
  */
-extern struct kvvec *buf2kvvec(const char *str, unsigned int len, const char kvsep, const char pair_sep);
+extern kvvec *buf2kvvec(const char *str, unsigned int len, const char kvsep, const char pair_sep);
 
 #endif /* INCLUDE_kvvec_h__ */
