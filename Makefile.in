@@ -7,6 +7,7 @@
 
 # Source code directories
 SRC_BASE=@srcdir@/base
+SRC_LIB=@srcdir@/lib
 SRC_CGI=@srcdir@/cgi
 SRC_HTM=@srcdir@/html
 SRC_MODULE=@srcdir@/module
@@ -138,7 +139,11 @@ all:
 	@echo "Enjoy."
 	@echo ""
 
+$(SRC_LIB)/libnagios.a:
+	cd $(SRC_LIB) && $(MAKE)
+
 nagios:
+	cd $(SRC_LIB) && $(MAKE)
 	cd $(SRC_BASE) && $(MAKE)
 
 config:
@@ -159,6 +164,7 @@ modules:
 	cd $(SRC_MODULE) && $(MAKE)
 
 clean:
+	cd $(SRC_LIB) && $(MAKE) $@
 	cd $(SRC_BASE) && $(MAKE) $@
 	cd $(SRC_CGI) && $(MAKE) $@
 	cd $(SRC_COMMON) && $(MAKE) $@
@@ -172,6 +178,7 @@ clean:
 	rm -f *~ *.*~ */*~ */*.*~ */*/*.*~
 
 distclean: clean
+	cd $(SRC_LIB) && $(MAKE) $@
 	cd $(SRC_BASE) && $(MAKE) $@
 	cd $(SRC_CGI) && $(MAKE) $@
 	cd $(SRC_COMMON) && $(MAKE) $@
