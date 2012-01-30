@@ -43,6 +43,14 @@ static inline int iocache_grow(iocache *ioc, unsigned long add_size)
 extern void iocache_destroy(iocache *ioc);
 
 /**
+ * Resizes the buffer in an io cache
+ * @param ioc The io cache to resize
+ * @param new_size The new size of the io cache
+ * @return 0 on success, -1 on errors
+ */
+extern int iocache_resize(iocache *ioc, unsigned long new_size);
+
+/**
  * Returns remaining read capacity of the io cache
  * @param ioc The io cache to operate on
  * @return The number of bytes available to read

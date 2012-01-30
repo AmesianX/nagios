@@ -14,10 +14,40 @@ void iocache_destroy(iocache *ioc)
 	free(ioc);
 }
 
+/**
+ * Attempts to move data from the end to the beginning
+ * of the ioc_buf, expelling old data to make more room
+ * for new reads.
+ */
+static inline void iocache_move_data(iocache *ioc)
+{
+	if (!ioc->ioc_offset)
+		return; /* nothing to do */
+
+	memmove(ioc->ioc_buf, ioc->ioc_buf + ioc->ioc_offset, iocache_available(ioc));
+}
+
+int iocache_resize(iocache *ioc, unsigned long new_size)
+{
+	char *buf;
+
+	if (!ioc)
+		return -1;
+
+	iocache_move_data(ioc);
+
+	buf = realloc(ioc->ioc_buf, new_size);
+	if (!buf)
+		return -1;
+	return 0;
+}
+
 unsigned long iocache_capacity(iocache *ioc)
 {
 	if (!ioc || !ioc->ioc_buf || !ioc->ioc_bufsize)
 		return 0;
+
+	iocache_move_data(ioc);
 
 	return ioc->ioc_bufsize - ioc->ioc_buflen;
 }
@@ -106,6 +136,9 @@ int iocache_read(iocache *ioc, int fd)
 	 */
 	if (ioc->ioc_offset >= ioc->ioc_buflen)
 		ioc->ioc_offset = ioc->ioc_buflen = 0;
+
+	/* we make sure we've got as much room as possible */
+	iocache_move_data(ioc);
 
 	/* calculate the size we should read */
 	to_read = ioc->ioc_bufsize - ioc->ioc_buflen;
