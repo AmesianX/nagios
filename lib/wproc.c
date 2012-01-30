@@ -37,16 +37,28 @@ static void sighandler(int sig)
 
 static int print_input(int sd, int events, void *wp_)
 {
-	char buf[65536];
-	int ret;
+	int ret, pkt = 0;
 	worker_process *wp = (worker_process *)wp_;
+	kvvec *kvv;
+	char *buf;
+	unsigned long old_offset, tot_bytes = 0, size;
 
-	ret = read(sd, buf, sizeof(buf));
-	buf[ret] = 0;
+	ret = iocache_read(wp->ioc, sd);
 	printf("main: read %d bytes from worker with pid %d::\n",
 		   ret, wp->pid);
-	write(fileno(stdout), buf, ret);
-	putchar('\n');
+	old_offset = wp->ioc->ioc_offset;
+	while ((buf = iocache_use_delim(wp->ioc, "\0\0", 2, &size))) {
+		int i;
+		tot_bytes += size;
+		kvv = buf2kvvec(buf, (unsigned int)size, '=', 0);
+		for (i = 0; i < kvv->kv_pairs; i++) {
+			struct key_value *kv = kvv->kv[i];
+			printf("%2d.%02d: %s=%s\n", pkt, i, kv->key, kv->value);
+		}
+		pkt++;
+	}
+	printf("tot_bytes: %ld; size: %d\n", tot_bytes, ret);
+
 	return 0;
 }
 
