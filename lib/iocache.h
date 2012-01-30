@@ -37,6 +37,51 @@ static inline int iocache_grow(iocache *ioc, unsigned long add_size)
 }
 
 /**
+ * Destroys an iocache object, freeing all memory allocated to it.
+ * @param ioc The iocache object to destroy
+ */
+extern void iocache_destroy(iocache *ioc);
+
+/**
+ * Returns remaining read capacity of the io cache
+ * @param ioc The io cache to operate on
+ * @return The number of bytes available to read
+ */
+extern unsigned long iocache_capacity(iocache *ioc);
+
+/**
+ * Return the amount of unread but stored data in the io cache
+ * @param ioc The io cache to operate on
+ * @return Number of bytes available to read
+ */
+extern unsigned long iocache_available(iocache *ioc);
+
+/**
+ * Use a chunk of data from iocache based on size. The caller
+ * must take care not to write beyond the end of the requested
+ * buffer, or Bad Things(tm) will happen.
+ *
+ * @param ioc The io cache we should use data from
+ * @param size The size of the data we want returned
+ * @return NULL on errors (insufficient data, fe). pointer on success
+ */
+extern char *iocache_use_size(iocache *ioc, unsigned long size);
+
+/**
+ * Use a chunk of data from iocache based on delimiter. The
+ * caller must take care not to write beyond the end of the
+ * requested buffer, if any is returned, or Bad Things(tm) will
+ * happen.
+ *
+ * @param ioc The io cache to use data from
+ * @param delim The delimiter
+ * @param delim_len Length of the delimiter
+ * @param size Length of the returned buffer
+ * @return NULL on errors (delimiter not found, insufficient data). pointer on success
+ */
+extern char *iocache_use_delim(iocache *ioc, const char *delim, size_t delim_len, unsigned long *size);
+
+/**
  * Creates the iocache object, initializing it with the given size
  * @param size Initial size of the iocache buffer
  * @return Pointer to a valid iocache object
