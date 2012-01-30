@@ -12,7 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <stdio.h>
 #include "kvvec.h"
 
 struct kvvec *kvvec_init(int hint)
@@ -203,8 +202,6 @@ struct kvvec *buf2kvvec(const char *str, unsigned int len,
 	if (!str || !len)
 		return NULL;
 
-	fprintf(stderr, "buf2kvvec(): Parsing string with %u bytes::\n", len);
-	//write(fileno(stderr), str, len);
 	/* first we count the number of key/value pairs */
 	for (;;) {
 		const char *ptr = memchr(str + offset, pair_sep, len - offset);
@@ -215,7 +212,6 @@ struct kvvec *buf2kvvec(const char *str, unsigned int len,
 		offset += (unsigned long)ptr - ((unsigned long)str + offset);
 	}
 	if (!num_pairs) {
-		fprintf(stderr, "No key/value pairs found\n");
 		return NULL;
 	}
 
@@ -228,10 +224,8 @@ struct kvvec *buf2kvvec(const char *str, unsigned int len,
 		struct key_value *kv;
 		char *key_end_ptr, *kv_end_ptr;
 
-		fprintf(stderr, "@kvvec: offset: %d\n", offset);
 		/* keys can't begin with nul bytes */
 		if (offset && str[offset] == '\0') {
-			fprintf(stderr, "@kvvec: Found nul byte at start of key. %d pairs parsed\n", kvv->kv_pairs);
 			return kvv;
 		}
 
