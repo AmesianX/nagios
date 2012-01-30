@@ -96,7 +96,7 @@ void send_kvvec(int sd, struct kvvec *kvv)
 	 * key=value, separated by nul bytes and two nul's
 	 * delimit one message from another
 	 */
-	kvvb = kvvec2buf(kvv, '=', '\n', 2);
+	kvvb = kvvec2buf(kvv, '=', '\0', 2);
 	if (!kvvb) {
 		/*
 		 * XXX: do *something* sensible here to let the
