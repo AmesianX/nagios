@@ -445,6 +445,7 @@ struct worker_process *spawn_worker(void (*init_func)(void *), void *init_arg)
 		}
 		worker->sd = sv[0];
 		worker->pid = pid;
+		worker->ioc = iocache_create(65536);
 		return worker;
 	}
 
