@@ -11,6 +11,26 @@
 #include "iocache.h"
 #include "worker.h"
 
+typedef struct iobuf
+{
+	int fd;
+	unsigned int len;
+	char *buf;
+} iobuf;
+
+typedef struct child_process {
+	char *cmd;
+	pid_t pid;
+	int ret;
+	struct timeval start;
+	struct timeval stop;
+	float runtime;
+	struct rusage rusage;
+	iobuf outstd;
+	iobuf outerr;
+	struct child_process *prev_cp, *next_cp;
+} child_process;
+
 static iobroker_set *iobs;
 static child_process *last_cp;
 static unsigned int started, running_jobs;

@@ -11,26 +11,6 @@
 #include "kvvec.h"
 #include "iocache.h"
 
-typedef struct iobuf
-{
-	int fd;
-	unsigned int len;
-	char *buf;
-} iobuf;
-
-typedef struct child_process {
-	char *cmd;
-	pid_t pid;
-	int ret;
-	struct timeval start;
-	struct timeval stop;
-	float runtime;
-	struct rusage rusage;
-	iobuf outstd;
-	iobuf outerr;
-	struct child_process *prev_cp, *next_cp;
-} child_process;
-
 typedef struct worker_process {
 	int sd;
 	pid_t pid; /* pid of this worker */
