@@ -1,10 +1,6 @@
 /*
- * Simple test-program to try multiplexing the running of external commands
- * Note that signal(7) claims SIGCHLD to be set to SIG_IGN by default, but
- * when set so explicitly this program runs into all sorts of weird errors.
- *
- * A sighandler which just returns might be a way out, although it doesn't
- * seem to be.
+ * Simple test-program to try multiplexing running other programs
+ * through the worker process layer.
  */
 
 #include <time.h>
