@@ -60,7 +60,6 @@ static int send_command(int sd, int events, void *discard)
 	int ret;
 	worker_process *wp;
 	struct kvvec *kvv;
-	struct kvvec_buf *kvvb;
 
 	ret = read(sd, buf, sizeof(buf));
 	if (ret == 0) {
@@ -77,10 +76,9 @@ static int send_command(int sd, int events, void *discard)
 
 	kvv = kvvec_init(1);
 	kvvec_addkv_wlen(kvv, "command", sizeof("command") - 1, buf, ret);
-	kvvb = kvvec2buf(kvv, '=', '\0', 2);
-	kvvec_destroy(kvv, 0);
 	wp = wps[wp_index++ % NWPS];
-	write(wp->sd, kvvb->buf, kvvb->bufsize);
+	send_kvvec(wp->sd, kvv);
+	kvvec_destroy(kvv, 0);
 	return 0;
 }
 
