@@ -11,7 +11,6 @@
 #include "kvvec.h"
 #include "iocache.h"
 
-#define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
 typedef struct iobuf
 {
 	int fd;
@@ -19,8 +18,6 @@ typedef struct iobuf
 	char *buf;
 } iobuf;
 
-#define next_wp next_cp
-#define prev_wp prev_cp
 typedef struct child_process {
 	char *cmd;
 	pid_t pid;
