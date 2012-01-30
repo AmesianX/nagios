@@ -36,6 +36,7 @@ typedef struct worker_process {
 	pid_t pid; /* pid of this worker */
 	unsigned int jobs, running;
 	struct timeval start;
+	iocache *ioc;
 	struct worker_process *prev_wp, *next_wp;
 } worker_process;
 
