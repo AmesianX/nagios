@@ -16,8 +16,6 @@ SRC_O := $(patsubst %.c,%.o,$(SRC_C)) $(SNPRINTF_O)
 	$(CC) $(ALL_CFLAGS) -c $< -o $@
 
 $(LIBNAME): $(SRC_O)
-	@echo "\$$SRC_C = $(SRC_C)"
-	@echo "\$$SRC_O = $(SRC_O)"
 	$(AR) cr $@ $^
 
 wproc: wproc.o $(LIBNAME)
