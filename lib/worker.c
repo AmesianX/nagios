@@ -1,10 +1,10 @@
-#define _GNU_SOURCE
 #include <unistd.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <stdarg.h>
 #include "runcmd.h"
 #include "kvvec.h"
 #include "iobroker.h"
@@ -40,16 +40,18 @@ struct request {
 static void wlog(const char *fmt, ...)
 {
 	va_list ap;
-	char *a, *b;
-	int lena, lenb;
+	static char lmsg[8192] = "log=";
+	int len;
 
 	va_start(ap, fmt);
-	lena = vasprintf(&a, fmt, ap);
+	len = vsnprintf(&lmsg[4], sizeof(lmsg) - 8, fmt, ap);
 	va_end(ap);
-	lenb = asprintf(&b, "log=%s%c%c", a, '\0', '\0');
-	write(master_sd, b, lenb);
-	free(a);
-	free(b);
+	if (len < 0 || len >= sizeof(lmsg) - 4)
+		return;
+	len += 4;
+	/* double null termination */
+	lmsg[len++] = 0; lmsg[len++] = 0;
+	write(master_sd, lmsg, len);
 }
 
 static float tv_delta_f(const struct timeval *start, const struct timeval *stop)
