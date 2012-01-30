@@ -40,6 +40,6 @@ typedef struct worker_process {
 	struct worker_process *prev_wp, *next_wp;
 } worker_process;
 
-extern worker_process *spawn_worker(void);
+extern worker_process *spawn_worker(void (init_func)(void *), void *init_arg);
 extern void send_kvvec(int sd, kvvec *kvv);
 #endif /* INCLUDE_worker_h__ */

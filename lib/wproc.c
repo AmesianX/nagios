@@ -84,6 +84,13 @@ static int send_command(int sd, int events, void *discard)
 	return 0;
 }
 
+void print_some_crap(void *arg)
+{
+	char *str = (char *)arg;
+
+	printf("%d: Argument passed: %s\n", getpid(), str);
+}
+
 int main(int argc, char **argv)
 {
 	struct worker_process *wp;
@@ -97,7 +104,7 @@ int main(int argc, char **argv)
 		die("Failed to create io broker set");
 
 	for (i = 0; i < NWPS; i++) {
-		wp = spawn_worker();
+		wp = spawn_worker(print_some_crap, "lalala");
 		if (!wp) {
 			die("Failed to spawn worker(s)\n");
 		}

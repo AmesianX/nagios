@@ -426,7 +426,7 @@ static void enter_worker(int sd)
 	exit(EXIT_SUCCESS);
 }
 
-struct worker_process *spawn_worker(void)
+struct worker_process *spawn_worker(void (*init_func)(void *), void *init_arg)
 {
 	int sv[2];
 	int pid;
@@ -450,6 +450,9 @@ struct worker_process *spawn_worker(void)
 		return worker;
 	}
 
+	if (init_func) {
+		init_func(init_arg);
+	}
 	/* child closes parent's end of socket and gets busy */
 	close(sv[0]);
 	enter_worker(sv[1]);
