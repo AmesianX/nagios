@@ -41,4 +41,5 @@ typedef struct worker_process {
 } worker_process;
 
 extern worker_process *spawn_worker(void);
+extern void send_kvvec(int sd, kvvec *kvv);
 #endif /* INCLUDE_worker_h__ */

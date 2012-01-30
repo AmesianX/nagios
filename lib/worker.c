@@ -87,7 +87,7 @@ const char *mkstr(const char *fmt, ...)
 	return ret;
 }
 
-static void send_kvvec(int sd, struct kvvec *kvv)
+void send_kvvec(int sd, struct kvvec *kvv)
 {
 	int ret;
 	struct kvvec_buf *kvvb;
