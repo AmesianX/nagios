@@ -111,7 +111,7 @@ void send_kvvec(int sd, struct kvvec *kvv)
 	 * use "bufsize" rather than buflen here, as the latter gets
 	 * us the two delimiting nul's
 	 */
-	ret = write(master_sd, kvvb->buf, kvvb->bufsize);
+	ret = write(sd, kvvb->buf, kvvb->bufsize);
 	if (ret < 0) {
 		/* XXX: do something sensible here */
 	}
