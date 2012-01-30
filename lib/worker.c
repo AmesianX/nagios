@@ -72,10 +72,10 @@ static float tv_delta_f(const struct timeval *start, const struct timeval *stop)
 	return ret;
 }
 
-#define MKSTR_BUFS 128 /* should be plenty */
+#define MKSTR_BUFS 256 /* should be plenty */
 const char *mkstr(const char *fmt, ...)
 {
-	static char buf[MKSTR_BUFS][32]; /* 4k statically on the stack */
+	static char buf[MKSTR_BUFS][32]; /* 8k statically on the stack */
 	static int slot = 0;
 	char *ret;
 	va_list ap;
