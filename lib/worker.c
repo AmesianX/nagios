@@ -356,62 +356,11 @@ static void exit_worker(void)
 	exit(EXIT_SUCCESS);
 }
 
-static struct kvvec *iocache2kvvec(iocache *c)
-{
-	unsigned long offset = 0;
-
-	if (ioc->ioc_offset >= ioc->ioc_buflen) {
-		ioc->ioc_offset = ioc->ioc_buflen = 0;
-		return NULL;
-	}
-
-	/*
-	 * Locate the double nul's and make a kvvec out of it
-	 */
-	while (offset < ioc->ioc_buflen - ioc->ioc_offset) {
-		char *nul, *ptr;
-		unsigned long msg_size;
-		wlog("Looping in iocache2kvvec()");
-
-		/* set ptr to after last located single-nul */
-		ptr = ioc->ioc_buf + ioc->ioc_offset + offset;
-
-		/*
-		 * locate a nul byte with at least one byte read after it
-		 * and return NULL if we don't find one
-		 */
-		nul = memchr(ptr, 0, ioc->ioc_buflen - ioc->ioc_offset - offset - 1);
-		if (!nul)
-			return NULL;
-
-		/* move to next byte and get *complete* message size */
-		nul++;
-		msg_size = (unsigned long)nul - (unsigned long)ioc->ioc_buf;
-		wlog("ptr: %p; nul: %p; msg_size: %lu; offset: %lu; ioc->ioc_offset: %lu",
-			 ptr, nul, msg_size, offset, ioc->ioc_offset);
-		if (*nul == '\0') {
-			/* found double nul's, so parse it */
-			struct kvvec *kvv;
-			wlog("Found double nul. Parsing...");
-			kvv = buf2kvvec(ioc->ioc_buf, msg_size, '=', '\0');
-			wlog("Done running buf2kvvec()");
-			ioc->ioc_offset += msg_size;
-			if (ioc->ioc_buflen == ioc->ioc_offset) {
-				ioc->ioc_offset = ioc->ioc_buflen = 0;
-			}
-			return kvv;
-		}
-		offset += (unsigned long)nul - (unsigned long)ptr;
-	}
-
-	/* we only end up here in case we didn't find a complete message */
-	return NULL;
-}
-
 static int receive_command(int sd, int events, void *discard)
 {
 	int ioc_ret;
-	struct kvvec *kvv;
+	char *buf;
+	unsigned long size;
 
 	if (!ioc) {
 		ioc = iocache_create(65536);
@@ -436,8 +385,9 @@ static int receive_command(int sd, int events, void *discard)
 	 * now loop over all inbound messages in the iocache,
 	 * separated by double NUL's.
 	 */
-	while ((kvv = iocache2kvvec(ioc)) != NULL) {
-		wlog("Spawning one check");
+	while ((buf = iocache_use_delim(ioc, "\0\0", 2, &size))) {
+		kvvec *kvv;
+		kvv = buf2kvvec(buf, size, '=', '\0');
 		spawn_check(kvv);
 		wlog("Destroying kvvec struct");
 		kvvec_destroy(kvv, 0);
