@@ -379,8 +379,6 @@ static int receive_command(int sd, int events, void *discard)
 		/* XXX: handle this somehow */
 	}
 
-	//wlog("Received '%s'", ioc->ioc_buf);
-
 	/*
 	 * now loop over all inbound messages in the iocache,
 	 * separated by double NUL's.
