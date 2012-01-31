@@ -362,7 +362,7 @@ child_process *parse_command_kvvec(struct kvvec *kvv)
 	return cp;
 }
 
-static void spawn_check(struct kvvec *kvv)
+static void spawn_job(struct kvvec *kvv)
 {
 	int result;
 	child_process *cp;
@@ -426,7 +426,7 @@ static int receive_command(int sd, int events, void *discard)
 	while ((buf = iocache_use_delim(ioc, "\0\0", 2, &size))) {
 		kvvec *kvv;
 		kvv = buf2kvvec(buf, size, '=', '\0');
-		spawn_check(kvv);
+		spawn_job(kvv);
 		wlog("Destroying kvvec struct");
 		kvvec_destroy(kvv, 0);
 		wlog("Done destroying kvvec struct. Parsing next check");
