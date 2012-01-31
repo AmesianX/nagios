@@ -353,8 +353,8 @@ np_runcmd_open(const char *cmd, int *pfd, int *pfderr, char **env)
 				close (i);
 
 		i = execvp(argv[0], argv);
-		fprintf(stderr, "execve() returned(!?) %d: errno is %d; %s\n", i, errno, strerror(errno));
-		_exit (0);
+		fprintf(stderr, "execvp() failed. errno is %d: %s\n", errno, strerror(errno));
+		_exit (123);
 	}
 
 	/* parent picks up execution here */
