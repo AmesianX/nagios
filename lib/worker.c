@@ -34,7 +34,7 @@ typedef struct child_process {
 } child_process;
 
 static iobroker_set *iobs;
-static child_process *last_cp;
+static child_process *first_cp, *last_cp;
 static unsigned int started, running_jobs;
 static int master_sd;
 
@@ -184,6 +184,7 @@ static int check_completion(child_process *cp, int flags)
 		struct kvvec *resp;
 		struct rusage *ru = &cp->rusage;
 		char *buf;
+		child_process *prev, *next;
 
 		resp = kvvec_init(12); /* how many key/value pairs do we need? */
 
@@ -235,11 +236,17 @@ static int check_completion(child_process *cp, int flags)
 		}
 
 		/* now we remove this check from the list of running ones */
-		if (cp->next_cp) {
-			cp->next_cp->prev_cp = cp->prev_cp;
+		next = cp->next_cp;
+		prev = cp->prev_cp;
+		if (next) {
+			next->prev_cp = prev;
+		} else {
+			last_cp = prev;
 		}
-		if (cp->prev_cp) {
-			cp->prev_cp->next_cp = cp->next_cp;
+		if (prev) {
+			prev->next_cp = next;
+		} else {
+			first_cp = next;
 		}
 		free(cp->cmd);
 		free(cp);
