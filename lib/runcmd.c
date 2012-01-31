@@ -410,7 +410,6 @@ int np_runcmd_try_close(int fd, int *status, int sig)
 
 	pid = np_pids[fd];
 	while((result = waitpid(pid, status, WNOHANG)) != pid) {
-		printf("result: %d\n", result);
 		if(!result) return 0;
 		if(result == -1) {
 			switch(errno) {
@@ -454,7 +453,6 @@ np_fetch_output(int fd, output *op, int flags)
 	}
 
 	if(ret < 0) {
-		printf("read() returned %d: %s\n", ret, strerror(errno));
 		return ret;
 	}
 
