@@ -92,8 +92,12 @@ char *iocache_use_delim(iocache *ioc, const char *delim, size_t delim_len, unsig
 			return NULL;
 		}
 		if (ptr && !memcmp(ptr, delim, delim_len)) {
-			ptr += delim_len;
-			*size = (unsigned long)ptr - ((unsigned long)ioc->ioc_buf) - ioc->ioc_offset;
+			unsigned long ioc_start;
+
+			/* ptr must point *after* the delimiter */
+			ptr += delim_len + 1;
+			ioc_start = (unsigned long)ioc->ioc_buf + ioc->ioc_offset;
+			*size = (unsigned long)ptr - ioc_start;
 
 			return iocache_use_size(ioc, *size);
 		}
