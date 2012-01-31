@@ -76,6 +76,19 @@ static void wlog(const char *fmt, ...)
 	write(master_sd, lmsg, len);
 }
 
+static void job_error(child_process *cp, kvvec *kvv, const char *fmt, ...)
+{
+	char msg[4096];
+	int len;
+	va_list ap;
+
+	va_start(ap, fmt);
+	len = vsnprintf(msg, sizeof(msg) - 1, fmt, ap);
+	va_end(ap);
+	kvvec_addkv_wlen(kvv, "error", 5, msg, len);
+	send_kvvec(master_sd, kvv);
+}
+
 static float tv_delta_f(const struct timeval *start, const struct timeval *stop)
 {
 #define DIVIDER 1000000
@@ -370,21 +383,24 @@ static void spawn_job(struct kvvec *kvv)
 	wlog("Parsing command");
 	cp = parse_command_kvvec(kvv);
 	if (!cp) {
-		wlog("Command parsing failed");
+		job_error(NULL, kvv, "Failed to parse worker-command");
 		return;
 	}
-	wlog("Done parsing command: '%s' is what we came up with\n",
-		 cp->cmd ? cp->cmd : "(Null)");
+	if (!cp->cmd) {
+		job_error(cp, kvv, "Failed to parse commandline. Ignoring job %u", cp->id);
+		return;
+	}
 
 	result = fd_start_cmd(cp);
 	if (result < 0) {
-		wlog("Failed to start child with command '%s'", cp->cmd);
-	} else {
-		started++;
-		running_jobs++;
-		wlog("Successfully started '%s'. Started: %d; Running: %d",
-			cp->cmd, started, running_jobs);
+		job_error(cp, kvv, "Failed to start child");
+		return;
 	}
+
+	started++;
+	running_jobs++;
+	wlog("Successfully started '%s'. Started: %d; Running: %d",
+		 cp->cmd, started, running_jobs);
 }
 
 static void exit_worker(void)
