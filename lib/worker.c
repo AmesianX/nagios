@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <time.h>
 #include "runcmd.h"
 #include "kvvec.h"
 #include "iobroker.h"
@@ -19,6 +20,7 @@ typedef struct iobuf
 } iobuf;
 
 typedef struct child_process {
+	unsigned int id, timeout;
 	char *cmd;
 	pid_t pid;
 	int ret;
@@ -185,6 +187,7 @@ static int check_completion(child_process *cp, int flags)
 		cp->pid = 0;
 
 		/* now build the return message */
+		kvvec_addkv(resp, "job_id", (char *)mkstr("%u", cp->id));
 		kvvec_addkv(resp, "wait_status", (char *)mkstr("%d", cp->ret));
 		kvvec_addkv_wlen(resp, "stdout", 6, cp->outstd.buf, cp->outstd.len);
 		kvvec_addkv_wlen(resp, "stderr", 6, cp->outerr.buf, cp->outerr.len);
@@ -331,13 +334,30 @@ child_process *parse_command_kvvec(struct kvvec *kvv)
 	for (i = 0; i < kvv->kv_pairs; i++) {
 		char *key = kvv->kv[i]->key;
 		char *value = kvv->kv[i]->value;
+		char *endptr;
 		wlog("parsing '%s=%s'\n", key ? key : "(null)", value ? value : "(null)");
 		if (!strcmp(key, "command")) {
 			cp->cmd = strdup(value);
 			wlog("Found command: '%s'\n", cp->cmd);
 			continue;
 		}
-		wlog("unknown key when parsing command: '%s=%s'\n", getpid(), key, value);
+		if (!strcmp(key, "job_id")) {
+			cp->id = (unsigned int)strtoul(value, &endptr, 0);
+			continue;
+		}
+		if (!strcmp(key, "timeout")) {
+			cp->timeout = (unsigned int)strtoul(value, &endptr, 0);
+			continue;
+		}
+		wlog("unknown key when parsing command: '%s=%s'\n", key, value);
+	}
+
+	/* jobs without a timeout get a default of 300 seconds. */
+	if (!cp->timeout) {
+		cp->timeout = time(NULL) + 300;
+	} else {
+		/* timeout is passed in duration, but kept in absolute */
+		cp->timeout += time(NULL) + 1;
 	}
 	return cp;
 }
