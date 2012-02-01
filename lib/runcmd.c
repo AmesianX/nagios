@@ -289,8 +289,10 @@ np_runcmd_open(const char *cmd, int *pfd, int *pfderr, char **env)
 		argv[0] = "/bin/sh";
 		argv[1] = "-c";
 		argv[2] = strdup(cmd);
-		if (!argv[2])
+		if (!argv[2]) {
+			free(argv);
 			return -1;
+		}
 		argv[3] = NULL;
 	}
 
