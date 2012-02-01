@@ -30,11 +30,9 @@ typedef struct child_process {
 	struct rusage rusage;
 	iobuf outstd;
 	iobuf outerr;
-	struct child_process *prev_cp, *next_cp;
 } child_process;
 
 static iobroker_set *iobs;
-static child_process *first_cp, *last_cp;
 static unsigned int started, running_jobs;
 static int master_sd;
 
@@ -234,21 +232,6 @@ static int check_completion(child_process *cp, int flags)
 			cp->outerr.buf = NULL;
 		}
 
-		/* now we remove this check from the list of running ones */
-		next = cp->next_cp;
-		prev = cp->prev_cp;
-		if (next) {
-			next->prev_cp = prev;
-		} else {
-			last_cp = prev;
-		}
-		if (prev) {
-			prev->next_cp = next;
-		} else {
-			first_cp = next;
-		}
-		free(cp->cmd);
-		free(cp);
 	}
 
 	return result;
@@ -338,11 +321,6 @@ child_process *parse_command_kvvec(struct kvvec *kvv)
 		wlog("Failed to calloc() a child_process struct");
 		return NULL;
 	}
-	if (last_cp) {
-		last_cp->prev_cp = cp;
-	}
-	cp->next_cp = last_cp;
-	last_cp = cp;
 
 	/*
 	 * we must copy from the vector, since it points to data
