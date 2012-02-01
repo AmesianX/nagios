@@ -92,9 +92,11 @@ static int send_command(int sd, int events, void *discard)
 	/* this happens when we're reading from stdin */
 	buf[--ret] = 0;
 
-	kvv = kvvec_init(1);
-	kvvec_addkv_wlen(kvv, "command", sizeof("command") - 1, buf, ret);
+	kvv = kvvec_init(5);
 	wp = wps[wp_index++ % NWPS];
+	kvvec_addkv(kvv, "job_id", (char *)mkstr("%d", wp->job_index++));
+	kvvec_addkv_wlen(kvv, "command", sizeof("command") - 1, buf, ret);
+	kvvec_addkv(kvv, "timeout", (char *)mkstr("%d", 10));
 	send_kvvec(wp->sd, kvv);
 	kvvec_destroy(kvv, 0);
 	return 0;
