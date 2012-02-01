@@ -66,14 +66,16 @@ static void wlog(const char *fmt, ...)
 	int len;
 
 	va_start(ap, fmt);
-	len = vsnprintf(&lmsg[4], sizeof(lmsg) - 8, fmt, ap);
+	len = vsnprintf(&lmsg[4], sizeof(lmsg) - (4 + MSG_DELIM_LEN), fmt, ap);
 	va_end(ap);
-	if (len < 0 || len >= sizeof(lmsg) - 4)
+	if (len < 0 || len >= sizeof(lmsg) - (4 + MSG_DELIM_LEN))
 		return;
-	len += 4;
-	/* double null termination */
-	lmsg[len++] = 0; lmsg[len++] = 0;
-	write(master_sd, lmsg, len);
+
+	len += 4; /* log= */
+
+	/* add delimiter and send it. 1 extra as kv pair separator */
+	memset(&lmsg[len], 0, MSG_DELIM_LEN + 1);
+	write(master_sd, lmsg, len + MSG_DELIM_LEN + 1);
 }
 
 static void job_error(child_process *cp, kvvec *kvv, const char *fmt, ...)
@@ -131,7 +133,7 @@ void send_kvvec(int sd, struct kvvec *kvv)
 	 * key=value, separated by nul bytes and two nul's
 	 * delimit one message from another
 	 */
-	kvvb = kvvec2buf(kvv, '=', '\0', 2);
+	kvvb = kvvec2buf(kvv, '=', '\0', MSG_DELIM_LEN);
 	if (!kvvb) {
 		/*
 		 * XXX: do *something* sensible here to let the
@@ -446,7 +448,7 @@ static int receive_command(int sd, int events, void *discard)
 	 * now loop over all inbound messages in the iocache,
 	 * separated by double NUL's.
 	 */
-	while ((buf = iocache_use_delim(ioc, "\0\0", 2, &size))) {
+	while ((buf = iocache_use_delim(ioc, MSG_DELIM, MSG_DELIM_LEN, &size))) {
 		kvvec *kvv;
 		kvv = buf2kvvec(buf, size, '=', '\0');
 		spawn_job(kvv);

@@ -43,7 +43,7 @@ static int print_input(int sd, int events, void *wp_)
 	printf("main: read %d bytes from worker with pid %d::\n",
 		   ret, wp->pid);
 	old_offset = wp->ioc->ioc_offset;
-	while ((buf = iocache_use_delim(wp->ioc, "\0\0", 2, &size))) {
+	while ((buf = iocache_use_delim(wp->ioc, MSG_DELIM, MSG_DELIM_LEN, &size))) {
 		int i;
 		tot_bytes += size;
 		kvv = buf2kvvec(buf, (unsigned int)size, '=', 0);

@@ -11,6 +11,9 @@
 #include "kvvec.h"
 #include "iocache.h"
 
+#define MSG_DELIM "\0\0"
+#define MSG_DELIM_LEN (sizeof(MSG_DELIM) - 1)
+
 typedef struct worker_process {
 	int sd;
 	pid_t pid; /* pid of this worker */
