@@ -21,6 +21,11 @@ struct kvvec {
 };
 typedef struct kvvec kvvec;
 
+/** Parameters for kvvec_destroy() */
+#define KVVEC_FREE_KEYS   1
+#define KVVEC_FREE_VALUES 2
+#define KVVEC_FREE_ALL    (KVVEC_FREE_KEYS | KVVEC_FREE_VALUES)
+
 /**
  * Initialize a key/value vector
  * @param hint Number of key/value pairs we expect to store
@@ -81,10 +86,10 @@ extern int kvvec_foreach(kvvec *kvv, void *arg, int (*callback)(struct key_value
 /**
  * Destroy a key/value vector
  * @param kvv The key/value vector to destroy
- * @param free_kvs If set to 1, we'll free() all key/value pairs
+ * @param flags or'ed combination of KVVEC_FREE_{KEYS,VALUES}, or KVVEC_FREE_ALL
  * @return 0 on success, < 0 on errors
  */
-extern int kvvec_destroy(kvvec *kvv, int free_kvs);
+extern int kvvec_destroy(kvvec *kvv, int flags);
 
 /**
  * Create a linear buffer of all the key/value pairs and

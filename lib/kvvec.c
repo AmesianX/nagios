@@ -125,17 +125,17 @@ int kvvec_foreach(struct kvvec *kvv, void *arg, int (*callback)(struct key_value
 	return 0;
 }
 
-int kvvec_destroy(struct kvvec *kvv, int free_kvs)
+int kvvec_destroy(struct kvvec *kvv, int flags)
 {
 	int i;
 
 	for (i = 0; i < kvv->kv_pairs; i++) {
 		struct key_value *kv = kvv->kv[i];
-		if (free_kvs) {
+		if (flags & KVVEC_FREE_KEYS) {
 			free(kv->key);
-			if (kv->value && kv->value_len) {
-				free(kv->value);
-			}
+		}
+		if (flags & KVVEC_FREE_VALUES && kv->value && kv->value_len) {
+			free(kv->value);
 		}
 		free(kv);
 	}
