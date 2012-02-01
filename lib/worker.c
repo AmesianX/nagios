@@ -435,9 +435,7 @@ static int receive_command(int sd, int events, void *discard)
 		kvvec *kvv;
 		kvv = buf2kvvec(buf, size, '=', '\0');
 		spawn_job(kvv);
-		wlog("Destroying kvvec struct");
-		kvvec_destroy(kvv, 0);
-		wlog("Done destroying kvvec struct. Parsing next check");
+		kvvec_destroy(kvv, KVVEC_FREE_ALL);
 	}
 	wlog("Done parsing input from master");
 
