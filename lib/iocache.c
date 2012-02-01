@@ -87,7 +87,7 @@ char *iocache_use_delim(iocache *ioc, const char *delim, size_t delim_len, unsig
 	remains = iocache_available(ioc);
 	while (remains >= delim_len) {
 		unsigned long jump;
-		ptr = memchr(buf, *delim, iocache_available(ioc) - delim_len);
+		ptr = memchr(buf, *delim, remains - delim_len);
 		if (!ptr) {
 			return NULL;
 		}
