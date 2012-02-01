@@ -47,13 +47,18 @@ static int print_input(int sd, int events, void *wp_)
 		int i;
 		tot_bytes += size;
 		kvv = buf2kvvec(buf, (unsigned int)size, '=', 0);
+		if (!kvv) {
+			fprintf(stderr, "main: Failed to parse buffer to key/value vector");
+			continue;
+		}
 		for (i = 0; i < kvv->kv_pairs; i++) {
 			struct key_value *kv = kvv->kv[i];
 			printf("%2d.%02d: %s=%s\n", pkt, i, kv->key, kv->value);
 		}
 		pkt++;
 	}
-	printf("tot_bytes: %ld; size: %d\n", tot_bytes, ret);
+	if (tot_bytes != ret)
+		printf("tot_bytes: %ld; size: %d\n", tot_bytes, ret);
 
 	return 0;
 }
