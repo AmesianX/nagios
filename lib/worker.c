@@ -416,7 +416,6 @@ static int receive_command(int sd, int events, void *discard)
 	ioc_ret = iocache_read(ioc, sd);
 
 	wlog("iocache_read() returned %d", ioc_ret);
-	ioc->ioc_buf[ioc->ioc_buflen + ioc_ret] = 0;
 
 	/* master closed the connection, so we exit */
 	if (ioc_ret == 0) {
