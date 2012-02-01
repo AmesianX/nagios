@@ -25,4 +25,5 @@ typedef struct worker_process {
 
 extern worker_process *spawn_worker(void (init_func)(void *), void *init_arg);
 extern void send_kvvec(int sd, kvvec *kvv);
+extern const char *mkstr(const char *fmt, ...);
 #endif /* INCLUDE_worker_h__ */
