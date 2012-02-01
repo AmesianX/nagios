@@ -40,6 +40,10 @@ static int print_input(int sd, int events, void *wp_)
 	unsigned long old_offset, tot_bytes = 0, size;
 
 	ret = iocache_read(wp->ioc, sd);
+	if (!ret) {
+		printf("main: Worker with pid %d seems to have crashed. Exiting\n", wp->pid);
+		exit(1);
+	}
 	printf("main: read %d bytes from worker with pid %d::\n",
 		   ret, wp->pid);
 	old_offset = wp->ioc->ioc_offset;
