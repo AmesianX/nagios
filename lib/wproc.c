@@ -60,6 +60,7 @@ static int print_input(int sd, int events, void *wp_)
 			printf("%2d.%02d: %s=%s\n", pkt, i, kv->key, kv->value);
 		}
 		pkt++;
+		kvvec_destroy(kvv, KVVEC_FREE_ALL);
 	}
 	if (tot_bytes != ret)
 		printf("tot_bytes: %ld; size: %d\n", tot_bytes, ret);
