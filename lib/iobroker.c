@@ -261,6 +261,9 @@ void iobroker_destroy(iobroker_set *iobs)
 {
 	int i;
 
+	if (!iobs)
+		return;
+
 #ifdef IOBROKER_USES_EPOLL
 	if (iobs->epfd >= 0)
 		close(iobs->epfd);
