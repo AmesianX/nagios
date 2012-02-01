@@ -163,6 +163,66 @@ void send_kvvec(int sd, struct kvvec *kvv)
 		kvvec_addkv_wlen(kvv, key, sizeof(key) - 1, buf, strlen(buf)); \
 	} while (0)
 
+static int finish_job(child_process *cp, int reason)
+{
+	struct kvvec *resp;
+	struct rusage *ru = &cp->rusage;
+
+	resp = kvvec_init(12); /* how many key/value pairs do we need? */
+
+	gettimeofday(&cp->stop, NULL);
+
+	/* get rid of child's filedescriptors */
+	iobroker_close(iobs, cp->outstd.fd);
+	iobroker_close(iobs, cp->outerr.fd);
+
+	cp->runtime = tv_delta_f(&cp->start, &cp->stop);
+
+	/* now build the return message */
+	kvvec_addkv(resp, "job_id", (char *)mkstr("%u", cp->id));
+	kvvec_addkv(resp, "wait_status", (char *)mkstr("%d", cp->ret));
+	kvvec_addkv_wlen(resp, "stdout", 6, cp->outstd.buf, cp->outstd.len);
+	kvvec_addkv_wlen(resp, "stderr", 6, cp->outerr.buf, cp->outerr.len);
+	kvvec_add_tv(resp, "start", cp->start);
+	kvvec_add_tv(resp, "stop", cp->stop);
+	kvvec_addkv(resp, "runtime", (char *)mkstr("%f", cp->runtime));
+	if (!reason) {
+		/* child exited */
+		kvvec_add_tv(resp, "ru_utime", ru->ru_utime);
+		kvvec_add_tv(resp, "ru_stime", ru->ru_stime);
+		kvvec_add_long(resp, "ru_minflt", ru->ru_minflt);
+		kvvec_add_long(resp, "ru_majflt", ru->ru_majflt);
+		kvvec_add_long(resp, "ru_nswap", ru->ru_nswap);
+		kvvec_add_long(resp, "ru_inblock", ru->ru_inblock);
+		kvvec_add_long(resp, "ru_oublock", ru->ru_oublock);
+		kvvec_add_long(resp, "ru_nsignals", ru->ru_nsignals);
+	} else {
+		kvvec_addkv(resp, "reason", (char *)mkstr("%d", reason));
+	}
+	send_kvvec(master_sd, resp);
+
+	/*
+	 * we mustn't free() the key/value pairs here, as they're all
+	 * stack-allocated
+	 */
+	kvvec_destroy(resp, 0);
+
+	running_jobs--;
+	if (cp->outstd.buf) {
+		free(cp->outstd.buf);
+		cp->outstd.buf = NULL;
+	}
+	if (cp->outerr.buf) {
+		free(cp->outerr.buf);
+		cp->outerr.buf = NULL;
+	}
+
+	free(cp->cmd);
+	free(cp);
+
+	return 0;
+}
+
 static int check_completion(child_process *cp, int flags)
 {
 	int result, status;
@@ -178,60 +238,8 @@ static int check_completion(child_process *cp, int flags)
 	}
 
 	if (result == cp->pid || errno == ECHILD) {
-		struct kvvec *resp;
-		struct rusage *ru = &cp->rusage;
-		char *buf;
-		child_process *prev, *next;
-
-		resp = kvvec_init(12); /* how many key/value pairs do we need? */
-
-		gettimeofday(&cp->stop, NULL);
-
-		/* get rid of child's filedescriptors */
-		iobroker_close(iobs, cp->outstd.fd);
-		iobroker_close(iobs, cp->outerr.fd);
-		cp->outstd.fd = -1;
-		cp->outerr.fd = -1;
-
-		cp->runtime = tv_delta_f(&cp->start, &cp->stop);
 		cp->ret = status;
-		cp->pid = 0;
-
-		/* now build the return message */
-		kvvec_addkv(resp, "job_id", (char *)mkstr("%u", cp->id));
-		kvvec_addkv(resp, "wait_status", (char *)mkstr("%d", cp->ret));
-		kvvec_addkv_wlen(resp, "stdout", 6, cp->outstd.buf, cp->outstd.len);
-		kvvec_addkv_wlen(resp, "stderr", 6, cp->outerr.buf, cp->outerr.len);
-		kvvec_add_tv(resp, "start", cp->start);
-		kvvec_add_tv(resp, "stop", cp->stop);
-		buf = (char *)mkstr("%f", cp->runtime);
-		kvvec_addkv(resp, "runtime", buf);
-		kvvec_add_tv(resp, "ru_utime", ru->ru_utime);
-		kvvec_add_tv(resp, "ru_stime", ru->ru_stime);
-		kvvec_add_long(resp, "ru_minflt", ru->ru_minflt);
-		kvvec_add_long(resp, "ru_majflt", ru->ru_majflt);
-		kvvec_add_long(resp, "ru_nswap", ru->ru_nswap);
-		kvvec_add_long(resp, "ru_inblock", ru->ru_inblock);
-		kvvec_add_long(resp, "ru_oublock", ru->ru_oublock);
-		kvvec_add_long(resp, "ru_nsignals", ru->ru_nsignals);
-		send_kvvec(master_sd, resp);
-
-		/*
-		 * we mustn't free() the key/value pairs here, as they're all
-		 * stack-allocated
-		 */
-		kvvec_destroy(resp, 0);
-
-		running_jobs--;
-		if (cp->outstd.buf) {
-			free(cp->outstd.buf);
-			cp->outstd.buf = NULL;
-		}
-		if (cp->outerr.buf) {
-			free(cp->outerr.buf);
-			cp->outerr.buf = NULL;
-		}
-
+		finish_job(cp, 0);
 	}
 
 	return result;
