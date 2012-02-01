@@ -335,15 +335,15 @@ child_process *parse_command_kvvec(struct kvvec *kvv)
 	 * found in the iocache where we read the command, which will
 	 * be overwritten when we receive one next
 	 */
-	wlog("parsing %d key/value pairs\n", kvv->kv_pairs);
+	wlog("parsing %d key/value pairs", kvv->kv_pairs);
 	for (i = 0; i < kvv->kv_pairs; i++) {
 		char *key = kvv->kv[i]->key;
 		char *value = kvv->kv[i]->value;
 		char *endptr;
-		wlog("parsing '%s=%s'\n", key ? key : "(null)", value ? value : "(null)");
+		wlog("parsing '%s=%s'", key ? key : "(null)", value ? value : "(null)");
 		if (!strcmp(key, "command")) {
 			cp->cmd = strdup(value);
-			wlog("Found command: '%s'\n", cp->cmd);
+			wlog("Found command: '%s'", cp->cmd);
 			continue;
 		}
 		if (!strcmp(key, "job_id")) {
@@ -354,7 +354,7 @@ child_process *parse_command_kvvec(struct kvvec *kvv)
 			cp->timeout = (unsigned int)strtoul(value, &endptr, 0);
 			continue;
 		}
-		wlog("unknown key when parsing command: '%s=%s'\n", key, value);
+		wlog("unknown key when parsing command: '%s=%s'", key, value);
 	}
 
 	/* jobs without a timeout get a default of 300 seconds. */
