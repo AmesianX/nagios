@@ -465,7 +465,7 @@ static void enter_worker(int sd)
 		iobroker_poll(iobs, -1);
 	}
 
-	/* not reached. we exit when the master closes our socket */
+	/* we exit when the master shuts us down */
 	exit(EXIT_SUCCESS);
 }
 
