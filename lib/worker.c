@@ -144,10 +144,7 @@ void send_kvvec(int sd, struct kvvec *kvv)
 		return;
 	}
 
-	/*
-	 * use "bufsize" rather than buflen here, as the latter gets
-	 * us the two delimiting nul's
-	 */
+	/* use bufsize here, as it gets us the nul string delimiter */
 	ret = write(sd, kvvb->buf, kvvb->bufsize);
 	if (ret < 0) {
 		/* XXX: do something sensible here */
