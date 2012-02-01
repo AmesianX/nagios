@@ -147,7 +147,7 @@ int iocache_read(iocache *ioc, int fd)
 	/* calculate the size we should read */
 	to_read = ioc->ioc_bufsize - ioc->ioc_buflen;
 
-	bytes_read = read(fd, ioc->ioc_buf + ioc->ioc_offset, to_read);
+	bytes_read = read(fd, ioc->ioc_buf + ioc->ioc_buflen, to_read);
 	if (bytes_read > 0) {
 		ioc->ioc_buflen += bytes_read;
 	}
