@@ -936,6 +936,26 @@ void remove_event(timed_event *event, timed_event **event_list, timed_event **ev
 	}
 
 
+static int event_delay(void)
+{
+	time_t high_time = ~0, low_time = ~0, chosen;
+
+	if (event_list_high)
+		high_time = event_list_high->run_time;
+	if (event_list_low)
+		low_time = event_list_low->run_time;
+
+	if (high_time < low_time)
+		chosen = high_time;
+	else
+		chosen = low_time;
+
+	if (chosen < time(NULL))
+		return 0;
+
+	return chosen - time(NULL);
+}
+
 
 /* this is the main event handler loop */
 int event_execution_loop(void) {
@@ -944,6 +964,7 @@ int event_execution_loop(void) {
 	time_t last_time = 0L;
 	time_t current_time = 0L;
 	time_t last_status_update = 0L;
+	time_t poll_time_ms;
 	int run_event = TRUE;
 	int nudge_seconds;
 	host *temp_host = NULL;
@@ -980,6 +1001,9 @@ int event_execution_loop(void) {
 			log_debug_info(DEBUGL_EVENTS, 0, "There aren't any events that need to be handled! Exiting...\n");
 			break;
 			}
+
+		poll_time_ms = 1000 * event_delay();
+		wproc_poll(poll_time_ms);
 
 		/* get the current time */
 		time(&current_time);

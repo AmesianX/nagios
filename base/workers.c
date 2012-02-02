@@ -199,6 +199,11 @@ static int handle_worker_result(int sd, int events, void *arg)
 	return 0;
 }
 
+void wproc_poll(int ms)
+{
+	iobroker_poll(nagios_iobs, ms);
+}
+
 static int init_iobroker(void)
 {
 	if (!nagios_iobs)

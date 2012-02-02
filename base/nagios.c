@@ -49,6 +49,7 @@
 #include "../include/broker.h"
 #include "../include/nebmods.h"
 #include "../include/nebmodules.h"
+#include "../include/workers.h"
 
 /*#define DEBUG_MEMORY 1*/
 #ifdef DEBUG_MEMORY
@@ -832,6 +833,11 @@ int main(int argc, char **argv, char **env) {
 			/* reset the restart flag */
 			sigrestart = FALSE;
 
+			/*
+			 * fire up the worker processes.
+			 * XXX: get number of workers from config later
+			 */
+			init_workers(4);
 #ifdef USE_EVENT_BROKER
 			/* send program data to broker */
 			broker_program_state(NEBTYPE_PROCESS_EVENTLOOPSTART, NEBFLAG_NONE, NEBATTR_NONE, NULL);

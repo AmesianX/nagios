@@ -35,6 +35,8 @@
 #include "locations.h"
 #include "objects.h"
 #include "macros.h"
+#include "workers.h"
+#include "../lib/libnagios.h"
 
 	/************* MISC LENGTH/SIZE DEFINITIONS ***********/
 
