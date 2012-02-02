@@ -229,11 +229,11 @@ struct kvvec *buf2kvvec(const char *str, unsigned int len,
 			return kvv;
 		}
 
-		kv = malloc(sizeof(*kv));
-
 		key_end_ptr = memchr(str + offset, kvsep, len - offset);
 		if (!key_end_ptr)
 			break;
+
+		kv = malloc(sizeof(*kv));
 		kv->key_len = (unsigned long)key_end_ptr - ((unsigned long)str + offset);
 		kv->key = malloc(kv->key_len + 1);
 		memcpy(kv->key, str + offset, kv->key_len);
@@ -242,8 +242,11 @@ struct kvvec *buf2kvvec(const char *str, unsigned int len,
 		offset += kv->key_len + 1;
 
 		kv_end_ptr = memchr(str + offset + 1, pair_sep, len - offset);
-		if (!kv_end_ptr)
+		if (!kv_end_ptr) {
+			free(kv->key);
+			free(kv);
 			break;
+		}
 		kv->value_len = (unsigned long)kv_end_ptr - ((unsigned long)str + offset);
 		kv->value = malloc(kv->value_len + 1);
 		kv->value[kv->value_len] = 0;
