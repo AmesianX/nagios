@@ -22,6 +22,11 @@ void free_worker_memory(void)
 	unsigned int i;
 
 	for (i = 0; i < num_workers; i++) {
+		if (!workers[i])
+			continue;
+
+		iocache_destroy(workers[i]->ioc);
+		close(workers[i]->sd);
 		my_free(workers[i]);
 	}
 	iobroker_destroy(nagios_iobs, 0);
@@ -217,7 +222,7 @@ int init_workers(int desired_workers)
 	if (desired_workers < num_workers)
 		return -1;
 
-	wps = malloc(sizeof(worker_process *) * desired_workers);
+	wps = calloc(desired_workers, sizeof(worker_process *));
 	if (!wps)
 		return -1;
 
@@ -232,7 +237,6 @@ int init_workers(int desired_workers)
 	}
 	for (i = num_workers; i < desired_workers; i++) {
 		worker_process *wp;
-
 
 		wp = spawn_worker(worker_init_func, (void *)get_global_macros());
 		if (!wp) {
@@ -255,7 +259,6 @@ int init_workers(int desired_workers)
 	for (i = num_workers; i < desired_workers; i++) {
 		worker_process *wp = wps[i];
 		iobroker_register(nagios_iobs, wp->sd, wp, handle_worker_result);
-		wp->ioc = iocache_create(128 * 1024);
 	}
 	num_workers = desired_workers;
 	workers = wps;
