@@ -257,12 +257,17 @@ int iobroker_close(iobroker_set *iobs, int fd)
 }
 
 
-void iobroker_destroy(iobroker_set *iobs)
+void iobroker_destroy(iobroker_set *iobs, int flags)
 {
 	int i;
+	int (*dereg)(iobroker_set *, int) = iobroker_unregister;
 
 	if (!iobs)
 		return;
+
+	if (flags & IOBROKER_CLOSE_SOCKETS) {
+		dereg = iobroker_close;
+	}
 
 #ifdef IOBROKER_USES_EPOLL
 	if (iobs->epfd >= 0)
@@ -276,7 +281,7 @@ void iobroker_destroy(iobroker_set *iobs)
 		return;
 
 	for (i = 0; i < iobs->max_fds; i++) {
-		iobroker_unregister(iobs, i);
+		dereg(iobs, i);
 	}
 	free(iobs->iobroker_fds);
 #ifdef IOBROKER_USES_EPOLL

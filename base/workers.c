@@ -24,7 +24,7 @@ void free_worker_memory(void)
 	for (i = 0; i < num_workers; i++) {
 		my_free(workers[i]);
 	}
-	iobroker_destroy(nagios_iobs);
+	iobroker_destroy(nagios_iobs, 0);
 	nagios_iobs = NULL;
 }
 

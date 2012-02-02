@@ -27,6 +27,10 @@
 #define IOBROKER_ELIB -3
 #define IOBROKER_EINVAL -EINVAL
 
+
+/** Flags for iobroker_destroy() */
+#define IOBROKER_CLOSE_SOCKETS 1
+
 /* Opaque type. Callers needn't worry about this */
 struct iobroker_set;
 typedef struct iobroker_set iobroker_set;
@@ -124,7 +128,7 @@ extern int iobroker_close(iobroker_set *iobs, int sd);
  * @param iobs The socket set to destroy
  * @param close close(2) all available sockets
  */
-extern void iobroker_destroy(iobroker_set *iobs);
+extern void iobroker_destroy(iobroker_set *iobs, int flags);
 
 /**
  * Wait for input on any of the registered sockets.
