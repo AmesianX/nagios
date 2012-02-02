@@ -40,13 +40,156 @@ static void worker_init_func(void *arg)
 	free_memory((nagios_macros *)arg);
 }
 
+static int str2timeval(char *str, struct timeval *tv)
+{
+	char *ptr, *ptr2;
+
+	tv->tv_sec = strtoul(str, &ptr, 10);
+	if (ptr == str) {
+		tv->tv_sec = tv->tv_usec = 0;
+		return -1;
+	}
+	if (*ptr == '.' || *ptr == ',') {
+		ptr2 = ptr + 1;
+		tv->tv_usec = strtoul(ptr2, &ptr, 10);
+	}
+	return 0;
+}
+
+static int handle_check_result(check_result *cr)
+{
+	if (!cr->host_name)
+		return -1;
+
+	if (cr->service_description) {
+		service *svc = find_service(cr->host_name, cr->service_description);
+		if (!svc) {
+			logit(NSLOG_RUNTIME_WARNING, TRUE,
+			      "Checkresult from worker for unknown service '%s' on host '%s'\n",
+			      cr->service_description, cr->host_name);
+			return -1;
+		}
+		return handle_async_service_check_result(svc, cr);
+	} else {
+		host *hst = find_host(cr->host_name);
+		if (!hst) {
+			logit(NSLOG_RUNTIME_WARNING, TRUE,
+			      "Checkresult from worker for unknown host '%s'\n",
+			      cr->host_name);
+			return -1;
+		}
+		return handle_async_host_check_result_3x(hst, cr);
+	}
+
+	return -1;
+}
+
 static int handle_worker_result(int sd, int events, void *arg)
 {
 	worker_process *wp = (worker_process *)arg;
+	char *buf;
+	unsigned long size;
+	int ret;
 
-	iocache_read(wp->ioc, wp->sd);
+	ret = iocache_read(wp->ioc, wp->sd);
+	while ((buf = iocache_use_delim(wp->ioc, MSG_DELIM, MSG_DELIM_LEN, &size))) {
+		kvvec *kvv;
+		int i, is_check = 0;
+		check_result cr;
+		char *err_output = NULL;
 
-	/* XXX FIXME! */
+		kvv = buf2kvvec(buf, size, '=', '\0');
+		if (!kvv) {
+			continue;
+		}
+		memset(&cr, 0, sizeof(cr));
+		cr.object_check_type = HOST_CHECK;
+		cr.check_type = HOST_CHECK_ACTIVE;
+		cr.reschedule_check = TRUE;
+		for (i = 0; i < kvv->kv_pairs; i++) {
+			unsigned int job_id;
+			char *endptr, *key, *value;
+			int val;
+
+			key = kvv->kv[i]->key;
+			value = kvv->kv[i]->value;
+
+			/*
+			 * This if() else if() thing should be replaced
+			 * with a list using binary lookups to make it
+			 * go a bit faster, since we expect to run this
+			 * routine several hundred thousand times per
+			 * minute.
+			 */
+			if (!strcmp(key, "type")) {
+				if (strcmp(value, "check")) {
+					printf("Type isn't 'check'. Ignoring worker result\n");
+					break;
+				}
+				is_check = 1;
+			} else if (!strcmp(key, "job_id")) {
+				job_id = strtoul(value, &endptr, 10);
+			} else if (!strcmp(key, "host_name")) {
+				cr.host_name = value;
+			} else if (!strcmp(key, "service_description")) {
+				cr.service_description = value;
+				cr.object_check_type = SERVICE_CHECK;
+				cr.check_type = SERVICE_CHECK_ACTIVE;
+			} else if (!strcmp(key, "start")) {
+				str2timeval(value, &cr.start_time);
+			} else if (!strcmp(key, "stop")) {
+				str2timeval(value, &cr.finish_time);
+			} else if (!strcmp(key, "error")) {
+				int val = atoi(value);
+				if (val == ETIME) {
+					cr.early_timeout = 1;
+				}
+			} else if (!strcmp(key, "stdout")) {
+				cr.output = value;
+			} else if (!strcmp(key, "stderr")) {
+				err_output = value;
+			} else if (!strcmp(key, "wait_status")) {
+				val = atoi(value);
+				cr.exited_ok = WIFEXITED(val);
+				if (cr.exited_ok) {
+					cr.return_code = WEXITSTATUS(val);
+				}
+			} else if (!strcmp(key, "command")) {
+				/* ignored */
+				;
+			} else if (!strcmp(key, "runtime")) {
+				/* ignored */
+				;
+			} else if (!strcmp(key, "ru_utime")) {
+				str2timeval(value, &cr.rusage.ru_utime);
+			} else if (!strcmp(key, "ru_stime")) {
+				str2timeval(value, &cr.rusage.ru_stime);
+			} else if (!strcmp(key, "ru_minflt")) {
+				cr.rusage.ru_minflt = atoi(value);
+			} else if (!strcmp(key, "ru_majflt")) {
+				cr.rusage.ru_majflt = atoi(value);
+			} else if (!strcmp(key, "ru_nswap")) {
+				cr.rusage.ru_nswap = atoi(value);
+			} else if (!strcmp(key, "ru_inblock")) {
+				cr.rusage.ru_inblock = atoi(value);
+			} else if (!strcmp(key, "ru_oublock")) {
+				cr.rusage.ru_oublock = atoi(value);
+			} else if (!strcmp(key, "ru_nsignals")) {
+				cr.rusage.ru_nsignals = atoi(value);
+			} else if (!strcmp(key, "log")) {
+				logit(NSLOG_INFO_MESSAGE, TRUE, "worker %d: %s\n", wp->pid, value);
+			} else {
+				printf("Unrecognized check result variable: %s=%s\n", key, value);
+			}
+		}
+		if (is_check) {
+			/* FIXME: this could be handled better... */
+			if (!cr.output && err_output)
+				cr.output = err_output;
+			handle_check_result(&cr);
+		}
+		kvvec_destroy(kvv, KVVEC_FREE_ALL);
+	}
 
 	return 0;
 }
