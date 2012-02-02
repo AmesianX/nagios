@@ -214,7 +214,7 @@ int init_workers(int desired_workers)
 	worker_process **wps;
 	int i;
 
-	if (desired_workers == 0) {
+	if (desired_workers <= 0) {
 		desired_workers = 4;
 	}
 
