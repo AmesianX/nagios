@@ -114,7 +114,7 @@ iocache *iocache_create(unsigned long size)
 
 	ioc = calloc(1, sizeof(*ioc));
 	if (ioc && size) {
-		ioc->ioc_buf = malloc(size);
+		ioc->ioc_buf = calloc(1, size);
 		if (!ioc->ioc_buf) {
 			free(ioc);
 			return NULL;
