@@ -52,6 +52,15 @@ struct request {
 	struct kvvec *request, *response;
 };
 
+static void exit_worker(void)
+{
+	/*
+	 * XXX: check to make sure we have no children running. If
+	 * we do, kill 'em all before we go home.
+	 */
+	exit(EXIT_SUCCESS);
+}
+
 /*
  * write a log message to master. This can almost certainly be
  * improved, but it works and we're not terribly concerned with
@@ -73,7 +82,12 @@ static void wlog(const char *fmt, ...)
 
 	/* add delimiter and send it. 1 extra as kv pair separator */
 	memset(&lmsg[len], 0, MSG_DELIM_LEN + 1);
-	write(master_sd, lmsg, len + MSG_DELIM_LEN + 1);
+	if (write(master_sd, lmsg, len + MSG_DELIM_LEN + 1) < 0) {
+		if (errno == EPIPE) {
+			/* master has died or abandoned us, so exit */
+			exit_worker();
+		}
+	}
 }
 
 static void job_error(child_process *cp, kvvec *kvv, const char *fmt, ...)
@@ -144,11 +158,17 @@ void send_kvvec(int sd, struct kvvec *kvv)
 
 	/* use bufsize here, as it gets us the nul string delimiter */
 	ret = write(sd, kvvb->buf, kvvb->bufsize);
-	if (ret < 0) {
-		/* XXX: do something sensible here */
-	}
 	free(kvvb->buf);
 	free(kvvb);
+	if (ret < 0) {
+		if (errno == EPIPE) {
+			/*
+			 * master has crashed or abandoned us, so we die
+			 * with what grace we can.
+			 */
+			exit_worker();
+		}
+	}
 }
 
 #define kvvec_add_long(kvv, key, value) \
@@ -393,15 +413,6 @@ static void spawn_job(struct kvvec *kvv)
 	running_jobs++;
 	wlog("Successfully started '%s'. Started: %d; Running: %d",
 		 cp->cmd, started, running_jobs);
-}
-
-static void exit_worker(void)
-{
-	/*
-	 * XXX: check to make sure we have no children running. If
-	 * we do, kill 'em all before we go home.
-	 */
-	exit(EXIT_SUCCESS);
 }
 
 static int receive_command(int sd, int events, void *discard)
