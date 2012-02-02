@@ -36,6 +36,7 @@ typedef struct child_process {
 static iobroker_set *iobs;
 static unsigned int started, running_jobs;
 static int master_sd;
+static int parent_pid;
 
 static void worker_die(const char *msg)
 {
@@ -473,6 +474,7 @@ static void enter_worker(int sd)
 {
 	/* created with socketpair(), usually */
 	master_sd = sd;
+	parent_pid = getppid();
 
 	if (setpgid(0, 0)) {
 		/* XXX: handle error somehow, or maybe just ignore it */
@@ -490,6 +492,13 @@ static void enter_worker(int sd)
 	while (iobroker_get_num_fds(iobs)) {
 		wlog("Polling iobroker socket set");
 		iobroker_poll(iobs, -1);
+		/*
+		 * if our parent goes away we can't really do anything
+		 * sensible at all, so let's just break out and exit
+		 */
+		if (kill(parent_pid, 0) < 0 && errno == ESRCH) {
+			break;
+		}
 	}
 
 	/* we exit when the master shuts us down */
