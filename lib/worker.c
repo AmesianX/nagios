@@ -194,9 +194,11 @@ static int finish_job(child_process *cp, int reason)
 
 	gettimeofday(&cp->stop, NULL);
 
-	/* get rid of child's filedescriptors */
-	iobroker_close(iobs, cp->outstd.fd);
-	iobroker_close(iobs, cp->outerr.fd);
+	/* get rid of still open filedescriptors */
+	if (cp->outstd.fd != -1)
+		iobroker_close(iobs, cp->outstd.fd);
+	if (cp->outerr.fd != -1)
+		iobroker_close(iobs, cp->outerr.fd);
 
 	cp->runtime = tv_delta_f(&cp->start, &cp->stop);
 
