@@ -30,6 +30,7 @@ typedef struct child_process {
 	struct rusage rusage;
 	iobuf outstd;
 	iobuf outerr;
+	kvvec *request;
 } child_process;
 
 static iobroker_set *iobs;
@@ -187,8 +188,9 @@ static int finish_job(child_process *cp, int reason)
 {
 	struct kvvec *resp;
 	struct rusage *ru = &cp->rusage;
+	int i;
 
-	resp = kvvec_init(12); /* how many key/value pairs do we need? */
+	resp = kvvec_init(12 + cp->request->kv_pairs); /* how many key/value pairs do we need? */
 
 	gettimeofday(&cp->stop, NULL);
 
@@ -198,7 +200,18 @@ static int finish_job(child_process *cp, int reason)
 
 	cp->runtime = tv_delta_f(&cp->start, &cp->stop);
 
-	/* now build the return message */
+	/*
+	 * Now build the return message.
+	 * First comes the request, minus environment variables
+	 */
+	for (i = 0; i < cp->request->kv_pairs; i++) {
+		struct key_value *kv = cp->request->kv[i];
+		/* skip environment macros */
+		if (kv->key_len == 3 && !strcmp(kv->key, "env")) {
+			continue;
+		}
+		kvvec_addkv_wlen(resp, kv->key, kv->key_len, kv->value, kv->value_len);
+	}
 	kvvec_addkv(resp, "job_id", (char *)mkstr("%u", cp->id));
 	kvvec_addkv(resp, "wait_status", (char *)mkstr("%d", cp->ret));
 	kvvec_addkv_wlen(resp, "stdout", 6, cp->outstd.buf, cp->outstd.len);
@@ -223,7 +236,7 @@ static int finish_job(child_process *cp, int reason)
 
 	/*
 	 * we mustn't free() the key/value pairs here, as they're all
-	 * stack-allocated
+	 * stack-allocated or located in the request thing
 	 */
 	kvvec_destroy(resp, 0);
 
@@ -237,6 +250,7 @@ static int finish_job(child_process *cp, int reason)
 		cp->outerr.buf = NULL;
 	}
 
+	kvvec_destroy(cp->request, KVVEC_FREE_ALL);
 	free(cp->cmd);
 	free(cp);
 
@@ -413,6 +427,7 @@ static void spawn_job(struct kvvec *kvv)
 	running_jobs++;
 	wlog("Successfully started '%s'. Started: %d; Running: %d",
 		 cp->cmd, started, running_jobs);
+	cp->request = kvv;
 }
 
 static int receive_command(int sd, int events, void *discard)
@@ -445,7 +460,6 @@ static int receive_command(int sd, int events, void *discard)
 		kvvec *kvv;
 		kvv = buf2kvvec(buf, size, '=', '\0');
 		spawn_job(kvv);
-		kvvec_destroy(kvv, KVVEC_FREE_ALL);
 	}
 	wlog("Done parsing input from master");
 
