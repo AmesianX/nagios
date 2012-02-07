@@ -263,7 +263,6 @@ static int check_completion(child_process *cp, int flags)
 {
 	int result, status;
 
-	wlog("checking completion for command '%s' with pid %d", cp->cmd, cp->pid);
 	if (!cp || !cp->pid) {
 		return 0;
 	}
@@ -287,7 +286,6 @@ static void gather_output(child_process *cp, iobuf *io)
 
 	other_io = io == &cp->outstd ? &cp->outerr : &cp->outstd;
 
-	wlog("Gathering output from '%s' with pid %d", cp->cmd, cp->pid);
 	for (;;) {
 		char buf[4096];
 		int rd;
@@ -371,15 +369,13 @@ child_process *parse_command_kvvec(struct kvvec *kvv)
 	 * found in the iocache where we read the command, which will
 	 * be overwritten when we receive one next
 	 */
-	wlog("parsing %d key/value pairs", kvv->kv_pairs);
 	for (i = 0; i < kvv->kv_pairs; i++) {
 		char *key = kvv->kv[i]->key;
 		char *value = kvv->kv[i]->value;
 		char *endptr;
-		wlog("parsing '%s=%s'", key ? key : "(null)", value ? value : "(null)");
+
 		if (!strcmp(key, "command")) {
 			cp->cmd = strdup(value);
-			wlog("Found command: '%s'", cp->cmd);
 			continue;
 		}
 		if (!strcmp(key, "job_id")) {
@@ -390,7 +386,6 @@ child_process *parse_command_kvvec(struct kvvec *kvv)
 			cp->timeout = (unsigned int)strtoul(value, &endptr, 0);
 			continue;
 		}
-		wlog("unknown key when parsing command: '%s=%s'", key, value);
 	}
 
 	/* jobs without a timeout get a default of 300 seconds. */
@@ -408,7 +403,6 @@ static void spawn_job(struct kvvec *kvv)
 	int result;
 	child_process *cp;
 
-	wlog("Parsing command");
 	cp = parse_command_kvvec(kvv);
 	if (!cp) {
 		job_error(NULL, kvv, "Failed to parse worker-command");
@@ -427,8 +421,6 @@ static void spawn_job(struct kvvec *kvv)
 
 	started++;
 	running_jobs++;
-	wlog("Successfully started '%s'. Started: %d; Running: %d",
-		 cp->cmd, started, running_jobs);
 	cp->request = kvv;
 }
 
@@ -442,8 +434,6 @@ static int receive_command(int sd, int events, void *discard)
 		ioc = iocache_create(65536);
 	}
 	ioc_ret = iocache_read(ioc, sd);
-
-	wlog("iocache_read() returned %d", ioc_ret);
 
 	/* master closed the connection, so we exit */
 	if (ioc_ret == 0) {
@@ -463,7 +453,6 @@ static int receive_command(int sd, int events, void *discard)
 		kvv = buf2kvvec(buf, size, '=', '\0');
 		spawn_job(kvv);
 	}
-	wlog("Done parsing input from master");
 
 	return 0;
 }
@@ -489,7 +478,6 @@ static void enter_worker(int sd)
 	}
 	iobroker_register(iobs, master_sd, NULL, receive_command);
 	while (iobroker_get_num_fds(iobs)) {
-		wlog("Polling iobroker socket set");
 		iobroker_poll(iobs, -1);
 		/*
 		 * if our parent goes away we can't really do anything
