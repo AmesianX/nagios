@@ -514,6 +514,11 @@ struct worker_process *spawn_worker(void (*init_func)(void *), void *init_arg)
 		worker->sd = sv[0];
 		worker->pid = pid;
 		worker->ioc = iocache_create(65536);
+
+		/* 1 socket for master, 2 fd's for each child */
+		worker->max_jobs = (iobroker_max_usable_fds() - 1) / 2;
+		worker->jobs = calloc(worker->max_jobs, sizeof(worker_job *));
+
 		return worker;
 	}
 

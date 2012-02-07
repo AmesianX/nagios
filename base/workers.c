@@ -13,6 +13,58 @@ static worker_process **workers;
 static unsigned int num_workers;
 static unsigned int worker_index;
 
+/* different jobtypes. We add more as needed */
+#define JOBTYPE_CHECK   0
+
+static worker_job *create_job(int type, void *arg, time_t timeout, const char *command)
+{
+	worker_job *job;
+
+	job = calloc(1, sizeof(*job));
+	if (!job)
+		return NULL;
+
+	job->type = type;
+	job->arg = arg;
+	job->timeout = timeout;
+	job->command = strdup(command);
+
+	return job;
+}
+
+static int get_job_id(worker_process *wp)
+{
+	return wp->job_index++ % wp->max_jobs;
+
+}
+
+static worker_job *get_job(worker_process *wp, int job_id)
+{
+	/*
+	 * XXX FIXME check job->id against job_id and do something if
+	 * they don't match
+	 */
+	return wp->jobs[job_id % wp->max_jobs];
+}
+
+static void destroy_job(worker_job *job)
+{
+	if (!job)
+		return;
+
+	my_free(job->command);
+
+	switch (job->type) {
+	case JOBTYPE_CHECK:
+		free_check_result(job->arg);
+		free(job->arg);
+		break;
+	default:
+		logit(NSLOG_RUNTIME_WARNING, TRUE, "Workers: Unknown job type: %d\n", job->type);
+		break;
+	}
+}
+
 /*
  * This gets called from both parent and worker process, so
  * we must take care not to blindly shut down everything here

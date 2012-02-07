@@ -14,12 +14,22 @@
 #define MSG_DELIM "\0\0"
 #define MSG_DELIM_LEN (sizeof(MSG_DELIM) - 1)
 
+typedef struct worker_job {
+	int id;         /* job id */
+	int type;
+	time_t timeout; /* timeout, in absolute time */
+	char *command;
+	void *arg;      /* any random argument */
+} worker_job;
+
 typedef struct worker_process {
 	int sd;
 	pid_t pid; /* pid of this worker */
-	unsigned int jobs, running;
+	int max_jobs;
 	struct timeval start;
 	iocache *ioc;
+	worker_job **jobs;
+	int job_index; /* this will wrap around, but that's ok */
 	struct worker_process *prev_wp, *next_wp;
 } worker_process;
 
