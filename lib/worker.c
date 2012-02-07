@@ -103,6 +103,7 @@ static void job_error(child_process *cp, kvvec *kvv, const char *fmt, ...)
 	va_end(ap);
 	kvvec_addkv_wlen(kvv, "error", 5, msg, len);
 	send_kvvec(master_sd, kvv);
+	kvvec_destroy(kvv, 0);
 }
 
 static float tv_delta_f(const struct timeval *start, const struct timeval *stop)
