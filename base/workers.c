@@ -249,6 +249,18 @@ static int handle_worker_result(int sd, int events, void *arg)
 	int ret;
 
 	ret = iocache_read(wp->ioc, wp->sd);
+	if (ret < 0) {
+		logit(NSLOG_RUNTIME_WARNING, TRUE, "iocache_read() from worker %d returned %d: %s\n",
+			  wp->pid, ret, strerror(errno));
+		return 0;
+	} else if (ret == 0) {
+		/*
+		 * XXX FIXME worker exited. spawn a new on to replace it
+		 * and distribute all unfinished jobs from this one to others
+		 */
+		return 0;
+	}
+
 	while ((buf = iocache_use_delim(wp->ioc, MSG_DELIM, MSG_DELIM_LEN, &size))) {
 		kvvec *kvv;
 		int job_id = -1;
