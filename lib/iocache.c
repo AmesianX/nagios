@@ -21,10 +21,15 @@ void iocache_destroy(iocache *ioc)
  */
 static inline void iocache_move_data(iocache *ioc)
 {
+	unsigned long available;
+
 	if (!ioc->ioc_offset)
 		return; /* nothing to do */
 
-	memmove(ioc->ioc_buf, ioc->ioc_buf + ioc->ioc_offset, iocache_available(ioc));
+	available = iocache_available(ioc);
+	memmove(ioc->ioc_buf, ioc->ioc_buf + ioc->ioc_offset, available);
+	ioc->ioc_offset = 0;
+	ioc->ioc_buflen = available;
 }
 
 int iocache_resize(iocache *ioc, unsigned long new_size)
