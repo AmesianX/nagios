@@ -9,7 +9,10 @@
  */
 #include "../include/nagios.h"
 #include "../include/workers.h"
+
 extern int service_check_timeout, host_check_timeout;
+extern int notification_timeout;
+
 iobroker_set *nagios_iobs = NULL;
 static worker_process **workers;
 static unsigned int num_workers;
@@ -17,6 +20,13 @@ static unsigned int worker_index;
 
 /* different jobtypes. We add more as needed */
 #define JOBTYPE_CHECK   0
+#define JOBTYPE_NOTIFY  1
+
+typedef struct wproc_notify_job {
+	char *contact_name;
+	char *host_name;
+	char *service_description;
+} wproc_notify_job;
 
 static worker_job *create_job(int type, void *arg, time_t timeout, const char *command)
 {
@@ -59,6 +69,16 @@ static void destroy_job(worker_job *job)
 	switch (job->type) {
 	case JOBTYPE_CHECK:
 		free_check_result(job->arg);
+		free(job->arg);
+		break;
+	case JOBTYPE_NOTIFY:
+		{
+			wproc_notify_job *nj = (wproc_notify_job *)job->arg;
+			free(nj->contact_name);
+			free(nj->host_name);
+			if (nj->service_description)
+				free(nj->service_description);
+		}
 		free(job->arg);
 		break;
 	default:
@@ -215,6 +235,12 @@ static int handle_worker_check(kvvec *kvv, worker_process *wp, worker_job *job)
 	return result;
 }
 
+static int handle_worker_notification(kvvec *kvv, worker_process *wp, worker_job *job)
+{
+	/* XXX FIXME check if notification failed and log it */
+	return 0;
+}
+
 static int handle_worker_result(int sd, int events, void *arg)
 {
 	worker_process *wp = (worker_process *)arg;
@@ -277,6 +303,9 @@ static int handle_worker_result(int sd, int events, void *arg)
 		switch (job->type) {
 		case JOBTYPE_CHECK:
 			ret = handle_worker_check(kvv, wp, job);
+			break;
+		case JOBTYPE_NOTIFY:
+			ret = handle_worker_notification(kvv, wp, job);
 			break;
 		default:
 			logit(NSLOG_RUNTIME_WARNING, TRUE, "Worker %d: Unknown jobtype: %d\n", wp->pid, job->type);
@@ -433,6 +462,22 @@ static int wproc_run_job(worker_job *job, nagios_macros *mac)
 	kvvec_destroy(kvv, 0);
 
 	return 0;
+}
+
+int wproc_notify(char *cname, char *hname, char *sdesc, char *cmd, nagios_macros *mac)
+{
+	worker_job *job;
+	wproc_notify_job *notify;
+
+	notify = calloc(1, sizeof(*notify));
+	notify->contact_name = strdup(cname);
+	notify->host_name = strdup(hname);
+	if (sdesc) {
+		notify->service_description = strdup(sdesc);
+	}
+	job = create_job(JOBTYPE_NOTIFY, notify, notification_timeout, cmd);
+
+	return wproc_run_job(job, mac);
 }
 
 int wproc_run_check(check_result *cr, char *cmd, nagios_macros *mac)
