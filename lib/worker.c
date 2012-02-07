@@ -215,7 +215,6 @@ static int finish_job(child_process *cp, int reason)
 		}
 		kvvec_addkv_wlen(resp, kv->key, kv->key_len, kv->value, kv->value_len);
 	}
-	kvvec_addkv(resp, "job_id", (char *)mkstr("%u", cp->id));
 	kvvec_addkv(resp, "wait_status", (char *)mkstr("%d", cp->ret));
 	kvvec_addkv_wlen(resp, "stdout", 6, cp->outstd.buf, cp->outstd.len);
 	kvvec_addkv_wlen(resp, "stderr", 6, cp->outerr.buf, cp->outerr.len);
