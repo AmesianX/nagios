@@ -8,6 +8,8 @@
  * code that can be reused for other things later.
  */
 #include "../include/nagios.h"
+#include "../include/workers.h"
+extern int service_check_timeout, host_check_timeout;
 iobroker_set *nagios_iobs = NULL;
 static worker_process **workers;
 static unsigned int num_workers;
@@ -113,32 +115,104 @@ static int str2timeval(char *str, struct timeval *tv)
 	return 0;
 }
 
-static int handle_check_result(check_result *cr)
+static int handle_worker_check(kvvec *kvv, worker_process *wp, worker_job *job)
 {
-	if (!cr->host_name)
-		return -1;
+	int i, result = ERROR;
+	check_result *cr = (check_result *)job->arg;
+	char *err_output;
+
+	/* kvv->kv[0] has "job_id"="xxx" if we end up here, so start at 1 */
+	for (i = 1; i < kvv->kv_pairs; i++) {
+		char *key, *value;
+		int val;
+
+		key = kvv->kv[i]->key;
+		value = kvv->kv[i]->value;
+
+		/*
+		 * This if() else if() thing should be replaced
+		 * with a list using binary lookups to make it
+		 * go a bit faster, since we expect to run this
+		 * routine several hundred thousand times per
+		 * minute.
+		 */
+		if (!strcmp(key, "type")) {
+			/*
+			 * XXX FIXME check that type is indeed JOBTYPE_CHECK
+			 * ignored for now though
+			 */
+		} else if (!strcmp(key, "timeout")) {
+			/*
+			 * XXX FIXME check for timeouts and set early_timeout
+			 * in case it did (since workers don't handle such
+			 * things all too well yet).
+			 * ignored for now though
+			 */
+		} else if (!strcmp(key, "start")) {
+			str2timeval(value, &cr->start_time);
+		} else if (!strcmp(key, "stop")) {
+			str2timeval(value, &cr->finish_time);
+		} else if (!strcmp(key, "error")) {
+			int val = atoi(value);
+			if (val == ETIME) {
+				cr->early_timeout = 1;
+			}
+		} else if (!strcmp(key, "stdout")) {
+			cr->output = strdup(value);
+		} else if (!strcmp(key, "stderr")) {
+			err_output = value; /* mustn't copy this one */
+		} else if (!strcmp(key, "wait_status")) {
+			val = atoi(value);
+			cr->exited_ok = WIFEXITED(val);
+			if (cr->exited_ok) {
+				cr->return_code = WEXITSTATUS(val);
+			}
+		} else if (!strcmp(key, "command")) {
+			/* ignored */
+			;
+		} else if (!strcmp(key, "runtime")) {
+			/* ignored */
+			;
+		} else if (!strcmp(key, "ru_utime")) {
+			str2timeval(value, &cr->rusage.ru_utime);
+		} else if (!strcmp(key, "ru_stime")) {
+			str2timeval(value, &cr->rusage.ru_stime);
+		} else if (!strcmp(key, "ru_minflt")) {
+			cr->rusage.ru_minflt = atoi(value);
+		} else if (!strcmp(key, "ru_majflt")) {
+			cr->rusage.ru_majflt = atoi(value);
+		} else if (!strcmp(key, "ru_nswap")) {
+			cr->rusage.ru_nswap = atoi(value);
+		} else if (!strcmp(key, "ru_inblock")) {
+			cr->rusage.ru_inblock = atoi(value);
+		} else if (!strcmp(key, "ru_oublock")) {
+			cr->rusage.ru_oublock = atoi(value);
+		} else if (!strcmp(key, "ru_nsignals")) {
+			cr->rusage.ru_nsignals = atoi(value);
+		} else {
+			logit(NSLOG_RUNTIME_WARNING, TRUE, "Unrecognized check result variable: (i=%d) %s=%s\n", i, key, value);
+		}
+	}
+
+	/*
+	 * XXX FIXME: this could be handled better so nagios actually
+	 * cares what plugins write on stderr in case of errors
+	 */
+	if (!cr->output && err_output)
+		cr->output = strdup(err_output);
 
 	if (cr->service_description) {
 		service *svc = find_service(cr->host_name, cr->service_description);
-		if (!svc) {
-			logit(NSLOG_RUNTIME_WARNING, TRUE,
-			      "Checkresult from worker for unknown service '%s' on host '%s'\n",
-			      cr->service_description, cr->host_name);
-			return -1;
-		}
-		return handle_async_service_check_result(svc, cr);
+		if (svc)
+			result = handle_async_service_check_result(svc, cr);
 	} else {
 		host *hst = find_host(cr->host_name);
-		if (!hst) {
-			logit(NSLOG_RUNTIME_WARNING, TRUE,
-			      "Checkresult from worker for unknown host '%s'\n",
-			      cr->host_name);
-			return -1;
-		}
-		return handle_async_host_check_result_3x(hst, cr);
+		if (hst)
+			result = handle_async_host_check_result_3x(hst, cr);
 	}
+	free_check_result(cr);
 
-	return -1;
+	return result;
 }
 
 static int handle_worker_result(int sd, int events, void *arg)
@@ -151,99 +225,62 @@ static int handle_worker_result(int sd, int events, void *arg)
 	ret = iocache_read(wp->ioc, wp->sd);
 	while ((buf = iocache_use_delim(wp->ioc, MSG_DELIM, MSG_DELIM_LEN, &size))) {
 		kvvec *kvv;
-		int i, is_check = 0;
-		check_result cr;
-		char *err_output = NULL;
+		int job_id = -1;
+		char *endptr, *key, *value;
+		worker_job *job;
 
 		kvv = buf2kvvec(buf, size, '=', '\0');
 		if (!kvv) {
+			/* XXX FIXME log an error */
 			continue;
 		}
-		memset(&cr, 0, sizeof(cr));
-		cr.object_check_type = HOST_CHECK;
-		cr.check_type = HOST_CHECK_ACTIVE;
-		cr.reschedule_check = TRUE;
-		for (i = 0; i < kvv->kv_pairs; i++) {
-			unsigned int job_id;
-			char *endptr, *key, *value;
-			int val;
 
-			key = kvv->kv[i]->key;
-			value = kvv->kv[i]->value;
+		key = kvv->kv[0]->key;
+		value = kvv->kv[0]->value;
 
-			/*
-			 * This if() else if() thing should be replaced
-			 * with a list using binary lookups to make it
-			 * go a bit faster, since we expect to run this
-			 * routine several hundred thousand times per
-			 * minute.
-			 */
-			if (!strcmp(key, "type")) {
-				if (strcmp(value, "check")) {
-					printf("Type isn't 'check'. Ignoring worker result\n");
-					break;
-				}
-				is_check = 1;
-			} else if (!strcmp(key, "job_id")) {
-				job_id = strtoul(value, &endptr, 10);
-			} else if (!strcmp(key, "host_name")) {
-				cr.host_name = value;
-			} else if (!strcmp(key, "service_description")) {
-				cr.service_description = value;
-				cr.object_check_type = SERVICE_CHECK;
-				cr.check_type = SERVICE_CHECK_ACTIVE;
-			} else if (!strcmp(key, "start")) {
-				str2timeval(value, &cr.start_time);
-			} else if (!strcmp(key, "stop")) {
-				str2timeval(value, &cr.finish_time);
-			} else if (!strcmp(key, "error")) {
-				int val = atoi(value);
-				if (val == ETIME) {
-					cr.early_timeout = 1;
-				}
-			} else if (!strcmp(key, "stdout")) {
-				cr.output = value;
-			} else if (!strcmp(key, "stderr")) {
-				err_output = value;
-			} else if (!strcmp(key, "wait_status")) {
-				val = atoi(value);
-				cr.exited_ok = WIFEXITED(val);
-				if (cr.exited_ok) {
-					cr.return_code = WEXITSTATUS(val);
-				}
-			} else if (!strcmp(key, "command")) {
-				/* ignored */
-				;
-			} else if (!strcmp(key, "runtime")) {
-				/* ignored */
-				;
-			} else if (!strcmp(key, "ru_utime")) {
-				str2timeval(value, &cr.rusage.ru_utime);
-			} else if (!strcmp(key, "ru_stime")) {
-				str2timeval(value, &cr.rusage.ru_stime);
-			} else if (!strcmp(key, "ru_minflt")) {
-				cr.rusage.ru_minflt = atoi(value);
-			} else if (!strcmp(key, "ru_majflt")) {
-				cr.rusage.ru_majflt = atoi(value);
-			} else if (!strcmp(key, "ru_nswap")) {
-				cr.rusage.ru_nswap = atoi(value);
-			} else if (!strcmp(key, "ru_inblock")) {
-				cr.rusage.ru_inblock = atoi(value);
-			} else if (!strcmp(key, "ru_oublock")) {
-				cr.rusage.ru_oublock = atoi(value);
-			} else if (!strcmp(key, "ru_nsignals")) {
-				cr.rusage.ru_nsignals = atoi(value);
-			} else if (!strcmp(key, "log")) {
-				logit(NSLOG_INFO_MESSAGE, TRUE, "worker %d: %s\n", wp->pid, value);
-			} else {
-				printf("Unrecognized check result variable: %s=%s\n", key, value);
-			}
+		/* log messages are handled first */
+		if (kvv->kv_pairs == 1 && !strcmp(key, "log")) {
+			logit(NSLOG_INFO_MESSAGE, TRUE, "worker %d: %s\n", wp->pid, value);
+			continue;
 		}
-		if (is_check) {
-			/* FIXME: this could be handled better... */
-			if (!cr.output && err_output)
-				cr.output = err_output;
-			handle_check_result(&cr);
+
+		/*
+		 * All others are real jobs.
+		 * Entry order must be:
+		 *   job_id
+		 *   timeout
+		 *   type
+		 *   command
+		 * since that's what we send and the workers have to copy our
+		 * request in their response
+		 */
+		/* min 6 for our 4 vars + output + wait_status */
+		if (kvv->kv_pairs < 6) {
+			logit(NSLOG_RUNTIME_WARNING, TRUE, "Insufficient key/value pairs (%d) in response from worker %d\n",
+				 kvv->kv_pairs, wp->pid);
+			continue;
+		}
+		if (strcmp("job_id", key)) {
+			/* worker is loony. Disregard this message */
+			logit(NSLOG_RUNTIME_WARNING, TRUE, "First key/value pair of worker response is '%s=%s', not 'job_id=<int>'. Ignoring.\n",
+				  key, value);
+			continue;
+		}
+		job_id = (int)strtol(kvv->kv[0]->value, &endptr, 10);
+		job = get_job(wp, job_id);
+		if (!job) {
+			logit(NSLOG_RUNTIME_WARNING, TRUE, "Worker job with id '%d' doesn't exist on worker %d.\n",
+				  job_id, wp->pid);
+			continue;
+		}
+
+		switch (job->type) {
+		case JOBTYPE_CHECK:
+			ret = handle_worker_check(kvv, wp, job);
+			break;
+		default:
+			logit(NSLOG_RUNTIME_WARNING, TRUE, "Worker %d: Unknown jobtype: %d\n", wp->pid, job->type);
+			break;
 		}
 		kvvec_destroy(kvv, KVVEC_FREE_ALL);
 	}
@@ -322,7 +359,7 @@ int init_workers(int desired_workers)
 	return 0;
 }
 
-static worker_process *get_worker(void)
+static worker_process *get_worker(worker_job *job)
 {
 	worker_process *wp = NULL;
 	int i;
@@ -331,7 +368,14 @@ static worker_process *get_worker(void)
 		return NULL;
 	}
 
-	return workers[worker_index++ % num_workers];
+	wp = workers[worker_index++ % num_workers];
+	job->id = get_job_id(wp);
+
+	if (job->id < 0) {
+		/* XXX FIXME Fiddle with finding a new, less busy, worker here */
+	}
+	wp->jobs[job->id % wp->max_jobs] = job;
+	return wp;
 
 	/* dead code below. for now */
 	for (i = 0; i < num_workers; i++) {
@@ -348,29 +392,59 @@ static worker_process *get_worker(void)
 		if (wp)
 			return wp;
 	}
+
+	return NULL;
 }
 
-int wproc_run_check(char *hname, char *sdesc, char *cmd, nagios_macros *mac)
+/*
+ * Handles adding the command and macros to the kvvec,
+ * as well as shipping the command off to a designated
+ * worker
+ */
+static int wproc_run_job(worker_job *job, nagios_macros *mac)
 {
 	kvvec *kvv;
 	worker_process *wp;
 
-	kvv = kvvec_init(4);
+	/*
+	 * get_worker() also adds job to the workers list
+	 * and sets job_id
+	 */
+	wp = get_worker(job);
+	if (!wp || job->id < 0)
+		return ERROR;
+
+	/*
+	 * XXX FIXME: add environment macros as
+	 *  kvvec_addkv(kvv, "env", "NAGIOS_LALAMACRO=VALUE");
+	 *  kvvec_addkv(kvv, "env", "NAGIOS_LALAMACRO2=VALUE");
+	 * so workers know to add them to environment. For now,
+	 * we don't support that though.
+	 */
+	kvv = kvvec_init(4); /* job_id, type, command and timeout */
 	if (!kvv)
-		return -1;
+		return ERROR;
 
-	kvvec_addkv(kvv, "type", "check");
-	kvvec_addkv(kvv, "host_name", hname);
-	if (sdesc) {
-		kvvec_addkv(kvv, "service_description", sdesc);
-	}
-
-	kvvec_addkv(kvv, "command", cmd);
-
-	/* should also add support for environment macros here */
-
-	wp = get_worker();
+	kvvec_addkv(kvv, "job_id", (char *)mkstr("%d", job->id));
+	kvvec_addkv(kvv, "type", (char *)mkstr("%d", job->type));
+	kvvec_addkv(kvv, "command", job->command);
+	kvvec_addkv(kvv, "timeout", (char *)mkstr("%u", job->timeout));
 	send_kvvec(wp->sd, kvv);
 	kvvec_destroy(kvv, 0);
+
 	return 0;
+}
+
+int wproc_run_check(check_result *cr, char *cmd, nagios_macros *mac)
+{
+	worker_job *job;
+	time_t timeout;
+
+	if (cr->service_description)
+		timeout = service_check_timeout;
+	else
+		timeout = host_check_timeout;
+
+	job = create_job(JOBTYPE_CHECK, cr, timeout, cmd);
+	return wproc_run_job(job, mac);
 }

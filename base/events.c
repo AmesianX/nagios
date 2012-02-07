@@ -30,6 +30,7 @@
 #include "../include/nagios.h"
 #include "../include/broker.h"
 #include "../include/sretention.h"
+#include "../include/workers.h"
 
 
 extern char	*config_file;
