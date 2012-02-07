@@ -31,6 +31,7 @@
 #include "../include/nagios.h"
 #include "../include/broker.h"
 #include "../include/neberrors.h"
+#include "../include/workers.h"
 
 extern notification    *notification_list;
 extern contact         *contact_list;
@@ -694,8 +695,6 @@ int notify_contact_of_service(nagios_macros *mac, contact *cntct, service *svc, 
 	char *processed_command = NULL;
 	char *temp_buffer = NULL;
 	char *processed_buffer = NULL;
-	int early_timeout = FALSE;
-	double exectime;
 	struct timeval start_time, end_time;
 	struct timeval method_start_time, method_end_time;
 	int macro_options = STRIP_ILLEGAL_MACRO_CHARS | ESCAPE_MACRO_CHARS;
@@ -803,13 +802,8 @@ int notify_contact_of_service(nagios_macros *mac, contact *cntct, service *svc, 
 			my_free(processed_buffer);
 			}
 
-		/* run the notification command */
-		my_system_r(mac, processed_command, notification_timeout, &early_timeout, &exectime, NULL, 0);
-
-		/* check to see if the notification command timed out */
-		if(early_timeout == TRUE) {
-			logit(NSLOG_SERVICE_NOTIFICATION | NSLOG_RUNTIME_WARNING, TRUE, "Warning: Contact '%s' service notification command '%s' timed out after %d seconds\n", cntct->name, processed_command, notification_timeout);
-			}
+		/* run the notification command on a worker */
+		wproc_notify(cntct->name, svc->host_name, svc->description, processed_command, mac);
 
 		/* free memory */
 		my_free(command_name);
@@ -1603,8 +1597,6 @@ int notify_contact_of_host(nagios_macros *mac, contact *cntct, host *hst, int ty
 	char *processed_buffer = NULL;
 	char *raw_command = NULL;
 	char *processed_command = NULL;
-	int early_timeout = FALSE;
-	double exectime;
 	struct timeval start_time;
 	struct timeval end_time;
 	struct timeval method_start_time;
@@ -1714,13 +1706,8 @@ int notify_contact_of_host(nagios_macros *mac, contact *cntct, host *hst, int ty
 			my_free(processed_buffer);
 			}
 
-		/* run the notification command */
-		my_system_r(mac, processed_command, notification_timeout, &early_timeout, &exectime, NULL, 0);
-
-		/* check to see if the notification timed out */
-		if(early_timeout == TRUE) {
-			logit(NSLOG_HOST_NOTIFICATION | NSLOG_RUNTIME_WARNING, TRUE, "Warning: Contact '%s' host notification command '%s' timed out after %d seconds\n", cntct->name, processed_command, notification_timeout);
-			}
+		/* run the notification command through a worker */
+		wproc_notify(cntct->name, hst->name, NULL, processed_command, mac);
 
 		/* free memory */
 		my_free(command_name);
