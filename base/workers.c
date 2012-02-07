@@ -329,9 +329,9 @@ static int handle_worker_result(int sd, int events, void *arg)
 	return 0;
 }
 
-void wproc_poll(int ms)
+void wproc_poll(int timeout_ms)
 {
-	iobroker_poll(nagios_iobs, ms);
+	iobroker_poll(nagios_iobs, timeout_ms);
 }
 
 static int init_iobroker(void)
