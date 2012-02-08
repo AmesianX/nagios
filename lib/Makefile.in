@@ -9,7 +9,7 @@ LIBNAME = libnagios.a
 all: $(LIBNAME)
 
 SNPRINTF_O=@SNPRINTF_O@
-SRC_C := worker.c runcmd.c iobroker.c iocache.c kvvec.c
+SRC_C := worker.c runcmd.c iobroker.c iocache.c kvvec.c squeue.c
 SRC_O := $(patsubst %.c,%.o,$(SRC_C)) $(SNPRINTF_O)
 
 %.o: %.c %.h Makefile
