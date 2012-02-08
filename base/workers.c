@@ -102,6 +102,29 @@ static void destroy_job(worker_process *wp, worker_job *job)
 	free(job);
 }
 
+static void free_wproc_memory(worker_process *wp)
+{
+	int i = 0, destroyed = 0;
+
+	if (!wp)
+		return;
+
+	iocache_destroy(wp->ioc);
+	wp->ioc = NULL;
+
+	for (i = 0; i < wp->max_jobs; i++) {
+		if (!wp->jobs[i])
+			continue;
+
+		destroy_job(wp, wp->jobs[i]);
+		/* we can (often) break out early */
+		if (++destroyed >= wp->jobs_running)
+			break;
+	}
+
+	free(wp->jobs);
+}
+
 /*
  * This gets called from both parent and worker process, so
  * we must take care not to blindly shut down everything here
@@ -114,12 +137,16 @@ void free_worker_memory(void)
 		if (!workers[i])
 			continue;
 
-		iocache_destroy(workers[i]->ioc);
-		close(workers[i]->sd);
+		/* workers die when master socket close()s */
+		iobroker_close(nagios_iobs, workers[i]->sd);
+		free_wproc_memory(workers[i]);
 		my_free(workers[i]);
 	}
 	iobroker_destroy(nagios_iobs, 0);
 	nagios_iobs = NULL;
+	workers = NULL;
+	num_workers = 0;
+	worker_index = 0;
 }
 
 /*
@@ -375,6 +402,8 @@ int init_workers(int desired_workers)
 		desired_workers = 4;
 	}
 
+	init_iobroker();
+
 	/* can't shrink the number of workers (yet) */
 	if (desired_workers < num_workers)
 		return -1;
@@ -392,33 +421,22 @@ int init_workers(int desired_workers)
 
 		free(workers);
 	}
-	for (i = num_workers; i < desired_workers; i++) {
+
+	workers = wps;
+	for (; num_workers < desired_workers; num_workers++) {
 		worker_process *wp;
 
 		wp = spawn_worker(worker_init_func, (void *)get_global_macros());
 		if (!wp) {
-			/* XXX: what to do? */
-		} else {
-			wps[i] = wp;
+			logit(NSLOG_RUNTIME_WARNING, TRUE, "Failed to spawn worker: %s\n", strerror(errno));
+			free_worker_memory();
+			return ERROR;
 		}
-	}
 
-	init_iobroker();
-
-	/*
-	 * second pass. We do this in two rounds to avoid letting
-	 * lately spawned workers inherit a lot of allocated memory
-	 * used to set up their previously spawned brethren.
-	 * XXX: Later we'll have to deal with that, to let workers
-	 * respawn if they leak memory (embedded perl, anyone?),
-	 * but for now that will have to wait.
-	 */
-	for (i = num_workers; i < desired_workers; i++) {
-		worker_process *wp = wps[i];
+		wps[num_workers] = wp;
 		iobroker_register(nagios_iobs, wp->sd, wp, handle_worker_result);
 	}
-	num_workers = desired_workers;
-	workers = wps;
+
 	return 0;
 }
 
