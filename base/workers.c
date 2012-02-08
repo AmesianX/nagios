@@ -93,6 +93,15 @@ static void destroy_job(worker_process *wp, worker_job *job)
 		}
 		free(job->arg);
 		break;
+
+	case WPJOB_OCSP:
+	case WPJOB_OCHP:
+	case WPJOB_GLOBAL_SVC_EVTHANDLER:
+	case WPJOB_SVC_EVTHANDLER:
+	case WPJOB_GLOBAL_HOST_EVTHANDLER:
+	case WPJOB_HOST_EVTHANDLER:
+		/* these require nothing special */
+		break;
 	default:
 		logit(NSLOG_RUNTIME_WARNING, TRUE, "Workers: Unknown job type: %d\n", job->type);
 		break;
@@ -372,6 +381,7 @@ static int handle_worker_result(int sd, int events, void *arg)
 			break;
 		}
 		kvvec_destroy(kvv, KVVEC_FREE_ALL);
+		destroy_job(wp, job);
 		wp->jobs_running--;
 	}
 
