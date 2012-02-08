@@ -501,3 +501,12 @@ int wproc_run_check(check_result *cr, char *cmd, nagios_macros *mac)
 	job = create_job(WPJOB_CHECK, cr, timeout, cmd);
 	return wproc_run_job(job, mac);
 }
+
+int wproc_run(int jtype, char *cmd, int timeout, nagios_macros *mac)
+{
+	worker_job *job;
+	time_t real_timeout = timeout + time(NULL);
+
+	job = create_job(jtype, NULL, real_timeout, cmd);
+	return wproc_run_job(job, mac);
+}
