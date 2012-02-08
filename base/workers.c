@@ -55,7 +55,7 @@ static worker_job *get_job(worker_process *wp, int job_id)
 	return wp->jobs[job_id % wp->max_jobs];
 }
 
-static void destroy_job(worker_job *job)
+static void destroy_job(worker_process *wp, worker_job *job)
 {
 	if (!job)
 		return;
@@ -81,6 +81,9 @@ static void destroy_job(worker_job *job)
 		logit(NSLOG_RUNTIME_WARNING, TRUE, "Workers: Unknown job type: %d\n", job->type);
 		break;
 	}
+
+	wp->jobs[job->id % wp->max_jobs] = NULL;
+	free(job);
 }
 
 /*
