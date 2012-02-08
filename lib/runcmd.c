@@ -106,6 +106,7 @@ int cmd2strv(const char *str, int *out_argc, char **out_argv)
 
 	set_state(STATE_NONE);
 	len = strlen(str);
+
 	argz = malloc(len + 10);
 	for (i = 0; i < len; i++) {
 		const char *p = &str[i];
@@ -271,7 +272,7 @@ np_runcmd_open(const char *cmd, int *pfd, int *pfderr, char **env)
 		NP_RUNCMD_INIT;
 
 	/* if no command was passed, return with no error */
-	if (!cmd)
+	if (!cmd || !*cmd)
 		return -1;
 
 	cmdlen = strlen(cmd);
@@ -356,7 +357,11 @@ np_runcmd_open(const char *cmd, int *pfd, int *pfderr, char **env)
 
 		i = execvp(argv[0], argv);
 		fprintf(stderr, "execvp() failed. errno is %d: %s\n", errno, strerror(errno));
-		_exit (123);
+		if (!cmd2strv_errors)
+			free(argv[0]);
+		else
+			free(argv[2]);
+		exit (123);
 	}
 
 	/* parent picks up execution here */
