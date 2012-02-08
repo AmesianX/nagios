@@ -18,10 +18,6 @@ static worker_process **workers;
 static unsigned int num_workers;
 static unsigned int worker_index;
 
-/* different jobtypes. We add more as needed */
-#define JOBTYPE_CHECK   0
-#define JOBTYPE_NOTIFY  1
-
 typedef struct wproc_notify_job {
 	char *contact_name;
 	char *host_name;
@@ -67,11 +63,11 @@ static void destroy_job(worker_job *job)
 	my_free(job->command);
 
 	switch (job->type) {
-	case JOBTYPE_CHECK:
+	case WPJOB_CHECK:
 		free_check_result(job->arg);
 		free(job->arg);
 		break;
-	case JOBTYPE_NOTIFY:
+	case WPJOB_NOTIFY:
 		{
 			wproc_notify_job *nj = (wproc_notify_job *)job->arg;
 			free(nj->contact_name);
@@ -158,7 +154,7 @@ static int handle_worker_check(kvvec *kvv, worker_process *wp, worker_job *job)
 		 */
 		if (!strcmp(key, "type")) {
 			/*
-			 * XXX FIXME check that type is indeed JOBTYPE_CHECK
+			 * XXX FIXME check that type is indeed WPJOB_CHECK
 			 * ignored for now though
 			 */
 		} else if (!strcmp(key, "timeout")) {
@@ -313,10 +309,10 @@ static int handle_worker_result(int sd, int events, void *arg)
 		}
 
 		switch (job->type) {
-		case JOBTYPE_CHECK:
+		case WPJOB_CHECK:
 			ret = handle_worker_check(kvv, wp, job);
 			break;
-		case JOBTYPE_NOTIFY:
+		case WPJOB_NOTIFY:
 			ret = handle_worker_notification(kvv, wp, job);
 			break;
 		default:
@@ -487,7 +483,7 @@ int wproc_notify(char *cname, char *hname, char *sdesc, char *cmd, nagios_macros
 	if (sdesc) {
 		notify->service_description = strdup(sdesc);
 	}
-	job = create_job(JOBTYPE_NOTIFY, notify, notification_timeout, cmd);
+	job = create_job(WPJOB_NOTIFY, notify, notification_timeout, cmd);
 
 	return wproc_run_job(job, mac);
 }
@@ -502,6 +498,6 @@ int wproc_run_check(check_result *cr, char *cmd, nagios_macros *mac)
 	else
 		timeout = host_check_timeout;
 
-	job = create_job(JOBTYPE_CHECK, cr, timeout, cmd);
+	job = create_job(WPJOB_CHECK, cr, timeout, cmd);
 	return wproc_run_job(job, mac);
 }
