@@ -240,10 +240,16 @@ static int handle_worker_check(kvvec *kvv, worker_process *wp, worker_job *job)
 		service *svc = find_service(cr->host_name, cr->service_description);
 		if (svc)
 			result = handle_async_service_check_result(svc, cr);
+		else
+			logit(NSLOG_RUNTIME_WARNING, TRUE, "Worker: Failed to locate service '%s' on host '%s'. Result from job %d (%s) will be dropped.\n",
+				  cr->service_description, cr->host_name, job->id, job->command);
 	} else {
 		host *hst = find_host(cr->host_name);
 		if (hst)
 			result = handle_async_host_check_result_3x(hst, cr);
+		else
+			logit(NSLOG_RUNTIME_WARNING, TRUE, "Worker: Failed to locate host '%s'. Result from job %d (%s) will be dropped.\n",
+				  cr->host_name, job->id, job->command);
 	}
 	free_check_result(cr);
 
