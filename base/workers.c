@@ -42,8 +42,24 @@ static worker_job *create_job(int type, void *arg, time_t timeout, const char *c
 
 static int get_job_id(worker_process *wp)
 {
-	return wp->job_index++ % wp->max_jobs;
+	int i;
 
+	/* if there can't be any jobs, we break out early */
+	if (wp->jobs_running == wp->max_jobs)
+		return -1;
+
+	/*
+	 * Locate a free job_id by checking oldest slots first.
+	 * This should result in us getting a slot fairly quickly
+	 */
+	for (i = wp->job_index; i < wp->job_index + wp->max_jobs; i++) {
+		if (!wp->jobs[i % wp->max_jobs]) {
+			wp->job_index = i % wp->max_jobs;
+			return wp->job_index;
+		}
+	}
+
+	return -1;
 }
 
 static worker_job *get_job(worker_process *wp, int job_id)
