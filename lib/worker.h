@@ -25,7 +25,7 @@ typedef struct worker_job {
 typedef struct worker_process {
 	int sd;
 	pid_t pid; /* pid of this worker */
-	int max_jobs;
+	int max_jobs, jobs_running, jobs_started;
 	struct timeval start;
 	iocache *ioc;
 	worker_job **jobs;

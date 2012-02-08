@@ -323,6 +323,7 @@ static int handle_worker_result(int sd, int events, void *arg)
 			break;
 		}
 		kvvec_destroy(kvv, KVVEC_FREE_ALL);
+		wp->jobs_running--;
 	}
 
 	return 0;
@@ -471,6 +472,8 @@ static int wproc_run_job(worker_job *job, nagios_macros *mac)
 	kvvec_addkv(kvv, "timeout", (char *)mkstr("%u", job->timeout));
 	send_kvvec(wp->sd, kvv);
 	kvvec_destroy(kvv, 0);
+	wp->jobs_running++;
+	wp->jobs_started++;
 
 	return 0;
 }
