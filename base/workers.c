@@ -260,6 +260,20 @@ static int handle_worker_check(kvvec *kvv, worker_process *wp, worker_job *job)
 			cr->rusage.ru_oublock = atoi(value);
 		} else if (!strcmp(key, "ru_nsignals")) {
 			cr->rusage.ru_nsignals = atoi(value);
+		} else if (!strcmp(key, "exited_ok")) {
+			cr->exited_ok = atoi(value);
+		} else if (!strcmp(key, "error")) {
+			cr->exited_ok = FALSE;
+			logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: Failed to run command '%s': %s\n", job->command, value);
+		} else if (!strcmp(key, "errcode")) {
+			cr->exited_ok = FALSE;
+			if (cr->service_description) {
+				logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: Check of service '%s' on host '%s' with command (%s) failed: %s",
+					 cr->service_description, cr->host_name, job->command, strerror(atoi(value)));
+			} else {
+				logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: Check of host '%s' with command (%s) failed: %s\n",
+					  cr->host_name, job->command, strerror(errno));
+			}
 		} else {
 			logit(NSLOG_RUNTIME_WARNING, TRUE, "Unrecognized check result variable: (i=%d) %s=%s\n", i, key, value);
 		}
