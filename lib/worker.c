@@ -12,8 +12,7 @@
 #include "iocache.h"
 #include "worker.h"
 
-typedef struct iobuf
-{
+typedef struct iobuf {
 	int fd;
 	unsigned int len;
 	char *buf;
