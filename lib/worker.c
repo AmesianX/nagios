@@ -10,6 +10,7 @@
 #include "kvvec.h"
 #include "iobroker.h"
 #include "iocache.h"
+#include "squeue.h"
 #include "worker.h"
 
 typedef struct iobuf {
@@ -30,9 +31,11 @@ typedef struct child_process {
 	iobuf outstd;
 	iobuf outerr;
 	kvvec *request;
+	squeue_event *sq_event;
 } child_process;
 
 static iobroker_set *iobs;
+static squeue *sq;
 static unsigned int started, running_jobs;
 static int master_sd;
 static int parent_pid;
@@ -103,6 +106,22 @@ static void job_error(child_process *cp, kvvec *kvv, const char *fmt, ...)
 	kvvec_addkv_wlen(kvv, "error", 5, msg, len);
 	send_kvvec(master_sd, kvv);
 	kvvec_destroy(kvv, 0);
+}
+
+static int tv_delta_msec(const struct timeval *start, const struct timeval *stop)
+{
+	int msecs;
+	unsigned long usecs = 0;
+
+	msecs = (stop->tv_sec - start->tv_sec) * 1000;
+	if (stop->tv_usec < start->tv_usec) {
+		msecs -= 1000;
+		usecs += 1000000;
+	}
+	usecs += stop->tv_usec - start->tv_usec;
+	msecs += (usecs / 1000);
+
+	return msecs;
 }
 
 static float tv_delta_f(const struct timeval *start, const struct timeval *stop)
@@ -195,6 +214,14 @@ static int finish_job(child_process *cp, int reason)
 
 	gettimeofday(&cp->stop, NULL);
 
+	/*
+	 * we must remove the job's timeout ticker,
+	 * or we'll end up accessing an already free()'d
+	 * pointer, or the pointer to a different child.
+	 */
+	squeue_remove(sq, cp->sq_event);
+	free(cp->sq_event);
+
 	/* get rid of still open filedescriptors */
 	if (cp->outstd.fd != -1)
 		iobroker_close(iobs, cp->outstd.fd);
@@ -222,7 +249,8 @@ static int finish_job(child_process *cp, int reason)
 	kvvec_add_tv(resp, "stop", cp->stop);
 	kvvec_addkv(resp, "runtime", (char *)mkstr("%f", cp->runtime));
 	if (!reason) {
-		/* child exited */
+		/* child exited nicely */
+		kvvec_addkv(resp, "exited_ok", "1");
 		kvvec_add_tv(resp, "ru_utime", ru->ru_utime);
 		kvvec_add_tv(resp, "ru_stime", ru->ru_stime);
 		kvvec_add_long(resp, "ru_minflt", ru->ru_minflt);
@@ -232,7 +260,9 @@ static int finish_job(child_process *cp, int reason)
 		kvvec_add_long(resp, "ru_oublock", ru->ru_oublock);
 		kvvec_add_long(resp, "ru_nsignals", ru->ru_nsignals);
 	} else {
-		kvvec_addkv(resp, "reason", (char *)mkstr("%d", reason));
+		/* some error happened */
+		kvvec_addkv(resp, "exited_ok", "0");
+		kvvec_addkv(resp, "errcode", (char *)mkstr("%d", reason));
 	}
 	send_kvvec(master_sd, resp);
 
@@ -272,12 +302,52 @@ static int check_completion(child_process *cp, int flags)
 		/* XXX: handle this better */
 	}
 
-	if (result == cp->pid || errno == ECHILD) {
+	if (result == cp->pid) {
 		cp->ret = status;
 		finish_job(cp, 0);
+		return 0;
 	}
 
-	return result;
+	if (errno == ECHILD) {
+		cp->ret = status;
+		finish_job(cp, errno);
+	}
+
+	return -errno;
+}
+
+static void kill_job(child_process *cp, int reason)
+{
+	/* brutal but efficient */
+	kill(cp->pid, SIGKILL);
+	finish_job(cp, reason);
+#ifdef PLAY_NICE_IN_kill_job
+	int i, sig = SIGTERM;
+
+	pid = cp->pid;
+
+	for (i = 0; i < 2; i++) {
+		/* check one last time if the job is done */
+		ret = check_completion(cp, WNOHANG);
+		if (!ret || ret == -ECHILD) {
+			/* check_completion ran finish_job() */
+			return;
+		}
+
+		/* not done, so signal it. SIGTERM first and check again */
+		errno = 0;
+		ret = kill(pid, sig);
+		if (ret < 0) {
+			finish_job(cp, -errno);
+		}
+		sig = SIGKILL;
+		check_completion(cp, WNOHANG);
+		if (ret < 0) {
+			finish_job(cp, errno);
+		}
+		usleep(50000);
+	}
+#endif /* PLAY_NICE_IN_kill_job */
 }
 
 static void gather_output(child_process *cp, iobuf *io)
@@ -388,13 +458,11 @@ child_process *parse_command_kvvec(struct kvvec *kvv)
 		}
 	}
 
-	/* jobs without a timeout get a default of 300 seconds. */
+	/* jobs without a timeout get a default of 60 seconds. */
 	if (!cp->timeout) {
-		cp->timeout = time(NULL) + 300;
-	} else {
-		/* timeout is passed in duration, but kept in absolute */
-		cp->timeout += time(NULL) + 1;
+		cp->timeout = 60;
 	}
+
 	return cp;
 }
 
@@ -422,6 +490,7 @@ static void spawn_job(struct kvvec *kvv)
 	started++;
 	running_jobs++;
 	cp->request = kvv;
+	cp->sq_event = squeue_add(sq, cp->timeout + time(NULL), cp);
 }
 
 static int receive_command(int sd, int events, void *discard)
@@ -476,9 +545,48 @@ static void enter_worker(int sd)
 		/* XXX: handle this a bit better */
 		worker_die("Worker failed to create io broker socket set");
 	}
+
+	/*
+	 * Create a modest scheduling queue that will be
+	 * more than enough for our needs
+	 */
+	sq = squeue_create(1024);
+
 	iobroker_register(iobs, master_sd, NULL, receive_command);
 	while (iobroker_get_num_fds(iobs)) {
-		iobroker_poll(iobs, -1);
+		int poll_time = -1;
+
+		/* check for timed out jobs */
+		for (;;) {
+			child_process *cp;
+			struct timeval now, tmo;
+			struct squeue_event *next_event;
+
+			/* stop when scheduling queue is empty */
+			next_event = squeue_peek(sq);
+			if (!next_event)
+				break;
+
+			cp = (child_process *)next_event->data;
+			tmo.tv_usec = cp->start.tv_usec;
+			tmo.tv_sec = cp->start.tv_sec + cp->timeout;
+			gettimeofday(&now, NULL);
+			poll_time = tv_delta_msec(&now, &tmo);
+			/*
+			 * A little extra takes care of rounding errors and
+			 * ensures we never kill a job before it times out.
+			 * 5 milliseconds is enough to take care of that.
+			 */
+			poll_time += 5;
+			if (poll_time > 0)
+				break;
+
+			/* this job timed out, so kill it */
+			kill_job(cp, ETIME);
+		}
+
+		iobroker_poll(iobs, poll_time);
+
 		/*
 		 * if our parent goes away we can't really do anything
 		 * sensible at all, so let's just break out and exit
