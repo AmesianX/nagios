@@ -293,15 +293,22 @@ static int finish_job(child_process *cp, int reason)
 static int check_completion(child_process *cp, int flags)
 {
 	int result, status;
+	time_t max_time;
 
 	if (!cp || !cp->pid) {
 		return 0;
 	}
 
-	result = wait4(cp->pid, &status, flags, &cp->rusage);
-	if (result == -1) {
-		/* XXX: handle this better */
-	}
+	max_time = time(NULL) + 1;
+
+	/*
+	 * we mustn't let EINTR interrupt us, since it could well
+	 * be a SIGCHLD from the properly exiting process doing it
+	 */
+	do {
+		errno = 0;
+		result = wait4(cp->pid, &status, flags, &cp->rusage);
+	} while (result == -1 && errno == EINTR && time(NULL) < max_time);
 
 	if (result == cp->pid) {
 		cp->ret = status;
