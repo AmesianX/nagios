@@ -15,3 +15,7 @@ Makefile
 *.la
 *.lo
 *.a
+*.gcno
+*.gcda
+*.gcov
+gmon.out
