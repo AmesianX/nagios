@@ -185,7 +185,7 @@ histogram.cgi: histogram.c $(CGIDEPS)
 
 clean:
 	rm -f $(CGIS)
-	rm -f *.o core gmon.out
+	rm -f *.o core gmon.out *.gcda *.gcno *.gcov
 	rm -f *~ *.*~
 
 distclean: clean

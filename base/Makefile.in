@@ -190,7 +190,7 @@ nagiostats: nagiostats.c $(SRC_INCLUDE)/locations.h
 $(OBJS): $(SRC_INCLUDE)/locations.h
 
 clean:
-	rm -f nagios nagiostats core *.o gmon.out
+	rm -f nagios nagiostats core *.o gmon.out *.gcno *.gcda *.gcov
 	rm -f *~ *.*~
 
 distclean: clean
