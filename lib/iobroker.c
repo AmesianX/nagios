@@ -14,7 +14,7 @@
  * epoll_*() is linux specific and was added to glibc 2.3.2, so we
  * check for 2.4 and use epoll() if we're on that version or later.
  */
-#if defined(__linux) && __GLIBC_PREREQ(2, 4)
+#if defined(__linux) && __GLIBC_PREREQ(2, 4) && !defined(IOBROKER_USES_SELECT) && !defined(IOBROKER_USES_POLL)
 #define IOBROKER_USES_EPOLL
 #endif
 
@@ -31,6 +31,14 @@
 #include <poll.h>
 #else
 #include <sys/select.h>
+#endif
+
+#if defined(IOBROKER_USES_EPOLL) && defined(IOBROKER_USES_POLL)
+# error "iobroker can't use both epoll() and poll()"
+#elif defined(IOBROKER_USES_EPOLL) && defined(IOBROKER_USES_SELECT)
+# error "iobroker can't use both epoll() and select()"
+#elif defined(IOBROKER_USEES_POLL) && defined(IOBROKER_USES_SELECT)
+# error "iobroker can't use both poll() and select()"
 #endif
 
 typedef struct {
