@@ -1180,10 +1180,6 @@ int event_execution_loop(void) {
 		else if((event_list_high == NULL || (current_time < event_list_high->run_time)) && (event_list_low == NULL || (current_time < event_list_low->run_time))) {
 
 			log_debug_info(DEBUGL_EVENTS, 2, "No events to execute at the moment.  Idling for a bit...\n");
-
-			/* check for external commands if we're supposed to check as often as possible */
-			if(command_check_interval == -1)
-				check_for_external_commands();
 			}
 
 		/* update status information occassionally - NagVis watches the NDOUtils DB to see if Nagios is alive */
@@ -1249,14 +1245,6 @@ int handle_timed_event(timed_event *event) {
 			/* run the host check */
 			temp_host = (host *)event->event_data;
 			perform_scheduled_host_check(temp_host, event->event_options, latency);
-			break;
-
-		case EVENT_COMMAND_CHECK:
-
-			log_debug_info(DEBUGL_EVENTS, 0, "** External Command Check Event\n");
-
-			/* check for external commands */
-			check_for_external_commands();
 			break;
 
 		case EVENT_LOG_ROTATION:

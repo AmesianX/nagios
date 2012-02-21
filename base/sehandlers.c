@@ -233,9 +233,6 @@ int handle_service_event(service *svc) {
 		run_service_event_handler(&mac, svc);
 	clear_volatile_macros_r(&mac);
 
-	/* check for external commands - the event handler may have given us some directives... */
-	check_for_external_commands();
-
 	return OK;
 	}
 
@@ -481,9 +478,6 @@ int handle_host_event(host *hst) {
 	/* run the event handler command if there is one */
 	if(hst->event_handler != NULL)
 		run_host_event_handler(&mac, hst);
-
-	/* check for external commands - the event handler may have given us some directives... */
-	check_for_external_commands();
 
 	return OK;
 	}

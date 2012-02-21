@@ -452,7 +452,7 @@ int init_check_result(check_result *);
 int free_check_result(check_result *);                  	/* frees memory associated with a host/service check result */
 int parse_check_output(char *, char **, char **, char **, int, int);
 int open_command_file(void);					/* creates the external command file as a named pipe (FIFO) and opens it for reading */
-int close_command_file(void);					/* closes and deletes the external command file (FIFO) */
+int delete_command_file(void);					/* deletes the external command file (FIFO) */
 
 
 /**** Monitoring/Event Handler Functions ****/
@@ -600,7 +600,6 @@ int query_update_api(void);                             /* checks to see if new 
 
 
 /**** External Command Functions ****/
-int check_for_external_commands(void);			/* checks for any external commands */
 int process_external_command1(char *);                  /* top-level external command processor */
 int process_external_command2(int, time_t, char *);	/* process an external command */
 int process_external_commands_from_file(char *, int);   /* process external commands in a file */
@@ -700,10 +699,9 @@ void disable_contact_host_notifications(contact *);     /* disables host notific
 void enable_contact_service_notifications(contact *);   /* enables service notifications for a specific contact */
 void disable_contact_service_notifications(contact *);  /* disables service notifications for a specific contact */
 
-int init_command_file_worker_thread(void);
+int init_command_file_iocache(void);
+int destroy_command_file_iocache(void);
 int shutdown_command_file_worker_thread(void);
-void * command_file_worker_thread(void *);
-void cleanup_command_file_worker_thread(void *);
 
 int submit_external_command(char *, int *);
 int submit_raw_external_command(char *, time_t *, int *);

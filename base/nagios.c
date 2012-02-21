@@ -717,9 +717,6 @@ int main(int argc, char **argv, char **env) {
 					/* shutdown the external command worker thread */
 					shutdown_command_file_worker_thread();
 
-					/* close and delete the external command file FIFO */
-					close_command_file();
-
 					/* cleanup embedded perl interpreter */
 					if(embedded_perl_initialized == TRUE)
 						deinit_embedded_perl();
@@ -783,6 +780,11 @@ int main(int argc, char **argv, char **env) {
 				nagios_pid = (int)getpid();
 				}
 
+			/*
+			 * fire up the worker processes.
+			 * XXX: get number of workers from config later
+			 */
+			init_workers(4);
 			/* open the command file (named pipe) for reading */
 			result = open_command_file();
 			if(result != OK) {
@@ -833,11 +835,6 @@ int main(int argc, char **argv, char **env) {
 			/* reset the restart flag */
 			sigrestart = FALSE;
 
-			/*
-			 * fire up the worker processes.
-			 * XXX: get number of workers from config later
-			 */
-			init_workers(4);
 #ifdef USE_EVENT_BROKER
 			/* send program data to broker */
 			broker_program_state(NEBTYPE_PROCESS_EVENTLOOPSTART, NEBFLAG_NONE, NEBATTR_NONE, NULL);
@@ -895,7 +892,6 @@ int main(int argc, char **argv, char **env) {
 			/* close and delete the external command file FIFO unless we're restarting */
 			if(sigrestart == FALSE) {
 				shutdown_command_file_worker_thread();
-				close_command_file();
 				}
 
 			/* cleanup embedded perl interpreter */
@@ -904,6 +900,8 @@ int main(int argc, char **argv, char **env) {
 
 			/* shutdown stuff... */
 			if(sigshutdown == TRUE) {
+
+				delete_command_file();
 
 				/* make sure lock file has been removed - it may not have been if we received a shutdown command */
 				if(daemon_mode == TRUE)
