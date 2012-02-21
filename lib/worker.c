@@ -167,9 +167,13 @@ void send_kvvec(int sd, struct kvvec *kvv)
 
 	/*
 	 * key=value, separated by nul bytes and two nul's
-	 * delimit one message from another
+	 * delimit one message from another. We need to cut
+	 * one from MSG_DELIM_LEN here though, since nul is
+	 * added unconditionally after each value as well
+	 * and we'd otherwise run into an off-by-one when
+	 * parsing the messages back into sensible order.
 	 */
-	kvvb = kvvec2buf(kvv, '=', '\0', MSG_DELIM_LEN);
+	kvvb = kvvec2buf(kvv, '=', '\0', MSG_DELIM_LEN - 1);
 	if (!kvvb) {
 		/*
 		 * XXX: do *something* sensible here to let the

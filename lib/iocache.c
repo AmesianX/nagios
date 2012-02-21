@@ -100,7 +100,7 @@ char *iocache_use_delim(iocache *ioc, const char *delim, size_t delim_len, unsig
 			unsigned long ioc_start;
 
 			/* ptr must point *after* the delimiter */
-			ptr += delim_len + 1;
+			ptr += delim_len;
 			ioc_start = (unsigned long)ioc->ioc_buf + ioc->ioc_offset;
 			*size = (unsigned long)ptr - ioc_start;
 
