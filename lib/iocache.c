@@ -96,7 +96,7 @@ char *iocache_use_delim(iocache *ioc, const char *delim, size_t delim_len, unsig
 		if (!ptr) {
 			return NULL;
 		}
-		if (ptr && !memcmp(ptr, delim, delim_len)) {
+		if (delim_len == 1 || !memcmp(ptr, delim, delim_len)) {
 			unsigned long ioc_start;
 
 			/* ptr must point *after* the delimiter */
