@@ -190,7 +190,7 @@ static int handle_worker_check(kvvec *kvv, worker_process *wp, worker_job *job)
 {
 	int i, result = ERROR;
 	check_result *cr = (check_result *)job->arg;
-	char *err_output;
+	char *err_output = NULL;
 
 	/* kvv->kv[0] has "job_id"="xxx" if we end up here, so start at 1 */
 	for (i = 1; i < kvv->kv_pairs; i++) {
