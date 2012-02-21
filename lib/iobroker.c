@@ -20,6 +20,13 @@
 
 #ifdef IOBROKER_USES_EPOLL
 #include <sys/epoll.h>
+/* these were added later */
+#ifndef EPOLLRDHUP
+# define EPOLLRDHUP 0
+#endif
+#ifndef EPOLLONESHOT
+# define EPOLLONESHOT 0
+#endif
 #elif !defined(IOBROKER_USES_SELECT)
 #include <poll.h>
 #else
