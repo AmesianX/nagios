@@ -44,7 +44,6 @@ extern time_t   last_command_check;
 extern int      sigshutdown;
 extern int      sigrestart;
 
-extern double   sleep_time;
 extern int      interval_length;
 extern int      service_inter_check_delay_method;
 extern int      host_inter_check_delay_method;
@@ -961,7 +960,6 @@ static int event_delay(void)
 /* this is the main event handler loop */
 int event_execution_loop(void) {
 	timed_event *temp_event = NULL;
-	timed_event sleep_event;
 	time_t last_time = 0L;
 	time_t current_time = 0L;
 	time_t last_status_update = 0L;
@@ -970,26 +968,12 @@ int event_execution_loop(void) {
 	int nudge_seconds;
 	host *temp_host = NULL;
 	service *temp_service = NULL;
-	struct timespec delay;
 	pid_t wait_result;
 
 
 	log_debug_info(DEBUGL_FUNCTIONS, 0, "event_execution_loop() start\n");
 
 	time(&last_time);
-
-	/* initialize fake "sleep" event */
-	sleep_event.event_type = EVENT_SLEEP;
-	sleep_event.run_time = last_time;
-	sleep_event.recurring = FALSE;
-	sleep_event.event_interval = 0L;
-	sleep_event.compensate_for_time_change = FALSE;
-	sleep_event.timing_func = NULL;
-	sleep_event.event_data = NULL;
-	sleep_event.event_args = NULL;
-	sleep_event.event_options = 0;
-	sleep_event.next = NULL;
-	sleep_event.prev = NULL;
 
 	while(1) {
 
@@ -1004,6 +988,9 @@ int event_execution_loop(void) {
 			}
 
 		poll_time_ms = 1000 * event_delay();
+		if (!poll_time_ms)
+			poll_time_ms = 250; /* always poll a short while */
+		log_debug_info(DEBUGL_PROCESS, 1, "polling I/O broker set for %lu msecs\n", poll_time_ms);
 		wproc_poll(poll_time_ms);
 
 		/* get the current time */
@@ -1187,24 +1174,6 @@ int event_execution_loop(void) {
 				else
 					my_free(temp_event);
 				}
-
-			/* wait a while so we don't hog the CPU... */
-			else {
-
-				log_debug_info(DEBUGL_EVENTS, 2, "Did not execute scheduled event.  Idling for a bit...\n");
-
-#ifdef USE_NANOSLEEP
-				delay.tv_sec = (time_t)sleep_time;
-				delay.tv_nsec = (long)((sleep_time - (double)delay.tv_sec) * 1000000000);
-				nanosleep(&delay, NULL);
-#else
-				delay.tv_sec = (time_t)sleep_time;
-				if(delay.tv_sec == 0L)
-					delay.tv_sec = 1;
-				delay.tv_nsec = 0L;
-				sleep((unsigned int)delay.tv_sec);
-#endif
-				}
 			}
 
 		/* we don't have anything to do at this moment in time... */
@@ -1215,33 +1184,6 @@ int event_execution_loop(void) {
 			/* check for external commands if we're supposed to check as often as possible */
 			if(command_check_interval == -1)
 				check_for_external_commands();
-
-			/* set time to sleep so we don't hog the CPU... */
-#ifdef USE_NANOSLEEP
-			delay.tv_sec = (time_t)sleep_time;
-			delay.tv_nsec = (long)((sleep_time - (double)delay.tv_sec) * 1000000000);
-#else
-			delay.tv_sec = (time_t)sleep_time;
-			if(delay.tv_sec == 0L)
-				delay.tv_sec = 1;
-			delay.tv_nsec = 0L;
-#endif
-
-#ifdef USE_EVENT_BROKER
-			/* populate fake "sleep" event */
-			sleep_event.run_time = current_time;
-			sleep_event.event_data = (void *)&delay;
-
-			/* send event data to broker */
-			broker_timed_event(NEBTYPE_TIMEDEVENT_SLEEP, NEBFLAG_NONE, NEBATTR_NONE, &sleep_event, NULL);
-#endif
-
-			/* wait a while so we don't hog the CPU... */
-#ifdef USE_NANOSLEEP
-			nanosleep(&delay, NULL);
-#else
-			sleep((unsigned int)delay.tv_sec);
-#endif
 			}
 
 		/* update status information occassionally - NagVis watches the NDOUtils DB to see if Nagios is alive */
