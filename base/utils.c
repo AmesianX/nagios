@@ -2682,7 +2682,7 @@ int open_command_file(void) {
 			}
 		}
 
-	/* open the command file for reading (non-blocked) - O_TRUNC flag cannot be used due to errors on some systems */
+	/* open the command file for reading (non-blocked) */
 	/* NOTE: file must be opened read-write for poll() to work */
 	if((command_file_fd = open(command_file, O_RDWR | O_NONBLOCK)) < 0) {
 
