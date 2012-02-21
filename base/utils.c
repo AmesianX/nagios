@@ -2608,7 +2608,6 @@ int free_check_result(check_result *info) {
 
 	my_free(info->host_name);
 	my_free(info->service_description);
-	my_free(info->output_file);
 	my_free(info->output);
 
 	return OK;
