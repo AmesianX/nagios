@@ -132,7 +132,7 @@ iocache *iocache_create(unsigned long size)
 
 int iocache_read(iocache *ioc, int fd)
 {
-	size_t to_read, bytes_read;
+	int to_read, bytes_read;
 
 	if (!ioc || !ioc->ioc_buf || fd < 0)
 		return -1;
