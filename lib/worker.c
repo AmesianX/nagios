@@ -485,6 +485,11 @@ static void spawn_job(struct kvvec *kvv)
 	int result;
 	child_process *cp;
 
+	if (!kvv) {
+		wlog("Received NULL command key/value vector. Bug in iocache.c or kvvec.c?");
+		return;
+	}
+
 	cp = parse_command_kvvec(kvv);
 	if (!cp) {
 		job_error(NULL, kvv, "Failed to parse worker-command");
