@@ -36,4 +36,5 @@ typedef struct worker_process {
 extern worker_process *spawn_worker(void (init_func)(void *), void *init_arg);
 extern void send_kvvec(int sd, kvvec *kvv);
 extern const char *mkstr(const char *fmt, ...);
+extern int tv_delta_msec(const struct timeval *start, const struct timeval *stop);
 #endif /* INCLUDE_worker_h__ */

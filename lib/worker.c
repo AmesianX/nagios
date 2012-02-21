@@ -109,7 +109,7 @@ static void job_error(child_process *cp, kvvec *kvv, const char *fmt, ...)
 	kvvec_destroy(kvv, 0);
 }
 
-static int tv_delta_msec(const struct timeval *start, const struct timeval *stop)
+int tv_delta_msec(const struct timeval *start, const struct timeval *stop)
 {
 	int msecs;
 	unsigned long usecs = 0;
