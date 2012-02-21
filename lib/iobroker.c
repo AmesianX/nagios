@@ -361,8 +361,10 @@ int iobroker_poll(iobroker_set *iobs, int timeout)
 		if (timeout >= 0) {
 			tv.tv_sec = timeout / 1000;
 			tv.tv_usec = (timeout % 1000) * 1000;
+			nfds = select(iobs->max_fds, &read_fds, NULL, NULL, &tv);
+		} else { /* timeout of -1 means poll indefinitely */
+			nfds = select(iobs->max_fds, &read_fds, NULL, NULL, NULL);
 		}
-		nfds = select(iobs->max_fds, &read_fds, NULL, NULL, &tv);
 		if (nfds < 0) {
 			return IOBROKER_ELIB;
 		}
