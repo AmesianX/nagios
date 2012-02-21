@@ -1840,54 +1840,9 @@ void sighandler(int sig) {
 	return;
 	}
 
-
-/* handle timeouts when executing service checks */
-/* 07/16/08 EG also called when parent process gets a TERM signal */
-void service_check_sighandler(int sig) {
-	struct timeval end_time;
-
-	/* get the current time */
-	gettimeofday(&end_time, NULL);
-
-#ifdef SERVICE_CHECK_TIMEOUTS_RETURN_UNKNOWN
-	check_result_info.return_code = STATE_UNKNOWN;
-#else
-	check_result_info.return_code = STATE_CRITICAL;
-#endif
-	check_result_info.finish_time = end_time;
-	check_result_info.early_timeout = TRUE;
-
-	/* write check result to file */
-	if(check_result_info.output_file_fp) {
-
-		fprintf(check_result_info.output_file_fp, "finish_time=%lu.%lu\n", check_result_info.finish_time.tv_sec, check_result_info.finish_time.tv_usec);
-		fprintf(check_result_info.output_file_fp, "early_timeout=%d\n", check_result_info.early_timeout);
-		fprintf(check_result_info.output_file_fp, "exited_ok=%d\n", check_result_info.exited_ok);
-		fprintf(check_result_info.output_file_fp, "return_code=%d\n", check_result_info.return_code);
-		fprintf(check_result_info.output_file_fp, "output=%s\n", "(Service Check Timed Out)");
-
-		/* close the temp file */
-		fclose(check_result_info.output_file_fp);
-
-		/* move check result to queue directory */
-		move_check_result_to_queue(check_result_info.output_file);
-		}
-
-	/* free check result memory */
-	free_check_result(&check_result_info);
-
-	/* try to kill the command that timed out by sending termination signal to our process group */
-	/* we also kill ourselves while doing this... */
-	kill((pid_t)0, SIGKILL);
-
-	/* force the child process (service check) to exit... */
-	_exit(STATE_CRITICAL);
-	}
-
-
-/* handle timeouts when executing host checks */
-/* 07/16/08 EG also called when parent process gets a TERM signal */
-void host_check_sighandler(int sig) {
+/* handle timeouts when executing on-demand host checks */
+void host_check_sighandler(int sig)
+{
 	struct timeval end_time;
 
 	/* get the current time */
@@ -1897,33 +1852,8 @@ void host_check_sighandler(int sig) {
 	check_result_info.finish_time = end_time;
 	check_result_info.early_timeout = TRUE;
 
-	/* write check result to file */
-	if(check_result_info.output_file_fp) {
-
-		fprintf(check_result_info.output_file_fp, "finish_time=%lu.%lu\n", check_result_info.finish_time.tv_sec, check_result_info.finish_time.tv_usec);
-		fprintf(check_result_info.output_file_fp, "early_timeout=%d\n", check_result_info.early_timeout);
-		fprintf(check_result_info.output_file_fp, "exited_ok=%d\n", check_result_info.exited_ok);
-		fprintf(check_result_info.output_file_fp, "return_code=%d\n", check_result_info.return_code);
-		fprintf(check_result_info.output_file_fp, "output=%s\n", "(Host Check Timed Out)");
-
-		/* close the temp file */
-		fclose(check_result_info.output_file_fp);
-
-		/* move check result to queue directory */
-		move_check_result_to_queue(check_result_info.output_file);
-		}
-
-	/* free check result memory */
-	free_check_result(&check_result_info);
-
-	/* try to kill the command that timed out by sending termination signal to our process group */
-	/* we also kill ourselves while doing this... */
-	kill((pid_t)0, SIGKILL);
-
-	/* force the child process (service check) to exit... */
-	_exit(STATE_CRITICAL);
-	}
-
+	/* XXX handle the checkresult here. For now, it's lost */
+}
 
 /* handle timeouts when executing commands via my_system_r() */
 void my_system_sighandler(int sig) {
