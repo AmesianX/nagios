@@ -2555,10 +2555,8 @@ static int handle_command_file_input(int fd, int events, void *discard)
 	struct timeval start, now;
 
 	log_debug_info(DEBUGL_EXTERNALCOMMANDS, 1, "Input available on external command pipe\n");
-	printf("Input available on external command pipe\n");
 	gettimeofday(&start, NULL);
 	errno = 0;
-
 	do {
 		ret = iocache_read(cmdfile_ioc, fd);
 		buf = cmdfile_ioc->ioc_buf + cmdfile_ioc->ioc_offset;
@@ -2568,10 +2566,9 @@ static int handle_command_file_input(int fd, int events, void *discard)
 			break;
 		if (!ret)
 			break;
-		write(fileno(stdout), cmdfile_ioc->ioc_buf, cmdfile_ioc->ioc_buflen);
 		while ((cmd = iocache_use_delim(cmdfile_ioc, "\n", 1, &cmdlen))) {
 			processed++;
-			log_debug_info(DEBUGL_EXTERNALCOMMANDS, 1, "external command is %lu bytes: %s\n", cmdlen, cmd);
+			log_debug_info(DEBUGL_EXTERNALCOMMANDS, 1, "External command is %lu bytes: %s\n", cmdlen, cmd);
 			process_external_command1(cmd);
 		}
 		gettimeofday(&now, NULL);
@@ -3102,7 +3099,6 @@ int file_uses_embedded_perl(char *fname) {
 /* initializes command file worker thread */
 int init_command_file_iocache(void) {
 	cmdfile_ioc = iocache_create(16384);
-	printf("cmdfile_ioc->ioc_buf: %p\n", cmdfile_ioc->ioc_buf);
 	return cmdfile_ioc ? OK : ERROR;
 	}
 
