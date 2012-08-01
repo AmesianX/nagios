@@ -61,7 +61,6 @@
 #define DEFAULT_SLEEP_TIME      				0.5    	/* seconds between event run checks */
 #define DEFAULT_INTERVAL_LENGTH 				60     	/* seconds per interval unit for check scheduling */
 #define DEFAULT_RETRY_INTERVAL  				30	/* services are retried in 30 seconds if they're not OK */
-#define DEFAULT_COMMAND_CHECK_INTERVAL				-1	/* interval to check for external commands (default = as often as possible) */
 #define DEFAULT_CHECK_REAPER_INTERVAL				10	/* interval in seconds to reap host and service check results */
 #define DEFAULT_MAX_REAPER_TIME                 		30      /* maximum number of seconds to spend reaping service checks before we break out for a while */
 #define DEFAULT_MAX_CHECK_RESULT_AGE				3600    /* maximum number of seconds that a check result file is considered to be valid */
@@ -243,6 +242,7 @@
 #define EVENT_RESCHEDULE_CHECKS		14      /* adjust scheduling of host and service checks */
 #define EVENT_EXPIRE_COMMENT            15      /* removes expired comments */
 #define EVENT_CHECK_PROGRAM_UPDATE      16      /* checks for new version of Nagios */
+#define EVENT_JOB_TIMEOUT               17      /* lets us know if a job timed out */
 #define EVENT_SLEEP                     98      /* asynchronous sleep event that occurs when event queues are empty */
 #define EVENT_USER_FUNCTION             99      /* USER-defined function (modules) */
 
@@ -309,7 +309,6 @@ typedef struct check_result_struct {
 	int reschedule_check;                           /* should we reschedule the next check */
 	char *output_file;                              /* what file is the output stored in? */
 	FILE *output_file_fp;
-	int output_file_fd;
 	double latency;
 	struct timeval start_time;			/* time the service check was initiated */
 	struct timeval finish_time;			/* time the service check was completed */
@@ -348,19 +347,6 @@ typedef struct sched_info_struct {
 	} sched_info;
 
 
-/* PASSIVE_CHECK_RESULT structure */
-typedef struct passive_check_result_struct {
-	int object_check_type;
-	char *host_name;
-	char *service_description;
-	int return_code;
-	char *output;
-	time_t check_time;
-	double latency;
-	struct passive_check_result_struct *next;
-	} passive_check_result;
-
-
 /* CIRCULAR_BUFFER structure - used by worker threads */
 typedef struct circular_buffer_struct {
 	void            **buffer;
@@ -369,7 +355,6 @@ typedef struct circular_buffer_struct {
 	int             items;
 	int		high;		/* highest number of items that has ever been stored in buffer */
 	unsigned long   overflow;
-	pthread_mutex_t buffer_lock;
 	} circular_buffer;
 
 
@@ -392,18 +377,6 @@ typedef struct check_stats_struct {
 	int minute_stats[3];
 	time_t last_update;
 	} check_stats;
-
-
-/******************* THREAD STUFF ********************/
-
-	/* slots in circular buffers */
-#define DEFAULT_EXTERNAL_COMMAND_BUFFER_SLOTS     4096
-
-	/* worker threads */
-#define TOTAL_WORKER_THREADS              1
-
-#define COMMAND_WORKER_THREAD		  0
-
 
 
 /******************** FUNCTIONS **********************/
@@ -597,7 +570,6 @@ int query_update_api(void);                             /* checks to see if new 
 
 
 /**** External Command Functions ****/
-int check_for_external_commands(void);			/* checks for any external commands */
 int process_external_command1(char *);                  /* top-level external command processor */
 int process_external_command2(int, time_t, char *);	/* process an external command */
 int process_external_commands_from_file(char *, int);   /* process external commands in a file */
@@ -675,7 +647,6 @@ void enable_service_freshness_checks(void);		/* enable service freshness checks 
 void disable_service_freshness_checks(void);		/* disable service freshness checks */
 void enable_host_freshness_checks(void);		/* enable host freshness checks */
 void disable_host_freshness_checks(void);		/* disable host freshness checks */
-void process_passive_checks(void);                      /* processes passive host and service check results */
 void enable_all_failure_prediction(void);               /* enables failure prediction on a program-wide basis */
 void disable_all_failure_prediction(void);              /* disables failure prediction on a program-wide basis */
 void enable_performance_data(void);                     /* enables processing of performance data on a program-wide basis */
@@ -697,13 +668,8 @@ void disable_contact_host_notifications(contact *);     /* disables host notific
 void enable_contact_service_notifications(contact *);   /* enables service notifications for a specific contact */
 void disable_contact_service_notifications(contact *);  /* disables service notifications for a specific contact */
 
-int init_command_file_worker_thread(void);
-int shutdown_command_file_worker_thread(void);
-void * command_file_worker_thread(void *);
-void cleanup_command_file_worker_thread(void *);
-
-int submit_external_command(char *, int *);
-int submit_raw_external_command(char *, time_t *, int *);
+int launch_command_file_worker(void);
+int shutdown_command_file_worker(void);
 
 char *get_program_version(void);
 char *get_program_modification_date(void);

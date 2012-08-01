@@ -18,6 +18,8 @@
 extern int service_check_timeout, host_check_timeout;
 extern int notification_timeout;
 
+extern squeue_t *nagios_squeue;
+
 iobroker_set *nagios_iobs = NULL;
 static worker_process **workers;
 static unsigned int num_workers;
@@ -27,7 +29,6 @@ typedef struct wproc_object_job {
 	char *contact_name;
 	char *host_name;
 	char *service_description;
-	struct squeue_event *sq_evt;
 } wproc_object_job;
 
 typedef struct wproc_result {
@@ -49,6 +50,9 @@ typedef struct wproc_result {
 	struct rusage rusage;
 	struct kvvec *response;
 } wproc_result;
+
+extern int nagios_pid;
+extern worker_process *command_wproc;
 
 #define tv2float(tv) ((float)((tv)->tv_sec) + ((float)(tv)->tv_usec) / 1000000.0)
 
@@ -139,37 +143,81 @@ static void destroy_job(worker_process *wp, worker_job *job)
 	my_free(job->command);
 
 	wp->jobs[job->id % wp->max_jobs] = NULL;
+	wp->jobs_running--;
+
+	remove_event(nagios_squeue, job->orphan_event);
+
 	free(job);
 }
 
-static void free_wproc_memory(worker_process *wp)
+static int wproc_is_alive(worker_process *wp)
 {
-	int i = 0, destroyed = 0;
+	if (!wp || !wp->pid)
+		return 0;
+	if (kill(wp->pid, 0) == 0 && iobroker_is_registered(nagios_iobs, wp->sd))
+		return 1;
+	return 0;
+}
+
+int wproc_destroy(worker_process *wp, int flags)
+{
+	int i = 0, destroyed = 0, force = 0, sd, self;
+
+	force = !!(flags & WPROC_FORCE);
 
 	if (!wp)
-		return;
+		return 0;
 
+	self = getpid();
+
+	/* master retains workers through restarts */
+	if (self == nagios_pid && !force)
+		return 0;
+
+	/* free all memory when either forcing or a worker called us */
 	iocache_destroy(wp->ioc);
 	wp->ioc = NULL;
+	if (wp->jobs) {
+		for (i = 0; i < wp->max_jobs; i++) {
+			if (!wp->jobs[i])
+				continue;
 
-	for (i = 0; i < wp->max_jobs; i++) {
-		if (!wp->jobs[i])
-			continue;
+			destroy_job(wp, wp->jobs[i]);
+			/* we can (often) break out early */
+			if (++destroyed >= wp->jobs_running)
+				break;
+		}
 
-		destroy_job(wp, wp->jobs[i]);
-		/* we can (often) break out early */
-		if (++destroyed >= wp->jobs_running)
-			break;
+		/* this triggers a double-free() for some reason */
+		/* free(wp->jobs); */
+		wp->jobs = NULL;
+	}
+	sd = wp->sd;
+	free(wp);
+
+	/* workers must never control other workers, so they return early */
+	if (self != nagios_pid)
+		return 0;
+
+	/* kill(0, SIGKILL) equals suicide, so we avoid it */
+	if (wp->pid) {
+		kill(wp->pid, SIGKILL);
 	}
 
-	free(wp->jobs);
+	iobroker_close(nagios_iobs, sd);
+
+	/* reap our possibly lost children */
+	while (waitpid(-1, &i, WNOHANG) > 0)
+		; /* do nothing */
+
+	return 0;
 }
 
 /*
  * This gets called from both parent and worker process, so
  * we must take care not to blindly shut down everything here
  */
-void free_worker_memory(void)
+void free_worker_memory(int flags)
 {
 	unsigned int i;
 
@@ -177,16 +225,15 @@ void free_worker_memory(void)
 		if (!workers[i])
 			continue;
 
-		/* workers die when master socket close()s */
-		iobroker_close(nagios_iobs, workers[i]->sd);
-		free_wproc_memory(workers[i]);
-		my_free(workers[i]);
+		wproc_destroy(workers[i], flags);
 	}
-	iobroker_destroy(nagios_iobs, 0);
-	nagios_iobs = NULL;
-	workers = NULL;
+
+	my_free(workers);
 	num_workers = 0;
 	worker_index = 0;
+
+	wproc_destroy(command_wproc, flags);
+	my_free(command_wproc);
 }
 
 /*
@@ -222,8 +269,6 @@ static int handle_worker_check(wproc_result *wpres, worker_process *wp, worker_j
 	int result = ERROR;
 	check_result *cr = (check_result *)job->arg;
 
-	cr->output_file = NULL;
-	cr->output_file_fp = NULL;
 	memcpy(&cr->rusage, &wpres->rusage, sizeof(wpres->rusage));
 	cr->start_time.tv_sec = wpres->start.tv_sec;
 	cr->start_time.tv_usec = wpres->start.tv_usec;
@@ -371,7 +416,12 @@ static int handle_worker_result(int sd, int events, void *arg)
 	int ret;
 	static struct kvvec kvv = KVVEC_INITIALIZER;
 
+	errno = 0;
 	ret = iocache_read(wp->ioc, wp->sd);
+
+	if (!kvv.kv_alloc) {
+		kvvec_init(&kvv, 30);
+	}
 
 	if (ret < 0) {
 		logit(NSLOG_RUNTIME_WARNING, TRUE, "iocache_read() from worker %d returned %d: %s\n",
@@ -494,7 +544,6 @@ static int handle_worker_result(int sd, int events, void *arg)
 			break;
 		}
 		destroy_job(wp, job);
-		wp->jobs_running--;
 	}
 
 	return 0;
@@ -510,6 +559,21 @@ static int init_iobroker(void)
 	return -1;
 }
 
+int workers_alive(void)
+{
+	int i, alive = 0;
+
+	if (!workers)
+		return 0;
+
+	for (i = 0; i < num_workers; i++) {
+		if (wproc_is_alive(workers[i]))
+			alive++;
+	}
+
+	return alive;
+}
+
 int init_workers(int desired_workers)
 {
 	worker_process **wps;
@@ -520,6 +584,9 @@ int init_workers(int desired_workers)
 	}
 
 	init_iobroker();
+
+	if (workers_alive() == desired_workers)
+		return 0;
 
 	/* can't shrink the number of workers (yet) */
 	if (desired_workers < num_workers)
@@ -540,20 +607,32 @@ int init_workers(int desired_workers)
 	}
 
 	workers = wps;
-	for (; num_workers < desired_workers; num_workers++) {
+	for (i = 0; i < desired_workers; i++) {
+		int ret;
 		worker_process *wp;
+
+		if (wps[i])
+			continue;
 
 		wp = spawn_worker(worker_init_func, (void *)get_global_macros());
 		if (!wp) {
 			logit(NSLOG_RUNTIME_WARNING, TRUE, "Failed to spawn worker: %s\n", strerror(errno));
-			free_worker_memory();
+			free_worker_memory(0);
 			return ERROR;
 		}
+		wp->type = "app execution";
+		set_socket_options(wp->sd, 256 * 1024);
 
-		wps[num_workers] = wp;
-		iobroker_register(nagios_iobs, wp->sd, wp, handle_worker_result);
+		wps[i] = wp;
+		ret = iobroker_register(nagios_iobs, wp->sd, wp, handle_worker_result);
+		if (ret < 0) {
+			printf("Failed to register worker socket with iobroker %p\n", nagios_iobs);
+			exit(1);
+		}
 	}
+	num_workers = desired_workers;
 
+	logit(NSLOG_INFO_MESSAGE, TRUE, "Workers spawned: %d\n", num_workers);
 	return 0;
 }
 
@@ -573,6 +652,7 @@ static worker_process *get_worker(worker_job *job)
 		/* XXX FIXME Fiddle with finding a new, less busy, worker here */
 	}
 	wp->jobs[job->id % wp->max_jobs] = job;
+	job->wp = wp;
 	return wp;
 
 	/* dead code below. for now */
@@ -603,6 +683,7 @@ static int wproc_run_job(worker_job *job, nagios_macros *mac)
 {
 	static struct kvvec kvv = KVVEC_INITIALIZER;
 	worker_process *wp;
+	int ret;
 
 	/*
 	 * get_worker() also adds job to the workers list
@@ -626,9 +707,13 @@ static int wproc_run_job(worker_job *job, nagios_macros *mac)
 	kvvec_addkv(&kvv, "type", (char *)mkstr("%d", job->type));
 	kvvec_addkv(&kvv, "command", job->command);
 	kvvec_addkv(&kvv, "timeout", (char *)mkstr("%u", job->timeout));
-	send_kvvec(wp->sd, &kvv);
+	ret = send_kvvec(wp->sd, &kvv);
+	if (ret < 0 && errno == EPIPE) {
+		/* @todo respawn the dead worker */
+	}
 	wp->jobs_running++;
 	wp->jobs_started++;
+	/* job->orphan_event = schedule_new_event(EVENT_JOB_TIMEOUT, TRUE, time(NULL) + job->timeout + 600, 0, 0, 0, 0, job, NULL, 0); */
 
 	return 0;
 }
@@ -686,6 +771,9 @@ int wproc_run_check(check_result *cr, char *cmd, nagios_macros *mac)
 {
 	worker_job *job;
 	time_t timeout;
+
+	cr->output_file = NULL;
+	cr->output_file_fp = NULL;
 
 	if (cr->service_description)
 		timeout = service_check_timeout;

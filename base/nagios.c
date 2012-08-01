@@ -112,7 +112,6 @@ int             service_interleave_factor_method = ILF_SMART;
 int             max_host_check_spread = DEFAULT_HOST_CHECK_SPREAD;
 int             max_service_check_spread = DEFAULT_SERVICE_CHECK_SPREAD;
 
-int             command_check_interval = DEFAULT_COMMAND_CHECK_INTERVAL;
 int             check_reaper_interval = DEFAULT_CHECK_REAPER_INTERVAL;
 int             max_check_reaper_time = DEFAULT_MAX_REAPER_TIME;
 int             service_freshness_check_interval = DEFAULT_FRESHNESS_CHECK_INTERVAL;
@@ -137,7 +136,6 @@ int             update_available = FALSE;
 char            *last_program_version = NULL;
 char            *new_program_version = NULL;
 
-time_t          last_command_check = 0L;
 time_t          last_command_status_update = 0L;
 time_t          last_log_rotation = 0L;
 time_t          last_program_stop = 0L;
@@ -255,10 +253,7 @@ unsigned long	max_check_result_file_age = DEFAULT_MAX_CHECK_RESULT_AGE;
 
 dbuf            check_result_dbuf;
 
-circular_buffer external_command_buffer;
 circular_buffer check_result_buffer;
-pthread_t       worker_threads[TOTAL_WORKER_THREADS];
-int             external_command_buffer_slots = DEFAULT_EXTERNAL_COMMAND_BUFFER_SLOTS;
 
 check_stats     check_statistics[MAX_CHECK_STATS_TYPES];
 
@@ -268,6 +263,7 @@ int             debug_verbosity = DEFAULT_DEBUG_VERBOSITY;
 unsigned long   max_debug_file_size = DEFAULT_MAX_DEBUG_FILE_SIZE;
 
 
+extern iobroker_set *nagios_iobs;
 
 int main(int argc, char **argv, char **env) {
 	int result;
@@ -626,6 +622,8 @@ int main(int argc, char **argv, char **env) {
 	/* else start to monitor things... */
 	else {
 
+		nagios_iobs = iobroker_create();
+
 		/* keep monitoring things until we get a shutdown command */
 		do {
 
@@ -707,12 +705,6 @@ int main(int argc, char **argv, char **env) {
 
 					/* clean up the status data */
 					cleanup_status_data(config_file, TRUE);
-
-					/* shutdown the external command worker thread */
-					shutdown_command_file_worker_thread();
-
-					/* close and delete the external command file FIFO */
-					close_command_file();
 					}
 
 #ifdef USE_EVENT_BROKER
@@ -757,20 +749,6 @@ int main(int argc, char **argv, char **env) {
 				nagios_pid = (int)getpid();
 				}
 
-			/* open the command file (named pipe) for reading */
-			result = open_command_file();
-			if(result != OK) {
-
-				logit(NSLOG_PROCESS_INFO | NSLOG_RUNTIME_ERROR, TRUE, "Bailing out due to errors encountered while trying to initialize the external command file... (PID=%d)\n", (int)getpid());
-
-#ifdef USE_EVENT_BROKER
-				/* send program data to broker */
-				broker_program_state(NEBTYPE_PROCESS_SHUTDOWN, NEBFLAG_PROCESS_INITIATED, NEBATTR_SHUTDOWN_ABNORMAL, NULL);
-#endif
-				cleanup();
-				exit(ERROR);
-				}
-
 			/* initialize status data unless we're starting */
 			if(sigrestart == FALSE)
 				initialize_status_data(config_file);
@@ -806,6 +784,9 @@ int main(int argc, char **argv, char **env) {
 
 			/* reset the restart flag */
 			sigrestart = FALSE;
+
+			/* fire up command file worker */
+			launch_command_file_worker();
 
 			/* @TODO: get number of workers from config */
 			init_workers(4);
@@ -861,17 +842,14 @@ int main(int argc, char **argv, char **env) {
 			cleanup_comment_data(config_file);
 
 			/* clean up the status data unless we're restarting */
-			if(sigrestart == FALSE)
-				cleanup_status_data(config_file, TRUE);
-
-			/* close and delete the external command file FIFO unless we're restarting */
 			if(sigrestart == FALSE) {
-				shutdown_command_file_worker_thread();
-				close_command_file();
+				cleanup_status_data(config_file, TRUE);
 				}
 
 			/* shutdown stuff... */
 			if(sigshutdown == TRUE) {
+				shutdown_command_file_worker();
+				free_worker_memory(WPROC_FORCE);
 
 				/* make sure lock file has been removed - it may not have been if we received a shutdown command */
 				if(daemon_mode == TRUE)
