@@ -2,7 +2,6 @@
  *
  * XRDDEFAULT.C - Default external state retention routines for Nagios
  *
- *
  * License:
  *
  * This program is free software; you can redistribute it and/or modify

@@ -2,7 +2,6 @@
  *
  * STATUSDATA.H - Header for external status data routines
  *
- *
  * License:
  *
  * This program is free software; you can redistribute it and/or modify

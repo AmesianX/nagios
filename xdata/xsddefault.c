@@ -2,7 +2,6 @@
  *
  * XSDDEFAULT.C - Default external status data input routines for Nagios
  *
- *
  * License:
  *
  * This program is free software; you can redistribute it and/or modify

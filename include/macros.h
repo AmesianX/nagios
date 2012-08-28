@@ -214,7 +214,7 @@ typedef struct nagios_macros nagios_macros;
 #define MACRO_LASTHOSTSTATEID                   150
 #define MACRO_LASTSERVICESTATE                  151
 #define MACRO_LASTSERVICESTATEID                152
-#define MACRO_HOSTSAVEDDATA			153
+#define MACRO_HOSTSAVEDDATA                     153
 #define MACRO_SERVICESAVEDDATA                  154
 
 

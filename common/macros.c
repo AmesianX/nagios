@@ -2,7 +2,6 @@
  *
  * MACROS.C - Common macro functions for Nagios
  *
- *
  * License:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -1997,6 +1996,7 @@ int grab_standard_service_macro_r(nagios_macros *mac, int macro_type, service *t
 		case MACRO_SERVICESAVEDDATA:
 			if(temp_service->saved_data)
 				*output = (char *)strdup(temp_service->saved_data);
+			break;
 #endif
 		case MACRO_SERVICECHECKCOMMAND:
 			if(temp_service->service_check_command)

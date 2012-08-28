@@ -2,7 +2,6 @@
  *
  * OBJECTS.H - Header file for object addition/search functions
  *
- *
  * License:
  *
  * This program is free software; you can redistribute it and/or modify
