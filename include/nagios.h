@@ -2,7 +2,6 @@
  *
  * Nagios Main Header File
  * Written By: Ethan Galstad (egalstad@nagios.org)
- * Last Modified: 12-14-2008
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -21,20 +20,15 @@
 #ifndef _NAGIOS_H
 #define _NAGIOS_H
 
-#ifndef __GNUC__
-# define __attribute__(x) /* nothing */
-#endif
 #ifndef NSCORE
 # define NSCORE
 #endif
 
-#include "compat.h"
-#include "logging.h"
 #include "common.h"
+#include "logging.h"
 #include "locations.h"
 #include "objects.h"
 #include "macros.h"
-#include "lib/libnagios.h" /* re-run configure if this path doesn't work */
 
 	/************* MISC LENGTH/SIZE DEFINITIONS ***********/
 
@@ -58,7 +52,6 @@
 
 #define DEFAULT_INTER_CHECK_DELAY				5.0	/* seconds between initial service check scheduling */
 #define DEFAULT_INTERLEAVE_FACTOR      				1       /* default interleave to use when scheduling checks */
-#define DEFAULT_SLEEP_TIME      				0.5    	/* seconds between event run checks */
 #define DEFAULT_INTERVAL_LENGTH 				60     	/* seconds per interval unit for check scheduling */
 #define DEFAULT_RETRY_INTERVAL  				30	/* services are retried in 30 seconds if they're not OK */
 #define DEFAULT_CHECK_REAPER_INTERVAL				10	/* interval in seconds to reap host and service check results */
@@ -120,9 +113,6 @@
 
 #define DEFAULT_USE_LARGE_INSTALLATION_TWEAKS                   0       /* don't use tweaks for large Nagios installations */
 
-#define DEFAULT_ENABLE_EMBEDDED_PERL                            0       /* enable embedded Perl interpreter (if compiled in) */
-#define DEFAULT_USE_EMBEDDED_PERL_IMPLICITLY                    1       /* by default, embedded Perl is used for Perl plugins that don't explicitly disable it */
-
 #define DEFAULT_ADDITIONAL_FRESHNESS_LATENCY			15	/* seconds to be added to freshness thresholds when automatically calculated by Nagios */
 
 #define DEFAULT_CHECK_FOR_UPDATES                               1       /* should we check for new Nagios releases? */
@@ -161,15 +151,6 @@
 
 #define PROPAGATE_TO_PARENT_HOSTS	1
 #define PROPAGATE_TO_CHILD_HOSTS	2
-
-
-
-	/****************** SERVICE STATES ********************/
-
-#define STATE_OK			0
-#define STATE_WARNING			1
-#define STATE_CRITICAL			2
-#define STATE_UNKNOWN			3       /* changed from -1 on 02/24/2001 */
 
 
 
@@ -545,9 +526,6 @@ time_t calculate_time_from_weekday_of_month(int, int, int, int);	/* calculates m
 time_t calculate_time_from_day_of_month(int, int, int);	/* calculates midnight time of specific (1st, last, etc.) day of a particular month */
 void get_next_valid_time(time_t, time_t *, timeperiod *);	/* get the next valid time in a time period */
 time_t get_next_log_rotation_time(void);	     	/* determine the next time to schedule a log rotation */
-int init_embedded_perl(char **);			/* initialized embedded perl interpreter */
-int deinit_embedded_perl(void);				/* cleans up embedded perl */
-int file_uses_embedded_perl(char *);			/* tests whether or not the embedded perl interpreter should be used on a file */
 int dbuf_init(dbuf *, int);
 int dbuf_free(dbuf *);
 int dbuf_strcat(dbuf *, char *);

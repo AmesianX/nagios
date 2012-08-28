@@ -2,8 +2,6 @@
  *
  * OBJECTS.H - Header file for object addition/search functions
  *
- * Copyright (c) 1999-2007 Ethan Galstad (egalstad@nagios.org)
- * Last Modified: 11-10-2007
  *
  * License:
  *
@@ -26,7 +24,6 @@
 #ifndef _OBJECTS_H
 #define _OBJECTS_H
 
-#include "compat.h"
 #include "common.h"
 
 NAGIOS_BEGIN_DECL
@@ -34,7 +31,7 @@ NAGIOS_BEGIN_DECL
 
 /*************** CURRENT OBJECT REVISION **************/
 
-#define CURRENT_OBJECT_STRUCTURE_VERSION        307     /* increment when changes are made to data structures... */
+#define CURRENT_OBJECT_STRUCTURE_VERSION        400     /* increment when changes are made to data structures... */
 /* Nagios 3 starts at 300, Nagios 4 at 400, etc. */
 
 
@@ -49,6 +46,7 @@ NAGIOS_BEGIN_DECL
 /***************** SKIP LISTS ****************/
 
 #define NUM_OBJECT_SKIPLISTS                   12
+#define NUM_HASHED_OBJECT_TYPES                8
 
 #define HOST_SKIPLIST                          0
 #define SERVICE_SKIPLIST                       1
@@ -114,13 +112,13 @@ typedef struct timeperiodexclusion_struct {
 
 /* TIMEPERIOD structure */
 typedef struct timeperiod_struct {
+	unsigned int id;
 	char    *name;
 	char    *alias;
 	timerange *days[7];
 	daterange *exceptions[DATERANGE_TYPES];
 	timeperiodexclusion *exclusions;
 	struct 	timeperiod_struct *next;
-	struct 	timeperiod_struct *nexthash;
 	} timeperiod;
 
 
@@ -136,11 +134,11 @@ typedef struct contactsmember_struct {
 
 /* CONTACTGROUP structure */
 typedef struct contactgroup_struct {
+	unsigned int id;
 	char	*group_name;
 	char    *alias;
 	contactsmember *members;
 	struct	contactgroup_struct *next;
-	struct	contactgroup_struct *nexthash;
 	} contactgroup;
 
 
@@ -165,10 +163,10 @@ typedef struct customvariablesmember_struct {
 
 /* COMMAND structure */
 typedef struct command_struct {
+	unsigned int id;
 	char    *name;
 	char    *command_line;
 	struct command_struct *next;
-	struct command_struct *nexthash;
 	} command;
 
 
@@ -183,7 +181,8 @@ typedef struct commandsmember_struct {
 
 
 /* CONTACT structure */
-	struct contact_struct {
+struct contact_struct {
+	unsigned int id;
 	char	*name;
 	char	*alias;
 	char	*email;
@@ -222,7 +221,6 @@ typedef struct commandsmember_struct {
 	objectlist *contactgroups_ptr;
 #endif
 	struct	contact_struct *next;
-	struct	contact_struct *nexthash;
 	};
 
 
@@ -249,6 +247,7 @@ typedef struct hostsmember_struct {
 
 /* HOSTGROUP structure */
 typedef struct hostgroup_struct {
+	unsigned int id;
 	char 	*group_name;
 	char    *alias;
 	hostsmember *members;
@@ -256,12 +255,12 @@ typedef struct hostgroup_struct {
 	char    *notes_url;
 	char    *action_url;
 	struct	hostgroup_struct *next;
-	struct	hostgroup_struct *nexthash;
 	} hostgroup;
 
 
 /* HOST structure */
 struct host_struct {
+	unsigned int id;
 	char    *name;
 	char    *display_name;
 	char	*alias;
@@ -373,8 +372,6 @@ struct host_struct {
 	int     total_services;
 	unsigned long total_service_check_interval;
 	unsigned long modified_attributes;
-	int     circular_path_checked;
-	int     contains_circular_path;
 
 	command *event_handler_ptr;
 	command *check_command_ptr;
@@ -382,6 +379,9 @@ struct host_struct {
 	timeperiod *notification_period_ptr;
 	objectlist *hostgroups_ptr;
 #endif
+	/* objects we depend upon */
+	objectlist *exec_deps, *notify_deps;
+	objectlist *escalation_list;
 	struct  host_struct *next;
 	void *next_check_event;
 	};
@@ -389,6 +389,7 @@ struct host_struct {
 
 /* SERVICEGROUP structure */
 typedef struct servicegroup_struct {
+	unsigned int id;
 	char 	*group_name;
 	char    *alias;
 	servicesmember *members;
@@ -396,12 +397,12 @@ typedef struct servicegroup_struct {
 	char    *notes_url;
 	char    *action_url;
 	struct	servicegroup_struct *next;
-	struct	servicegroup_struct *nexthash;
 	} servicegroup;
 
 
 /* SERVICE structure */
 struct service_struct {
+	unsigned int id;
 	char	*host_name;
 	char	*description;
 	char    *display_name;
@@ -514,6 +515,8 @@ struct service_struct {
 	timeperiod *notification_period_ptr;
 	objectlist *servicegroups_ptr;
 #endif
+	objectlist *exec_deps, *notify_deps;
+	objectlist *escalation_list;
 	struct service_struct *next;
 	void *next_check_event;
 	};
@@ -521,6 +524,7 @@ struct service_struct {
 
 /* SERVICE ESCALATION structure */
 typedef struct serviceescalation_struct {
+	unsigned int id;
 	char    *host_name;
 	char    *description;
 	int     first_notification;
@@ -538,12 +542,12 @@ typedef struct serviceescalation_struct {
 	timeperiod *escalation_period_ptr;
 #endif
 	struct  serviceescalation_struct *next;
-	struct  serviceescalation_struct *nexthash;
 	} serviceescalation;
 
 
 /* SERVICE DEPENDENCY structure */
 typedef struct servicedependency_struct {
+	unsigned int id;
 	int     dependency_type;
 	char    *dependent_host_name;
 	char    *dependent_service_description;
@@ -557,20 +561,17 @@ typedef struct servicedependency_struct {
 	int     fail_on_critical;
 	int     fail_on_pending;
 #ifdef NSCORE
-	int     circular_path_checked;
-	int     contains_circular_path;
-
 	service *master_service_ptr;
 	service *dependent_service_ptr;
 	timeperiod *dependency_period_ptr;
 #endif
 	struct servicedependency_struct *next;
-	struct servicedependency_struct *nexthash;
 	} servicedependency;
 
 
 /* HOST ESCALATION structure */
 typedef struct hostescalation_struct {
+	unsigned int id;
 	char    *host_name;
 	int     first_notification;
 	int     last_notification;
@@ -586,12 +587,12 @@ typedef struct hostescalation_struct {
 	timeperiod *escalation_period_ptr;
 #endif
 	struct  hostescalation_struct *next;
-	struct  hostescalation_struct *nexthash;
 	} hostescalation;
 
 
 /* HOST DEPENDENCY structure */
 typedef struct hostdependency_struct {
+	unsigned int id;
 	int     dependency_type;
 	char    *dependent_host_name;
 	char    *host_name;
@@ -602,27 +603,25 @@ typedef struct hostdependency_struct {
 	int     fail_on_unreachable;
 	int     fail_on_pending;
 #ifdef NSCORE
-	int     circular_path_checked;
-	int     contains_circular_path;
-
 	host    *master_host_ptr;
 	host    *dependent_host_ptr;
 	timeperiod *dependency_period_ptr;
 #endif
 	struct hostdependency_struct *next;
-	struct hostdependency_struct *nexthash;
 	} hostdependency;
 
-
-
-
-/****************** HASH STRUCTURES ********************/
-
-typedef struct host_cursor_struct {
-	int     host_hashchain_iterator;
-	host    *current_host_pointer;
-	} host_cursor;
-
+extern command *command_list;
+extern timeperiod *timeperiod_list;
+extern host *host_list;
+extern service *service_list;
+extern contact *contact_list;
+extern hostgroup *hostgroup_list;
+extern servicegroup *servicegroup_list;
+extern contactgroup *contactgroup_list;
+extern hostescalation *hostescalation_list;
+extern hostdependency *hostdependency_list;
+extern serviceescalation *serviceescalation_list;
+extern servicedependency *servicedependency_list;
 
 
 /********************* FUNCTIONS **********************/
@@ -674,53 +673,26 @@ customvariablesmember *add_custom_variable_to_object(customvariablesmember **, c
 servicesmember *add_service_link_to_host(host *, service *);
 
 
-/*** Object Skiplist Functions ****/
-int init_object_skiplists(void);
-int free_object_skiplists(void);
 int skiplist_compare_text(const char *val1a, const char *val1b, const char *val2a, const char *val2b);
-int skiplist_compare_host(void *a, void *b);
-int skiplist_compare_service(void *a, void *b);
-int skiplist_compare_command(void *a, void *b);
-int skiplist_compare_timeperiod(void *a, void *b);
-int skiplist_compare_contact(void *a, void *b);
-int skiplist_compare_contactgroup(void *a, void *b);
-int skiplist_compare_hostgroup(void *a, void *b);
-int skiplist_compare_servicegroup(void *a, void *b);
-int skiplist_compare_hostescalation(void *a, void *b);
-int skiplist_compare_serviceescalation(void *a, void *b);
-int skiplist_compare_hostdependency(void *a, void *b);
-int skiplist_compare_servicedependency(void *a, void *b);
-
 int get_host_count(void);
 int get_service_count(void);
 
 
+int create_object_tables(unsigned int *);
 
 /**** Object Search Functions ****/
-timeperiod *find_timeperiod(char *);						                /* finds a timeperiod object */
-host *find_host(char *);									/* finds a host object */
-hostgroup *find_hostgroup(char *);						                /* finds a hostgroup object */
-servicegroup *find_servicegroup(char *);					                /* finds a servicegroup object */
-contact *find_contact(char *);							                /* finds a contact object */
-contactgroup *find_contactgroup(char *);					                /* finds a contactgroup object */
-command *find_command(char *);							                /* finds a command object */
-service *find_service(char *, char *);								/* finds a service object */
+timeperiod *find_timeperiod(const char *);						                /* finds a timeperiod object */
+host *find_host(const char *);									/* finds a host object */
+hostgroup *find_hostgroup(const char *);						                /* finds a hostgroup object */
+servicegroup *find_servicegroup(const char *);					                /* finds a servicegroup object */
+contact *find_contact(const char *);							                /* finds a contact object */
+contactgroup *find_contactgroup(const char *);					                /* finds a contactgroup object */
+command *find_command(const char *);							                /* finds a command object */
+service *find_service(const char *, const char *);								/* finds a service object */
 
 
-/**** Object Traversal Functions ****/
-hostescalation *get_first_hostescalation_by_host(char *, void **);
-hostescalation *get_next_hostescalation_by_host(char *, void **);
-serviceescalation *get_first_serviceescalation_by_service(char *, char *, void **);
-serviceescalation *get_next_serviceescalation_by_service(char *, char *, void **);
-hostdependency *get_first_hostdependency_by_dependent_host(char *, void **);
-hostdependency *get_next_hostdependency_by_dependent_host(char *, void **);
-servicedependency *get_first_servicedependency_by_dependent_service(char *, char *, void **);
-servicedependency *get_next_servicedependency_by_dependent_service(char *, char *, void **);
-
-#ifdef NSCORE
 int add_object_to_objectlist(objectlist **, void *);
 int free_objectlist(objectlist **);
-#endif
 
 
 /**** Object Query Functions ****/
@@ -740,7 +712,6 @@ int is_host_immediate_parent_of_host(host *, host *);		       /* tests whether o
 int number_of_immediate_child_hosts(host *);		                /* counts the number of immediate child hosts for a particular host */
 int number_of_total_child_hosts(host *);				/* counts the number of total child hosts for a particular host */
 int number_of_immediate_parent_hosts(host *);				/* counts the number of immediate parents hosts for a particular host */
-int number_of_total_parent_hosts(host *);				/* counts the number of total parents hosts for a particular host */
 
 #ifdef NSCORE
 int check_for_circular_servicedependency_path(servicedependency *, servicedependency *, int); /* checks if a circular dependency exists for a given service */

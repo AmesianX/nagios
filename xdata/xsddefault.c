@@ -2,9 +2,6 @@
  *
  * XSDDEFAULT.C - Default external status data input routines for Nagios
  *
- * Copyright (c) 2009 Nagios Core Development Team and Community Contributors
- * Copyright (c) 2000-2009 Ethan Galstad (egalstad@nagios.org)
- * Last Modified: 07-31-2009
  *
  * License:
  *
@@ -33,7 +30,6 @@
 #include "../include/comments.h"
 #include "../include/downtime.h"
 #include "../include/macros.h"
-#include "../include/skiplist.h"
 
 #ifdef NSCORE
 #include "../include/nagios.h"
@@ -89,8 +85,6 @@ extern int check_host_freshness;
 extern int enable_flap_detection;
 extern int enable_failure_prediction;
 extern int process_performance_data;
-extern int aggregate_status_updates;
-extern int check_external_commands;
 
 extern time_t         last_update_check;
 extern char           *last_program_version;
@@ -98,13 +92,8 @@ extern int            update_available;
 extern char           *last_program_version;
 extern char           *new_program_version;
 
-extern host *host_list;
-extern service *service_list;
-extern contact *contact_list;
 extern comment *comment_list;
 extern scheduled_downtime *scheduled_downtime_list;
-
-extern skiplist *object_skiplists[NUM_OBJECT_SKIPLISTS];
 
 extern unsigned long  next_comment_id;
 extern unsigned long  next_downtime_id;
@@ -495,12 +484,6 @@ int xsddefault_save_status_data(void) {
 		fprintf(fp, "\tis_flapping=%d\n", temp_host->is_flapping);
 		fprintf(fp, "\tpercent_state_change=%.2f\n", temp_host->percent_state_change);
 		fprintf(fp, "\tscheduled_downtime_depth=%d\n", temp_host->scheduled_downtime_depth);
-		/*
-		fprintf(fp,"\tstate_history=");
-		for(x=0;x<MAX_STATE_HISTORY_ENTRIES;x++)
-			fprintf(fp,"%s%d",(x>0)?",":"",temp_host->state_history[(x+temp_host->state_history_index)%MAX_STATE_HISTORY_ENTRIES]);
-		fprintf(fp,"\n");
-		*/
 		/* custom variables */
 		for(temp_customvariablesmember = temp_host->custom_variables; temp_customvariablesmember != NULL; temp_customvariablesmember = temp_customvariablesmember->next) {
 			if(temp_customvariablesmember->variable_name)
@@ -570,12 +553,6 @@ int xsddefault_save_status_data(void) {
 		fprintf(fp, "\tis_flapping=%d\n", temp_service->is_flapping);
 		fprintf(fp, "\tpercent_state_change=%.2f\n", temp_service->percent_state_change);
 		fprintf(fp, "\tscheduled_downtime_depth=%d\n", temp_service->scheduled_downtime_depth);
-		/*
-		fprintf(fp,"\tstate_history=");
-		for(x=0;x<MAX_STATE_HISTORY_ENTRIES;x++)
-			fprintf(fp,"%s%d",(x>0)?",":"",temp_service->state_history[(x+temp_service->state_history_index)%MAX_STATE_HISTORY_ENTRIES]);
-		fprintf(fp,"\n");
-		*/
 		/* custom variables */
 		for(temp_customvariablesmember = temp_service->custom_variables; temp_customvariablesmember != NULL; temp_customvariablesmember = temp_customvariablesmember->next) {
 			if(temp_customvariablesmember->variable_name)
@@ -1075,14 +1052,6 @@ int xsddefault_read_status_data(char *config_file, int options) {
 							temp_hoststatus->percent_state_change = strtod(val, NULL);
 						else if(!strcmp(var, "scheduled_downtime_depth"))
 							temp_hoststatus->scheduled_downtime_depth = atoi(val);
-						/*
-						else if(!strcmp(var,"state_history")){
-							temp_ptr=val;
-							for(x=0;x<MAX_STATE_HISTORY_ENTRIES;x++)
-								temp_hoststatus->state_history[x]=atoi(my_strsep(&temp_ptr,","));
-							temp_hoststatus->state_history_index=0;
-						        }
-						*/
 						}
 					break;
 
@@ -1179,14 +1148,6 @@ int xsddefault_read_status_data(char *config_file, int options) {
 							temp_servicestatus->percent_state_change = strtod(val, NULL);
 						else if(!strcmp(var, "scheduled_downtime_depth"))
 							temp_servicestatus->scheduled_downtime_depth = atoi(val);
-						/*
-						else if(!strcmp(var,"state_history")){
-							temp_ptr=val;
-							for(x=0;x<MAX_STATE_HISTORY_ENTRIES;x++)
-								temp_servicestatus->state_history[x]=atoi(my_strsep(&temp_ptr,","));
-							temp_servicestatus->state_history_index=0;
-						        }
-						*/
 						}
 					break;
 

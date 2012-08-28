@@ -2,8 +2,6 @@
  *
  * STATUSDATA.H - Header for external status data routines
  *
- * Copyright (c) 2000-2007 Ethan Galstad (egalstad@nagios.org)
- * Last Modified:   10-19-2007
  *
  * License:
  *
@@ -25,7 +23,7 @@
 #ifndef _STATUSDATA_H
 #define _STATUSDATA_H
 
-#include "compat.h"
+#include "common.h"
 
 #ifdef NSCORE
 #include "objects.h"

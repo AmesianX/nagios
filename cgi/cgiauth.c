@@ -2,8 +2,6 @@
  *
  * CGIAUTH.C - Authorization utilities for Nagios CGIs
  *
- * Copyright (c) 1999-2008 Ethan Galstad (egalstad@nagios.org)
- * Last Modified:   11-30-2008
  *
  * License:
  *
@@ -31,7 +29,6 @@
 
 extern char            main_config_file[MAX_FILENAME_LENGTH];
 
-extern hostgroup       *hostgroup_list;
 extern servicegroup    *servicegroup_list;
 
 extern int             use_authentication;

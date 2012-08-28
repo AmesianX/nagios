@@ -2,8 +2,6 @@
  *
  * STATUSWRL.C - Nagios 3-D (VRML) Network Status View
  *
- * Copyright (c) 1999-2007 Ethan Galstad (egalstad@nagios.org)
- * Last Modified:   07-16-2007
  *
  * Description:
  *
@@ -42,9 +40,6 @@ extern char url_images_path[MAX_FILENAME_LENGTH];
 extern char url_logo_images_path[MAX_FILENAME_LENGTH];
 
 extern char *statuswrl_include;
-
-extern host *host_list;
-extern service *service_list;
 
 extern int default_statuswrl_layout_method;
 
@@ -1229,7 +1224,6 @@ void calculate_circular_layer_coords(host *parent, double start_angle, double us
 	double this_drawing_angle = 0.0;
 	double available_angle = 0.0;
 	double clipped_available_angle = 0.0;
-	double average_child_angle = 0.0;
 	double x_coord = 0.0;
 	double y_coord = 0.0;
 	host *temp_host;
@@ -1244,9 +1238,6 @@ void calculate_circular_layer_coords(host *parent, double start_angle, double us
 
 	/* calculate total drawing "width" of parent host */
 	parent_drawing_width = max_child_host_drawing_width(parent);
-
-	/* calculate average angle given to each child host */
-	average_child_angle = (double)(useable_angle / (double)immediate_children);
 
 	/* calculate initial drawing angle */
 	current_drawing_angle = start_angle;

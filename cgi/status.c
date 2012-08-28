@@ -2,8 +2,6 @@
  *
  * STATUS.C -  Nagios Status CGI
  *
- * Copyright (c) 1999-2010  Ethan Galstad (egalstad@nagios.org)
- * Last Modified: 08-05-2020
  *
  * License:
  *
@@ -44,7 +42,6 @@ extern char url_stylesheets_path[MAX_FILENAME_LENGTH];
 extern char url_logo_images_path[MAX_FILENAME_LENGTH];
 extern char url_media_path[MAX_FILENAME_LENGTH];
 extern char url_js_path[MAX_FILENAME_LENGTH];
-extern char log_file[MAX_FILENAME_LENGTH];
 
 extern char *service_critical_sound;
 extern char *service_warning_sound;
@@ -60,10 +57,6 @@ extern int suppress_alert_window;
 
 extern int enable_splunk_integration;
 
-extern host *host_list;
-extern service *service_list;
-extern hostgroup *hostgroup_list;
-extern servicegroup *servicegroup_list;
 extern hoststatus *hoststatus_list;
 extern servicestatus *servicestatus_list;
 
@@ -5390,18 +5383,14 @@ void show_filters(void) {
 void create_pagenumbers(int total_entries,int visible_entries,char *temp_url,int type_service) {
 
 	int pages = 1;	 
-	int leftovers = 0; 
 	int tmp_start; 
 	int i;
-	int next_page;
 	int previous_page; 
 
 	/* do page numbers if applicable */ 
 	if(result_limit > 0 && total_entries > result_limit) {
 		pages = (total_entries / result_limit);  
-		leftovers = (total_entries % result_limit); 
 		previous_page = (page_start-result_limit) > 0 ? (page_start-result_limit) : 0;
-		next_page = (page_start+result_limit) > total_entries ? page_start : (page_start+result_limit);
 		printf("<div id='bottom_page_numbers'>\n");
 		printf("<div class='inner_numbers'>\n");		
 		printf("<a href='%s&start=0&limit=%i' class='pagenumber' title='First Page'><img src='%s%s' height='15' width='15' alt='<<' /></a>\n",temp_url,result_limit,url_images_path,FIRST_PAGE_ICON); 
@@ -5415,8 +5404,8 @@ void create_pagenumbers(int total_entries,int visible_entries,char *temp_url,int
 				printf("<a class='pagenumber' href='%s&start=%i&limit=%i' title='Page %i'> %i </a>\n",temp_url,tmp_start,result_limit,(i+1),(i+1));
 			}
 			
-		printf("<a href='%s&start=%i&limit=%i' class='pagenumber' title='Next Page'><img src='%s%s' height='15' width='10' alt='>' /></a>\n",temp_url,(page_start+result_limit),result_limit,url_images_path,NEXT_PAGE_ICON); 
-		printf("<a href='%s&start=%i&limit=%i' class='pagenumber' title='Last Page'><img src='%s%s' height='15' width='15' alt='>>' /></a>\n",temp_url,((pages)*result_limit),result_limit,url_images_path,LAST_PAGE_ICON);				
+		printf("<a href='%s&start=%i&limit=%i' class='pagenumber' title='Next Page'><img src='%s%s' height='15' width='10' alt='>' /></a>\n",temp_url,(page_start+result_limit),result_limit,url_images_path,NEXT_PAGE_ICON);
+		printf("<a href='%s&start=%i&limit=%i' class='pagenumber' title='Last Page'><img src='%s%s' height='15' width='15' alt='>>' /></a>\n",temp_url,((pages)*result_limit),result_limit,url_images_path,LAST_PAGE_ICON);
 		printf("</div> <!-- end inner_page_numbers div -->\n");
 		if(type_service == TRUE)
 			printf("<br /><div class='itemTotalsTitle'>Results %i - %i of %d Matching Services</div>\n</div>\n",page_start,((page_start+result_limit) > total_entries ? total_entries :(page_start+result_limit) ),total_entries );

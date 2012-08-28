@@ -4,11 +4,8 @@
  *
  * Program: Nagios Core Testing
  * License: GPL
- * Copyright (c) 2009 Nagios Core Development Team and Community Contributors
- * Copyright (c) 1999-2009 Ethan Galstad
  *
  * First Written:   10-08-2009, based on nagios.c
- * Last Modified:   10-08-2009
  *
  * Description:
  *
@@ -94,7 +91,6 @@ int             notification_timeout = DEFAULT_NOTIFICATION_TIMEOUT;
 int             ocsp_timeout = DEFAULT_OCSP_TIMEOUT;
 int             ochp_timeout = DEFAULT_OCHP_TIMEOUT;
 
-double          sleep_time = DEFAULT_SLEEP_TIME;
 int             interval_length = DEFAULT_INTERVAL_LENGTH;
 int             service_inter_check_delay_method = ICD_SMART;
 int             host_inter_check_delay_method = ICD_SMART;
@@ -127,7 +123,6 @@ int             update_available = FALSE;
 char            *last_program_version = NULL;
 char            *new_program_version = NULL;
 
-time_t          last_command_status_update = 0L;
 time_t          last_log_rotation = 0L;
 
 int             use_aggressive_host_checking = DEFAULT_AGGRESSIVE_HOST_CHECKING;
@@ -228,21 +223,12 @@ int             command_file_created = FALSE;
 unsigned long   update_uid = 0L;
 
 
-extern contact	       *contact_list;
-extern contactgroup    *contactgroup_list;
-extern hostgroup       *hostgroup_list;
-extern command         *command_list;
-extern timeperiod      *timeperiod_list;
-extern serviceescalation *serviceescalation_list;
-extern host 		*host_list;
 extern char	*xrddefault_retention_file;
 
 notification    *notification_list;
 
 check_result    check_result_info;
 unsigned long	max_check_result_file_age = DEFAULT_MAX_CHECK_RESULT_AGE;
-
-dbuf            check_result_dbuf;
 
 check_stats     check_statistics[MAX_CHECK_STATS_TYPES];
 

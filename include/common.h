@@ -2,7 +2,6 @@
  *
  * Nagios Common Header File
  * Written By: Ethan Galstad (egalstad@nagios.org)
- * Last Modified: 10-22-2007
  *
  * License:
  *
@@ -25,27 +24,15 @@
 #define PROGRAM_VERSION "3.4.1"
 #define PROGRAM_MODIFICATION_DATE "05-11-2012"
 
-/*#define DEBUG_CHECK_IPC 1 */
-/*#define DEBUG_CHECK_IPC2 1*/
-
-
-
-/* daemon is thread safe */
-#ifdef NSCORE
-#ifndef _REENTRANT
-#define _REENTRANT
-#endif
-#ifndef _THREAD_SAFE
-#define _THREAD_SAFE
-#endif
-#endif
-
 /* Experimental performance tweaks - use with caution */
 #undef USE_MEMORY_PERFORMANCE_TWEAKS
 
-/* my_free has been freed from bondage as a function */
-#define my_free(ptr) do { if(ptr) { free(ptr); ptr = NULL; } } while(0)
 
+/****************** SERVICE STATES ********************/
+#define STATE_OK			0
+#define STATE_WARNING			1
+#define STATE_CRITICAL			2
+#define STATE_UNKNOWN			3       /* changed from -1 on 02/24/2001 */
 
 
 /***************************** COMMANDS *********************************/
@@ -403,24 +390,6 @@
 #define PARALLEL_HOST_CHECK_STATS            9
 #define SERIAL_HOST_CHECK_STATS              10
 #define MAX_CHECK_STATS_TYPES                11
-
-
-/************************* GENERAL DEFINITIONS  **************************/
-
-#define	OK				0
-#define ERROR				-2	/* value was changed from -1 so as to not interfere with STATUS_UNKNOWN plugin result */
-
-
-#ifndef TRUE
-#define TRUE				1
-#elif (TRUE!=1)
-#define TRUE				1
-#endif
-#ifndef FALSE
-#define FALSE				0
-#elif (FALSE!=0)
-#define FALSE				0
-#endif
 
 
 /****************** HOST CONFIG FILE READING OPTIONS ********************/

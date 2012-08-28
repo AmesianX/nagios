@@ -2,8 +2,6 @@
  *
  * COMMENTS.H - Header file for comment functions
  *
- * Copyright (c) 1999-2006 Ethan Galstad (egalstad@nagios.org)
- * Last Modified:   12-26-2006
  *
  * License:
  *
@@ -25,7 +23,6 @@
 
 #ifndef _COMMENTS_H
 #define _COMMENTS_H
-#include "compat.h"
 #include "common.h"
 #include "objects.h"
 
@@ -81,7 +78,6 @@ typedef struct comment_struct {
 
 #ifdef NSCORE
 int initialize_comment_data(char *);                                /* initializes comment data */
-int cleanup_comment_data(char *);                                   /* cleans up comment data */
 int add_new_comment(int, int, char *, char *, time_t, char *, char *, int, int, int, time_t, unsigned long *); /* adds a new host or service comment */
 int add_new_host_comment(int, char *, time_t, char *, char *, int, int, int, time_t, unsigned long *);    /* adds a new host comment */
 int add_new_service_comment(int, char *, char *, time_t, char *, char *, int, int, int, time_t, unsigned long *); /* adds a new service comment */

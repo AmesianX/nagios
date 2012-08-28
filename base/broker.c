@@ -2,9 +2,6 @@
  *
  * BROKER.C - Event broker routines for Nagios
  *
- * Copyright (c) 2010 Nagios Core Development Team
- * Copyright (c) 2002-2006 Ethan Galstad (egalstad@nagios.org)
- * Last Modified:   10-03-2010
  *
  * License:
  *
@@ -49,7 +46,6 @@ extern int obsess_over_hosts;
 extern int enable_flap_detection;
 extern int enable_failure_prediction;
 extern int process_performance_data;
-extern int aggregate_status_updates;
 extern unsigned long modified_host_process_attributes;
 extern unsigned long modified_service_process_attributes;
 extern char *global_host_event_handler;

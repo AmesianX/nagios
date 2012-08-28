@@ -1,8 +1,6 @@
 /************************************************************************
  *
  * CGIUTILS.H - Header file for common CGI functions
- * Copyright (c) 1999-2008  Ethan Galstad (egalstad@nagios.org)
- * Last Modified: 10-15-2008
  *
  * License:
  *
@@ -22,7 +20,7 @@
 
 #ifndef _CGIUTILS_H
 #define _CGIUTILS_H
-#include "compat.h"
+#include "lib/libnagios.h"
 #include "logging.h"
 #include "objects.h"
 #include "cgiauth.h"
@@ -183,14 +181,6 @@ NAGIOS_BEGIN_DECL
 #define LAST_PAGE_ICON			"b_last2.png"
 #define NEXT_PAGE_ICON			"b_next2.png"
 #define PREVIOUS_PAGE_ICON		"b_prev2.png"
-
-
-	/************************** PLUGIN RETURN VALUES ****************************/
-
-#define STATE_OK		0
-#define STATE_WARNING		1
-#define STATE_CRITICAL		2
-#define STATE_UNKNOWN		3       /* changed from -1 on 02/24/2001 */
 
 
 	/********************* EXTENDED INFO CGI DISPLAY TYPES  *********************/

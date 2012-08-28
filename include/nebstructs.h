@@ -2,8 +2,6 @@
  *
  * NEBSTRUCTS.H - Event broker includes for Nagios
  *
- * Copyright (c) 2003-2007 Ethan Galstad (egalstad@nagios.org)
- * Last Modified: 10-28-2007
  *
  * License:
  *
@@ -25,7 +23,7 @@
 #ifndef _NEBSTRUCTS_H
 #define _NEBSTRUCTS_H
 
-#include "compat.h"
+#include "common.h"
 #include "objects.h"
 #include "nagios.h"
 

@@ -2,8 +2,6 @@
  *
  * EXTINFO.C -  Nagios Extended Information CGI
  *
- * Copyright (c) 1999-2009 Ethan Galstad (egalstad@nagios.org)
- * Last Modified: 06-17-2009
  *
  * License:
  *
@@ -65,7 +63,6 @@ extern char url_stylesheets_path[MAX_FILENAME_LENGTH];
 extern char url_docs_path[MAX_FILENAME_LENGTH];
 extern char url_images_path[MAX_FILENAME_LENGTH];
 extern char url_logo_images_path[MAX_FILENAME_LENGTH];
-extern char log_file[MAX_FILENAME_LENGTH];
 
 extern int              enable_splunk_integration;
 
