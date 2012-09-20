@@ -112,6 +112,7 @@ int shutdown_command_file_worker(void) {
 	if (!command_wproc)
 		return 0;
 
+	iocache_destroy(command_wproc->ioc);
 	wproc_destroy(command_wproc, WPROC_FORCE);
 	command_wproc = NULL;
 	return 0;
@@ -2299,7 +2300,7 @@ int process_passive_service_check(time_t check_time, char *host_name, char *svc_
 
 	memset(&cr, 0, sizeof(cr));
 	cr.exited_ok = 1;
-	cr.check_type = SERVICE_CHECK_PASSIVE;
+	cr.check_type = CHECK_TYPE_PASSIVE;
 	cr.host_name = temp_host->name;
 	cr.service_description = temp_service->description;
 	cr.output = output;
@@ -2401,7 +2402,7 @@ int process_passive_host_check(time_t check_time, char *host_name, int return_co
 	memset(&cr, 0, sizeof(cr));
 	cr.host_name = temp_host->name;
 	cr.exited_ok = 1;
-	cr.check_type = HOST_CHECK_PASSIVE;
+	cr.check_type = CHECK_TYPE_PASSIVE;
 	cr.return_code = return_code;
 	cr.start_time.tv_sec = cr.finish_time.tv_sec = check_time;
 

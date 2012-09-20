@@ -1,11 +1,31 @@
+#define _GNU_SOURCE 1
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/un.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <fcntl.h>
+#include "snprintf.h"
 #include "lnag-utils.h"
 #include "nsock.h"
+
+const char *nsock_strerror(int code)
+{
+	switch (code) {
+	case NSOCK_EBIND: return "bind() failed";
+	case NSOCK_ELISTEN: return "listen() failed";
+	case NSOCK_ESOCKET: return "socket() failed";
+	case NSOCK_EUNLINK: return "unlink() failed";
+	case NSOCK_ECONNECT: return "connect() failed";
+	case NSOCK_EFCNTL: return "fcntl() failed";
+	case NSOCK_EINVAL: return "Invalid arguments";
+	}
+
+	return "Unknown error";
+}
 
 int nsock_unix(const char *path, unsigned int mask, unsigned int flags)
 {
@@ -57,6 +77,9 @@ int nsock_unix(const char *path, unsigned int mask, unsigned int flags)
 		}
 	}
 
+	if(!(flags & NSOCK_BLOCK) && fcntl(sock, F_SETFL, O_NONBLOCK) < 0)
+		return NSOCK_EFCNTL;
+
 	if(flags & NSOCK_UDP)
 		return sock;
 
@@ -66,4 +89,22 @@ int nsock_unix(const char *path, unsigned int mask, unsigned int flags)
 	}
 
 	return sock;
+}
+
+int nsock_printf(int sd, const char *fmt, ...)
+{
+	va_list ap;
+	char buf[4096];
+	int len;
+
+	va_start(ap, fmt);
+	/* -2 to accommodate vsnprintf()'s which don't include nul on overflow */
+	len = vsnprintf(buf, sizeof(buf) - 2, fmt, ap);
+	va_end(ap);
+
+	if(len < 0)
+		return len;
+
+	buf[len] = 0;
+	return write(sd, buf, len + 1); /* include the nul byte */
 }

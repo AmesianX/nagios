@@ -260,7 +260,7 @@ static int handle_worker_check(wproc_result *wpres, worker_process *wp, worker_j
 		cr->return_code = STATE_UNKNOWN;
 	}
 
-	if (wpres->outstd) {
+	if (wpres->outstd && *wpres->outstd) {
 		cr->output = strdup(wpres->outstd);
 	} else if (wpres->outerr) {
 		asprintf(&cr->output, "(No output on stdout) stderr: %s", wpres->outerr);
@@ -527,13 +527,33 @@ int workers_alive(void)
 	return alive;
 }
 
+
 int init_workers(int desired_workers)
 {
 	worker_process **wps;
 	int i;
 
+	i = desired_workers;
 	if (desired_workers <= 0) {
-		desired_workers = 4;
+		int cpus = online_cpus();
+
+		if(cpus < 0) {
+			desired_workers = 4;
+		}
+		else {
+			if(!desired_workers) {
+				desired_workers = ((cpus / 2) + (cpus / 3));
+				/* max 12, min 2 workers, for arbitrary reasons */
+				if(desired_workers > 12)
+					desired_workers = 12;
+				if(desired_workers < 2)
+					desired_workers = 2;
+			}
+			else {
+				/* desired workers is a negative number */
+				desired_workers = cpus - desired_workers;
+			}
+		}
 	}
 
 	if (workers_alive() == desired_workers)
@@ -567,7 +587,7 @@ int init_workers(int desired_workers)
 
 		wp = spawn_worker(worker_init_func, (void *)get_global_macros());
 		if (!wp) {
-			logit(NSLOG_RUNTIME_WARNING, TRUE, "Failed to spawn worker: %s\n", strerror(errno));
+			logit(NSLOG_RUNTIME_ERROR, TRUE, "Failed to spawn worker: %s\n", strerror(errno));
 			free_worker_memory(0);
 			return ERROR;
 		}
@@ -577,8 +597,8 @@ int init_workers(int desired_workers)
 		wps[i] = wp;
 		ret = iobroker_register(nagios_iobs, wp->sd, wp, handle_worker_result);
 		if (ret < 0) {
-			printf("Failed to register worker socket with iobroker %p\n", nagios_iobs);
-			exit(1);
+			logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: Failed to register worker socket with io broker: %s\n", iobroker_strerror(ret));
+			return ERROR;
 		}
 	}
 	num_workers = desired_workers;

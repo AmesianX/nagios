@@ -41,6 +41,9 @@ char *temp_path = NULL;
 char *check_result_path = NULL;
 char *lock_file = NULL;
 
+int num_check_workers = 0; /* auto-decide */
+char *qh_socket_path = NULL; /* disabled */
+
 char *nagios_user = NULL;
 char *nagios_group = NULL;
 
@@ -2208,7 +2211,7 @@ int init_check_result(check_result *info) {
 	info->object_check_type = HOST_CHECK;
 	info->host_name = NULL;
 	info->service_description = NULL;
-	info->check_type = HOST_CHECK_ACTIVE;
+	info->check_type = CHECK_TYPE_ACTIVE;
 	info->check_options = CHECK_OPTION_NONE;
 	info->scheduled_check = FALSE;
 	info->reschedule_check = FALSE;
@@ -2223,6 +2226,7 @@ int init_check_result(check_result *info) {
 	info->return_code = 0;
 	info->output = NULL;
 	info->source = NULL;
+	info->engine = NULL;
 
 	return OK;
 	}

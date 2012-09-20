@@ -150,6 +150,10 @@ int read_main_config_file(char *main_config_file) {
 			read_resource_file(value);
 			}
 
+		else if(!strcmp(variable, "check_workers"))
+			num_check_workers = atoi(value);
+		else if(!strcmp(variable, "query_socket"))
+			qh_socket_path = (char *)strdup(value);
 		else if(!strcmp(variable, "log_file")) {
 
 			if(strlen(value) > MAX_FILENAME_LENGTH - 1) {
