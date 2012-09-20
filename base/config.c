@@ -1651,12 +1651,7 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 		}
 
-<<<<<<< HEAD
-	if(verify_config == TRUE)
-=======
-
 	if(verify_config)
->>>>>>> origin/master
 		printf("\tChecked %d hosts.\n", total_objects);
 
 	/*****************************************/
