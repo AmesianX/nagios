@@ -35,27 +35,6 @@
 #include "../include/neberrors.h"
 #endif
 
-extern int             enable_event_handlers;
-extern int             obsess_over_services;
-extern int             obsess_over_hosts;
-
-extern int             log_event_handlers;
-
-extern int             event_handler_timeout;
-extern int             ocsp_timeout;
-extern int             ochp_timeout;
-
-extern char            *global_host_event_handler;
-extern char            *global_service_event_handler;
-extern command         *global_host_event_handler_ptr;
-extern command         *global_service_event_handler_ptr;
-
-extern char            *ocsp_command;
-extern char            *ochp_command;
-extern command         *ocsp_command_ptr;
-extern command         *ochp_command_ptr;
-
-
 /******************************************************************/
 /************* OBSESSIVE COMPULSIVE HANDLER FUNCTIONS *************/
 /******************************************************************/
@@ -75,9 +54,7 @@ int obsessive_compulsive_service_check_processor(service *svc) {
 		return ERROR;
 
 	/* bail out if we shouldn't be obsessing */
-	if(obsess_over_services == FALSE)
-		return OK;
-	if(svc->obsess_over_service == FALSE)
+	if(obsess_over_services == FALSE || svc->obsess == FALSE)
 		return OK;
 
 	/* if there is no valid command, exit */
@@ -137,9 +114,7 @@ int obsessive_compulsive_host_check_processor(host *hst) {
 		return ERROR;
 
 	/* bail out if we shouldn't be obsessing */
-	if(obsess_over_hosts == FALSE)
-		return OK;
-	if(hst->obsess_over_host == FALSE)
+	if(obsess_over_hosts == FALSE || hst->obsess == FALSE)
 		return OK;
 
 	/* if there is no valid command, exit */

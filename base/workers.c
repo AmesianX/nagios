@@ -15,10 +15,6 @@
 /* perfect hash function for wproc response codes */
 #include "wp-phash.c"
 
-extern int service_check_timeout, host_check_timeout;
-extern int notification_timeout;
-
-iobroker_set *nagios_iobs = NULL;
 static worker_process **workers;
 static unsigned int num_workers;
 static unsigned int worker_index;
@@ -48,8 +44,6 @@ typedef struct wproc_result {
 	struct rusage rusage;
 	struct kvvec *response;
 } wproc_result;
-
-extern int nagios_pid;
 
 #define tv2float(tv) ((float)((tv)->tv_sec) + ((float)(tv)->tv_usec) / 1000000.0)
 
@@ -276,22 +270,10 @@ static int handle_worker_check(wproc_result *wpres, worker_process *wp, worker_j
 
 	cr->early_timeout = wpres->early_timeout;
 	cr->exited_ok = wpres->exited_ok;
+	cr->engine = &nagios_check_engine;
+	cr->source = wp;
 
-	if (cr->service_description) {
-		service *svc = find_service(cr->host_name, cr->service_description);
-		if (svc)
-			result = handle_async_service_check_result(svc, cr);
-		else
-			logit(NSLOG_RUNTIME_WARNING, TRUE, "Worker: Failed to locate service '%s' on host '%s'. Result from job %d (%s) will be dropped.\n",
-				  cr->service_description, cr->host_name, job->id, job->command);
-	} else {
-		host *hst = find_host(cr->host_name);
-		if (hst)
-			result = handle_async_host_check_result_3x(hst, cr);
-		else
-			logit(NSLOG_RUNTIME_WARNING, TRUE, "Worker: Failed to locate host '%s'. Result from job %d (%s) will be dropped.\n",
-				  cr->host_name, job->id, job->command);
-	}
+	process_check_result(cr);
 	free_check_result(cr);
 
 	return result;
@@ -590,6 +572,7 @@ int init_workers(int desired_workers)
 			return ERROR;
 		}
 		set_socket_options(wp->sd, 256 * 1024);
+		asprintf(&wp->source_name, "Nagios Core worker %d", wp->pid);
 
 		wps[i] = wp;
 		ret = iobroker_register(nagios_iobs, wp->sd, wp, handle_worker_result);

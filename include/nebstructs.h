@@ -140,6 +140,7 @@ typedef struct nebstruct_host_check_struct {
 	char            *long_output;
 	char            *perf_data;
 	char		*saved_data;
+	check_result    *check_result_ptr;
 
 	void            *object_ptr;
 	} nebstruct_host_check_data;
@@ -173,6 +174,7 @@ typedef struct nebstruct_service_check_struct {
 	char            *long_output;
 	char            *perf_data;
 	char		*saved_data;
+	check_result    *check_result_ptr;
 
 	void            *object_ptr;
 	} nebstruct_service_check_data;
@@ -263,7 +265,6 @@ typedef struct nebstruct_program_status_struct {
 	int             passive_host_checks_enabled;
 	int             event_handlers_enabled;
 	int             flap_detection_enabled;
-	int             failure_prediction_enabled;
 	int             process_performance_data;
 	int             obsess_over_hosts;
 	int             obsess_over_services;

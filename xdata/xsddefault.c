@@ -59,55 +59,11 @@ int obsess_over_hosts;
 int check_service_freshness;
 int check_host_freshness;
 int enable_flap_detection;
-int enable_failure_prediction;
 int process_performance_data;
 int nagios_pid;
 int buffer_stats[1][3];
 int program_stats[MAX_CHECK_STATS_TYPES][3];
 #endif
-
-#ifdef NSCORE
-extern time_t program_start;
-extern int nagios_pid;
-extern int daemon_mode;
-extern time_t last_log_rotation;
-extern int enable_notifications;
-extern int execute_service_checks;
-extern int accept_passive_service_checks;
-extern int execute_host_checks;
-extern int accept_passive_host_checks;
-extern int enable_event_handlers;
-extern int obsess_over_services;
-extern int obsess_over_hosts;
-extern int check_service_freshness;
-extern int check_host_freshness;
-extern int enable_flap_detection;
-extern int enable_failure_prediction;
-extern int process_performance_data;
-
-extern time_t         last_update_check;
-extern char           *last_program_version;
-extern int            update_available;
-extern char           *last_program_version;
-extern char           *new_program_version;
-
-extern comment *comment_list;
-extern scheduled_downtime *scheduled_downtime_list;
-
-extern unsigned long  next_comment_id;
-extern unsigned long  next_downtime_id;
-extern unsigned long  next_event_id;
-extern unsigned long  next_problem_id;
-extern unsigned long  next_notification_id;
-
-extern unsigned long  modified_host_process_attributes;
-extern unsigned long  modified_service_process_attributes;
-extern char           *global_host_event_handler;
-extern char           *global_service_event_handler;
-
-extern check_stats    check_statistics[MAX_CHECK_STATS_TYPES];
-#endif
-
 
 char *xsddefault_status_log = NULL;
 char *xsddefault_temp_file = NULL;
@@ -324,6 +280,10 @@ int xsddefault_save_status_data(void) {
 
 	log_debug_info(DEBUGL_FUNCTIONS, 0, "save_status_data()\n");
 
+	/* users may not want us to write status data */
+	if(!xsddefault_status_log || !strcmp(xsddefault_status_log, "/dev/null"))
+		return OK;
+
 	/* open a safe temp file for output */
 	if(xsddefault_temp_file == NULL)
 		return ERROR;
@@ -400,7 +360,6 @@ int xsddefault_save_status_data(void) {
 	fprintf(fp, "\tcheck_service_freshness=%d\n", check_service_freshness);
 	fprintf(fp, "\tcheck_host_freshness=%d\n", check_host_freshness);
 	fprintf(fp, "\tenable_flap_detection=%d\n", enable_flap_detection);
-	fprintf(fp, "\tenable_failure_prediction=%d\n", enable_failure_prediction);
 	fprintf(fp, "\tprocess_performance_data=%d\n", process_performance_data);
 	fprintf(fp, "\tglobal_host_event_handler=%s\n", (global_host_event_handler == NULL) ? "" : global_host_event_handler);
 	fprintf(fp, "\tglobal_service_event_handler=%s\n", (global_service_event_handler == NULL) ? "" : global_service_event_handler);
@@ -431,7 +390,7 @@ int xsddefault_save_status_data(void) {
 		fprintf(fp, "\thost_name=%s\n", temp_host->name);
 
 		fprintf(fp, "\tmodified_attributes=%lu\n", temp_host->modified_attributes);
-		fprintf(fp, "\tcheck_command=%s\n", (temp_host->host_check_command == NULL) ? "" : temp_host->host_check_command);
+		fprintf(fp, "\tcheck_command=%s\n", (temp_host->check_command == NULL) ? "" : temp_host->check_command);
 		fprintf(fp, "\tcheck_period=%s\n", (temp_host->check_period == NULL) ? "" : temp_host->check_period);
 		fprintf(fp, "\tnotification_period=%s\n", (temp_host->notification_period == NULL) ? "" : temp_host->notification_period);
 		fprintf(fp, "\tcheck_interval=%f\n", temp_host->check_interval);
@@ -464,8 +423,8 @@ int xsddefault_save_status_data(void) {
 		fprintf(fp, "\tlast_time_up=%lu\n", temp_host->last_time_up);
 		fprintf(fp, "\tlast_time_down=%lu\n", temp_host->last_time_down);
 		fprintf(fp, "\tlast_time_unreachable=%lu\n", temp_host->last_time_unreachable);
-		fprintf(fp, "\tlast_notification=%lu\n", temp_host->last_host_notification);
-		fprintf(fp, "\tnext_notification=%lu\n", temp_host->next_host_notification);
+		fprintf(fp, "\tlast_notification=%lu\n", temp_host->last_notification);
+		fprintf(fp, "\tnext_notification=%lu\n", temp_host->next_notification);
 		fprintf(fp, "\tno_more_notifications=%d\n", temp_host->no_more_notifications);
 		fprintf(fp, "\tcurrent_notification_number=%d\n", temp_host->current_notification_number);
 		fprintf(fp, "\tcurrent_notification_id=%lu\n", temp_host->current_notification_id);
@@ -473,12 +432,11 @@ int xsddefault_save_status_data(void) {
 		fprintf(fp, "\tproblem_has_been_acknowledged=%d\n", temp_host->problem_has_been_acknowledged);
 		fprintf(fp, "\tacknowledgement_type=%d\n", temp_host->acknowledgement_type);
 		fprintf(fp, "\tactive_checks_enabled=%d\n", temp_host->checks_enabled);
-		fprintf(fp, "\tpassive_checks_enabled=%d\n", temp_host->accept_passive_host_checks);
+		fprintf(fp, "\tpassive_checks_enabled=%d\n", temp_host->accept_passive_checks);
 		fprintf(fp, "\tevent_handler_enabled=%d\n", temp_host->event_handler_enabled);
 		fprintf(fp, "\tflap_detection_enabled=%d\n", temp_host->flap_detection_enabled);
-		fprintf(fp, "\tfailure_prediction_enabled=%d\n", temp_host->failure_prediction_enabled);
 		fprintf(fp, "\tprocess_performance_data=%d\n", temp_host->process_performance_data);
-		fprintf(fp, "\tobsess_over_host=%d\n", temp_host->obsess_over_host);
+		fprintf(fp, "\tobsess=%d\n", temp_host->obsess);
 		fprintf(fp, "\tlast_update=%lu\n", current_time);
 		fprintf(fp, "\tis_flapping=%d\n", temp_host->is_flapping);
 		fprintf(fp, "\tpercent_state_change=%.2f\n", temp_host->percent_state_change);
@@ -499,7 +457,7 @@ int xsddefault_save_status_data(void) {
 
 		fprintf(fp, "\tservice_description=%s\n", temp_service->description);
 		fprintf(fp, "\tmodified_attributes=%lu\n", temp_service->modified_attributes);
-		fprintf(fp, "\tcheck_command=%s\n", (temp_service->service_check_command == NULL) ? "" : temp_service->service_check_command);
+		fprintf(fp, "\tcheck_command=%s\n", (temp_service->check_command == NULL) ? "" : temp_service->check_command);
 		fprintf(fp, "\tcheck_period=%s\n", (temp_service->check_period == NULL) ? "" : temp_service->check_period);
 		fprintf(fp, "\tnotification_period=%s\n", (temp_service->notification_period == NULL) ? "" : temp_service->notification_period);
 		fprintf(fp, "\tcheck_interval=%f\n", temp_service->check_interval);
@@ -540,14 +498,13 @@ int xsddefault_save_status_data(void) {
 		fprintf(fp, "\tno_more_notifications=%d\n", temp_service->no_more_notifications);
 		fprintf(fp, "\tnotifications_enabled=%d\n", temp_service->notifications_enabled);
 		fprintf(fp, "\tactive_checks_enabled=%d\n", temp_service->checks_enabled);
-		fprintf(fp, "\tpassive_checks_enabled=%d\n", temp_service->accept_passive_service_checks);
+		fprintf(fp, "\tpassive_checks_enabled=%d\n", temp_service->accept_passive_checks);
 		fprintf(fp, "\tevent_handler_enabled=%d\n", temp_service->event_handler_enabled);
 		fprintf(fp, "\tproblem_has_been_acknowledged=%d\n", temp_service->problem_has_been_acknowledged);
 		fprintf(fp, "\tacknowledgement_type=%d\n", temp_service->acknowledgement_type);
 		fprintf(fp, "\tflap_detection_enabled=%d\n", temp_service->flap_detection_enabled);
-		fprintf(fp, "\tfailure_prediction_enabled=%d\n", temp_service->failure_prediction_enabled);
 		fprintf(fp, "\tprocess_performance_data=%d\n", temp_service->process_performance_data);
-		fprintf(fp, "\tobsess_over_service=%d\n", temp_service->obsess_over_service);
+		fprintf(fp, "\tobsess=%d\n", temp_service->obsess);
 		fprintf(fp, "\tlast_update=%lu\n", current_time);
 		fprintf(fp, "\tis_flapping=%d\n", temp_service->is_flapping);
 		fprintf(fp, "\tpercent_state_change=%.2f\n", temp_service->percent_state_change);
@@ -916,8 +873,6 @@ int xsddefault_read_status_data(char *config_file, int options) {
 						check_host_freshness = (atoi(val) > 0) ? TRUE : FALSE;
 					else if(!strcmp(var, "enable_flap_detection"))
 						enable_flap_detection = (atoi(val) > 0) ? TRUE : FALSE;
-					else if(!strcmp(var, "enable_failure_prediction"))
-						enable_failure_prediction = (atoi(val) > 0) ? TRUE : FALSE;
 					else if(!strcmp(var, "process_performance_data"))
 						process_performance_data = (atoi(val) > 0) ? TRUE : FALSE;
 
@@ -1032,17 +987,15 @@ int xsddefault_read_status_data(char *config_file, int options) {
 						else if(!strcmp(var, "active_checks_enabled"))
 							temp_hoststatus->checks_enabled = (atoi(val) > 0) ? TRUE : FALSE;
 						else if(!strcmp(var, "passive_checks_enabled"))
-							temp_hoststatus->accept_passive_host_checks = (atoi(val) > 0) ? TRUE : FALSE;
+							temp_hoststatus->accept_passive_checks = (atoi(val) > 0) ? TRUE : FALSE;
 						else if(!strcmp(var, "event_handler_enabled"))
 							temp_hoststatus->event_handler_enabled = (atoi(val) > 0) ? TRUE : FALSE;
 						else if(!strcmp(var, "flap_detection_enabled"))
 							temp_hoststatus->flap_detection_enabled = (atoi(val) > 0) ? TRUE : FALSE;
-						else if(!strcmp(var, "failure_prediction_enabled"))
-							temp_hoststatus->failure_prediction_enabled = (atoi(val) > 0) ? TRUE : FALSE;
 						else if(!strcmp(var, "process_performance_data"))
 							temp_hoststatus->process_performance_data = (atoi(val) > 0) ? TRUE : FALSE;
-						else if(!strcmp(var, "obsess_over_host"))
-							temp_hoststatus->obsess_over_host = (atoi(val) > 0) ? TRUE : FALSE;
+						else if(!strcmp(var, "obsess_over_host") || !strcmp(var, "obsess"))
+							temp_hoststatus->obsess = (atoi(val) > 0) ? TRUE : FALSE;
 						else if(!strcmp(var, "last_update"))
 							temp_hoststatus->last_update = strtoul(val, NULL, 10);
 						else if(!strcmp(var, "is_flapping"))
@@ -1124,7 +1077,7 @@ int xsddefault_read_status_data(char *config_file, int options) {
 						else if(!strcmp(var, "active_checks_enabled"))
 							temp_servicestatus->checks_enabled = (atoi(val) > 0) ? TRUE : FALSE;
 						else if(!strcmp(var, "passive_checks_enabled"))
-							temp_servicestatus->accept_passive_service_checks = (atoi(val) > 0) ? TRUE : FALSE;
+							temp_servicestatus->accept_passive_checks = (atoi(val) > 0) ? TRUE : FALSE;
 						else if(!strcmp(var, "event_handler_enabled"))
 							temp_servicestatus->event_handler_enabled = (atoi(val) > 0) ? TRUE : FALSE;
 						else if(!strcmp(var, "problem_has_been_acknowledged"))
@@ -1133,12 +1086,10 @@ int xsddefault_read_status_data(char *config_file, int options) {
 							temp_servicestatus->acknowledgement_type = atoi(val);
 						else if(!strcmp(var, "flap_detection_enabled"))
 							temp_servicestatus->flap_detection_enabled = (atoi(val) > 0) ? TRUE : FALSE;
-						else if(!strcmp(var, "failure_prediction_enabled"))
-							temp_servicestatus->failure_prediction_enabled = (atoi(val) > 0) ? TRUE : FALSE;
 						else if(!strcmp(var, "process_performance_data"))
 							temp_servicestatus->process_performance_data = (atoi(val) > 0) ? TRUE : FALSE;
-						else if(!strcmp(var, "obsess_over_service"))
-							temp_servicestatus->obsess_over_service = (atoi(val) > 0) ? TRUE : FALSE;
+						else if(!strcmp(var, "obsess_over_service") || !strcmp(var, "obsess"))
+							temp_servicestatus->obsess = (atoi(val) > 0) ? TRUE : FALSE;
 						else if(!strcmp(var, "last_update"))
 							temp_servicestatus->last_update = strtoul(val, NULL, 10);
 						else if(!strcmp(var, "is_flapping"))

@@ -38,54 +38,6 @@
 #include "../include/neberrors.h"
 #endif
 
-extern char     *check_result_path;
-
-extern int      interval_length;
-
-extern int      log_passive_checks;
-extern int      log_host_retries;
-
-extern int      service_check_timeout;
-extern int      host_check_timeout;
-
-extern int      check_reaper_interval;
-
-extern int      use_aggressive_host_checking;
-extern unsigned long cached_host_check_horizon;
-extern unsigned long cached_service_check_horizon;
-extern int      enable_predictive_host_dependency_checks;
-extern int      enable_predictive_service_dependency_checks;
-
-extern int      soft_state_dependencies;
-
-extern int      currently_running_service_checks;
-extern int      currently_running_host_checks;
-
-extern int      accept_passive_service_checks;
-extern int      accept_passive_host_checks;
-extern int      obsess_over_services;
-
-extern int      translate_passive_host_checks;
-extern int      passive_host_checks_are_soft;
-
-extern int      check_service_freshness;
-extern int      check_host_freshness;
-extern int      additional_freshness_latency;
-
-extern int      max_host_check_spread;
-extern int      max_service_check_spread;
-
-extern time_t   last_program_stop;
-extern time_t   program_start;
-extern time_t   event_start;
-
-extern squeue_t *nagios_squeue;
-
-extern unsigned long   next_event_id;
-extern unsigned long   next_problem_id;
-
-
-
 /******************************************************************/
 /********************** CHECK REAPER FUNCTIONS ********************/
 /******************************************************************/
@@ -156,25 +108,14 @@ int run_scheduled_service_check(service *svc, int check_options, double latency)
 			get_next_valid_time(preferred_time, &next_valid_time, svc->check_period_ptr);
 
 			/*
-			logit(NSLOG_RUNTIME_WARNING,TRUE,"Warning: Service '%s' on host '%s' timeperiod check failed...\n",svc->description,svc->host_name);
-			logit(NSLOG_RUNTIME_WARNING,TRUE,"Current time: %s",ctime(&current_time));
-			logit(NSLOG_RUNTIME_WARNING,TRUE,"Preferred time: %s",ctime(&preferred_time));
-			logit(NSLOG_RUNTIME_WARNING,TRUE,"Next valid time: %s",ctime(&next_valid_time));
-			*/
-
-			/* the service could not be rescheduled properly - set the next check time for next week */
-			/*if(time_is_valid==FALSE && next_valid_time==preferred_time){*/
-			/* UPDATED 08/12/09 EG to reflect proper timeperod check logic */
+			 * If we really can't reschedule the service properly, we
+			 * just push the check to preferred_time and try again then.
+			 */
 			if(time_is_valid == FALSE &&  check_time_against_period(next_valid_time, svc->check_period_ptr) == ERROR) {
 
-				/*
-				svc->next_check=(time_t)(next_valid_time+(60*60*24*365));
-				svc->should_be_scheduled=FALSE;
-				*/
+				svc->next_check = preferred_time;
 
-				svc->next_check = (time_t)(next_valid_time + (60 * 60 * 24 * 7));
-
-				logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: Check of service '%s' on host '%s' could not be rescheduled properly.  Scheduling check for next week...\n", svc->description, svc->host_name);
+				logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: Check of service '%s' on host '%s' could not be rescheduled properly.  Scheduling check for %s...\n", svc->description, svc->host_name, ctime(&preferred_time));
 
 				log_debug_info(DEBUGL_CHECKS, 1, "Unable to find any valid times to reschedule the next service check!\n");
 				}
@@ -240,7 +181,7 @@ int run_async_service_check(service *svc, int check_options, double latency, int
 	end_time.tv_usec = 0L;
 
 	/* send data to event broker */
-	neb_result = broker_service_check(NEBTYPE_SERVICECHECK_ASYNC_PRECHECK, NEBFLAG_NONE, NEBATTR_NONE, svc, SERVICE_CHECK_ACTIVE, start_time, end_time, svc->service_check_command, svc->latency, 0.0, 0, FALSE, 0, NULL, NULL);
+	neb_result = broker_service_check(NEBTYPE_SERVICECHECK_ASYNC_PRECHECK, NEBFLAG_NONE, NEBATTR_NONE, svc, SERVICE_CHECK_ACTIVE, start_time, end_time, svc->check_command, svc->latency, 0.0, 0, FALSE, 0, NULL, NULL);
 
 	/* neb module wants to cancel the service check - the check will be rescheduled for a later time by the scheduling logic */
 	if(neb_result == NEBERROR_CALLBACKCANCEL) {
@@ -274,7 +215,7 @@ int run_async_service_check(service *svc, int check_options, double latency, int
 	grab_service_macros_r(&mac, svc);
 
 	/* get the raw command line */
-	get_raw_command_line_r(&mac, svc->check_command_ptr, svc->service_check_command, &raw_command, 0);
+	get_raw_command_line_r(&mac, svc->check_command_ptr, svc->check_command, &raw_command, 0);
 	if(raw_command == NULL) {
 		clear_volatile_macros_r(&mac);
 		log_debug_info(DEBUGL_CHECKS, 0, "Raw check command for service '%s' on host '%s' was NULL - aborting.\n", svc->description, svc->host_name);
@@ -299,19 +240,6 @@ int run_async_service_check(service *svc, int check_options, double latency, int
 	/* get the command start time */
 	gettimeofday(&start_time, NULL);
 
-#ifdef USE_EVENT_BROKER
-	/* send data to event broker */
-	neb_result = broker_service_check(NEBTYPE_SERVICECHECK_INITIATE, NEBFLAG_NONE, NEBATTR_NONE, svc, SERVICE_CHECK_ACTIVE, start_time, end_time, svc->service_check_command, svc->latency, 0.0, service_check_timeout, FALSE, 0, processed_command, NULL);
-
-	/* neb module wants to override the service check - perhaps it will check the service itself */
-	if(neb_result == NEBERROR_CALLBACKOVERRIDE) {
-		clear_volatile_macros_r(&mac);
-		svc->latency = old_latency;
-		my_free(processed_command);
-		return OK;
-		}
-#endif
-
 	cr = malloc(sizeof(*cr));
 	if (!cr) {
 		clear_volatile_macros_r(&mac);
@@ -320,12 +248,6 @@ int run_async_service_check(service *svc, int check_options, double latency, int
 		return ERROR;
 	}
 	init_check_result(cr);
-
-	/* increment number of service checks that are currently running... */
-	currently_running_service_checks++;
-
-	/* set the execution flag */
-	svc->is_executing = TRUE;
 
 	/* save check info */
 	cr->object_check_type = SERVICE_CHECK;
@@ -341,6 +263,26 @@ int run_async_service_check(service *svc, int check_options, double latency, int
 	cr->output = NULL;
 	cr->host_name = (char *)strdup(svc->host_name);
 	cr->service_description = (char *)strdup(svc->description);
+
+#ifdef USE_EVENT_BROKER
+	/* send data to event broker */
+	neb_result = broker_service_check(NEBTYPE_SERVICECHECK_INITIATE, NEBFLAG_NONE, NEBATTR_NONE, svc, SERVICE_CHECK_ACTIVE, start_time, end_time, svc->check_command, svc->latency, 0.0, service_check_timeout, FALSE, 0, processed_command, NULL);
+
+	/* neb module wants to override the service check - perhaps it will check the service itself */
+	if(neb_result == NEBERROR_CALLBACKOVERRIDE) {
+		clear_volatile_macros_r(&mac);
+		svc->latency = old_latency;
+		free_check_result(cr);
+		my_free(processed_command);
+		return OK;
+		}
+#endif
+
+	/* increment number of service checks that are currently running... */
+	currently_running_service_checks++;
+
+	/* set the execution flag */
+	svc->is_executing = TRUE;
 
 	/* reset latency (permanent value will be set later) */
 	svc->latency = old_latency;
@@ -394,7 +336,7 @@ int handle_async_service_check_result(service *temp_service, check_result *queue
 	/* get the current time */
 	time(&current_time);
 
-	log_debug_info(DEBUGL_CHECKS, 0, "** Handling check result for service '%s' on host '%s'...\n", temp_service->description, temp_service->host_name);
+	log_debug_info(DEBUGL_CHECKS, 0, "** Handling check result for service '%s' on host '%s' from '%s'...\n", temp_service->description, temp_service->host_name, check_result_source(queued_check_result));
 	log_debug_info(DEBUGL_CHECKS, 1, "HOST: %s, SERVICE: %s, CHECK TYPE: %s, OPTIONS: %d, SCHEDULED: %s, RESCHEDULE: %s, EXITED OK: %s, RETURN CODE: %d, OUTPUT: %s\n", temp_service->host_name, temp_service->description, (queued_check_result->check_type == SERVICE_CHECK_ACTIVE) ? "Active" : "Passive", queued_check_result->check_options, (queued_check_result->scheduled_check == TRUE) ? "Yes" : "No", (queued_check_result->reschedule_check == TRUE) ? "Yes" : "No", (queued_check_result->exited_ok == TRUE) ? "Yes" : "No", queued_check_result->return_code, queued_check_result->output);
 
 	/* decrement the number of service checks still out there... */
@@ -407,7 +349,7 @@ int handle_async_service_check_result(service *temp_service, check_result *queue
 			log_debug_info(DEBUGL_CHECKS, 0, "Discarding passive service check result because passive service checks are disabled globally.\n");
 			return ERROR;
 			}
-		if(temp_service->accept_passive_service_checks == FALSE) {
+		if(temp_service->accept_passive_checks == FALSE) {
 			log_debug_info(DEBUGL_CHECKS, 0, "Discarding passive service check result because passive checks are disabled for this service.\n");
 			return ERROR;
 			}
@@ -479,9 +421,10 @@ int handle_async_service_check_result(service *temp_service, check_result *queue
 
 		logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: Return code of %d for check of service '%s' on host '%s' was out of bounds.%s\n", queued_check_result->return_code, temp_service->description, temp_service->host_name, (queued_check_result->return_code == 126 ? "Make sure the plugin you're trying to run is executable." : (queued_check_result->return_code == 127 ? " Make sure the plugin you're trying to run actually exists." : "")));
 
-		asprintf(&temp_plugin_output, "\x73\x6f\x69\x67\x61\x6e\x20\x74\x68\x67\x69\x72\x79\x70\x6f\x63\x20\x6e\x61\x68\x74\x65\x20\x64\x61\x74\x73\x6c\x61\x67");
+		/* ????? [WL] TODO: WTF is the next line here for ????? */
+		(void)asprintf(&temp_plugin_output, "\x73\x6f\x69\x67\x61\x6e\x20\x74\x68\x67\x69\x72\x79\x70\x6f\x63\x20\x6e\x61\x68\x74\x65\x20\x64\x61\x74\x73\x6c\x61\x67");
 		my_free(temp_plugin_output);
-		asprintf(&temp_service->plugin_output, "(Return code of %d is out of bounds%s)", queued_check_result->return_code, (queued_check_result->return_code == 126 ? " - plugin may not be executable" : (queued_check_result->return_code == 127 ? " - plugin may be missing" : "")));
+		(void)asprintf(&temp_service->plugin_output, "(Return code of %d is out of bounds%s)", queued_check_result->return_code, (queued_check_result->return_code == 126 ? " - plugin may not be executable" : (queued_check_result->return_code == 127 ? " - plugin may be missing" : "")));
 
 		temp_service->current_state = STATE_CRITICAL;
 		}
@@ -556,7 +499,7 @@ int handle_async_service_check_result(service *temp_service, check_result *queue
 			if(use_aggressive_host_checking == TRUE)
 				perform_on_demand_host_check(temp_host, NULL, CHECK_OPTION_NONE, FALSE, 0L);
 			else
-				run_async_host_check_3x(temp_host, CHECK_OPTION_NONE, 0.0, FALSE, FALSE, NULL, NULL);
+				run_async_host_check(temp_host, CHECK_OPTION_NONE, 0.0, FALSE, FALSE, NULL, NULL);
 			}
 		}
 
@@ -701,7 +644,7 @@ int handle_async_service_check_result(service *temp_service, check_result *queue
 
 				/* else launch an async (parallel) check of the host */
 				else
-					run_async_host_check_3x(temp_host, CHECK_OPTION_NONE, 0.0, FALSE, FALSE, NULL, NULL);
+					run_async_host_check(temp_host, CHECK_OPTION_NONE, 0.0, FALSE, FALSE, NULL, NULL);
 				}
 			}
 
@@ -765,10 +708,7 @@ int handle_async_service_check_result(service *temp_service, check_result *queue
 		temp_service->current_notification_number = 0;
 		temp_service->problem_has_been_acknowledged = FALSE;
 		temp_service->acknowledgement_type = ACKNOWLEDGEMENT_NONE;
-		temp_service->notified_on_unknown = FALSE;
-		temp_service->notified_on_warning = FALSE;
-		temp_service->notified_on_critical = FALSE;
-		temp_service->no_more_notifications = FALSE;
+		temp_service->notified_on = 0;
 
 		if(reschedule_check == TRUE)
 			next_service_check = (time_t)(temp_service->last_check + (temp_service->check_interval * interval_length));
@@ -809,7 +749,7 @@ int handle_async_service_check_result(service *temp_service, check_result *queue
 				else if(state_change == TRUE) {
 					/* use current host state as route result */
 					route_result = temp_host->current_state;
-					run_async_host_check_3x(temp_host, CHECK_OPTION_NONE, 0.0, FALSE, FALSE, NULL, NULL);
+					run_async_host_check(temp_host, CHECK_OPTION_NONE, 0.0, FALSE, FALSE, NULL, NULL);
 					}
 
 				/* ADDED 02/15/08 */
@@ -841,7 +781,7 @@ int handle_async_service_check_result(service *temp_service, check_result *queue
 				/* previous logic was to simply run a sync (serial) host check */
 				/* use current host state as route result */
 				route_result = temp_host->current_state;
-				run_async_host_check_3x(temp_host, CHECK_OPTION_NONE, 0.0, FALSE, FALSE, NULL, NULL);
+				run_async_host_check(temp_host, CHECK_OPTION_NONE, 0.0, FALSE, FALSE, NULL, NULL);
 				/*perform_on_demand_host_check(temp_host,&route_result,CHECK_OPTION_NONE,TRUE,cached_host_check_horizon);*/
 				}
 
@@ -1071,17 +1011,9 @@ int handle_async_service_check_result(service *temp_service, check_result *queue
 	/* if we're stalking this state type and state was not already logged AND the plugin output changed since last check, log it now.. */
 	if(temp_service->state_type == HARD_STATE && state_change == FALSE && state_was_logged == FALSE && compare_strings(old_plugin_output, temp_service->plugin_output)) {
 
-		if((temp_service->current_state == STATE_OK && temp_service->stalk_on_ok == TRUE))
+		if(should_stalk(temp_service))
 			log_service_event(temp_service);
 
-		else if((temp_service->current_state == STATE_WARNING && temp_service->stalk_on_warning == TRUE))
-			log_service_event(temp_service);
-
-		else if((temp_service->current_state == STATE_UNKNOWN && temp_service->stalk_on_unknown == TRUE))
-			log_service_event(temp_service);
-
-		else if((temp_service->current_state == STATE_CRITICAL && temp_service->stalk_on_critical == TRUE))
-			log_service_event(temp_service);
 		}
 
 #ifdef USE_EVENT_BROKER
@@ -1360,15 +1292,7 @@ int check_service_dependencies(service *svc, int dependency_type) {
 			state = temp_service->current_state;
 
 		/* is the service we depend on in state that fails the dependency tests? */
-		if(state == STATE_OK && temp_dependency->fail_on_ok == TRUE)
-			return DEPENDENCIES_FAILED;
-		if(state == STATE_WARNING && temp_dependency->fail_on_warning == TRUE)
-			return DEPENDENCIES_FAILED;
-		if(state == STATE_UNKNOWN && temp_dependency->fail_on_unknown == TRUE)
-			return DEPENDENCIES_FAILED;
-		if(state == STATE_CRITICAL && temp_dependency->fail_on_critical == TRUE)
-			return DEPENDENCIES_FAILED;
-		if((state == STATE_OK && temp_service->has_been_checked == FALSE) && temp_dependency->fail_on_pending == TRUE)
+		if(flag_isset(temp_dependency->failure_options, 1 << state))
 			return DEPENDENCIES_FAILED;
 
 		/* immediate dependencies ok at this point - check parent dependencies if necessary */
@@ -1461,7 +1385,7 @@ void check_service_result_freshness(void) {
 			continue;
 
 		/* skip services that have both active and passive checks disabled */
-		if(temp_service->checks_enabled == FALSE && temp_service->accept_passive_service_checks == FALSE)
+		if(temp_service->checks_enabled == FALSE && temp_service->accept_passive_checks == FALSE)
 			continue;
 
 		/* skip services that are already being freshened */
@@ -1603,24 +1527,12 @@ int is_service_result_fresh(service *temp_service, time_t current_time, int log_
 /*************** COMMON ROUTE/HOST CHECK FUNCTIONS ****************/
 /******************************************************************/
 
-/* execute an on-demand check  */
-int perform_on_demand_host_check(host *hst, int *check_return_code, int check_options, int use_cached_result, unsigned long check_timestamp_horizon) {
-
-	log_debug_info(DEBUGL_FUNCTIONS, 0, "perform_on_demand_host_check()\n");
-
-	perform_on_demand_host_check_3x(hst, check_return_code, check_options, use_cached_result, check_timestamp_horizon);
-
-	return OK;
-	}
-
-
-
 /* execute a scheduled host check using either the 2.x or 3.x logic */
 int perform_scheduled_host_check(host *hst, int check_options, double latency) {
 
 	log_debug_info(DEBUGL_FUNCTIONS, 0, "perform_scheduled_host_check()\n");
 
-	run_scheduled_host_check_3x(hst, check_options, latency);
+	run_scheduled_host_check(hst, check_options, latency);
 
 	return OK;
 	}
@@ -1784,13 +1696,7 @@ int check_host_dependencies(host *hst, int dependency_type) {
 			state = temp_host->current_state;
 
 		/* is the host we depend on in state that fails the dependency tests? */
-		if(state == HOST_UP && temp_dependency->fail_on_up == TRUE)
-			return DEPENDENCIES_FAILED;
-		if(state == HOST_DOWN && temp_dependency->fail_on_down == TRUE)
-			return DEPENDENCIES_FAILED;
-		if(state == HOST_UNREACHABLE && temp_dependency->fail_on_unreachable == TRUE)
-			return DEPENDENCIES_FAILED;
-		if((state == HOST_UP && temp_host->has_been_checked == FALSE) && temp_dependency->fail_on_pending == TRUE)
+		if(flag_isset(temp_dependency->failure_options, 1 << state))
 			return DEPENDENCIES_FAILED;
 
 		/* immediate dependencies ok at this point - check parent dependencies if necessary */
@@ -1883,7 +1789,7 @@ void check_host_result_freshness(void) {
 			continue;
 
 		/* skip hosts that have both active and passive checks disabled */
-		if(temp_host->checks_enabled == FALSE && temp_host->accept_passive_host_checks == FALSE)
+		if(temp_host->checks_enabled == FALSE && temp_host->accept_passive_checks == FALSE)
 			continue;
 
 		/* skip hosts that are currently executing (problems here will be caught by orphaned host check) */
@@ -2020,28 +1926,7 @@ int is_host_result_fresh(host *temp_host, time_t current_time, int log_this) {
 
 /*** ON-DEMAND HOST CHECKS USE THIS FUNCTION ***/
 /* check to see if we can reach the host */
-int perform_on_demand_host_check_3x(host *hst, int *check_result_code, int check_options, int use_cached_result, unsigned long check_timestamp_horizon) {
-	int result = OK;
-
-	log_debug_info(DEBUGL_FUNCTIONS, 0, "perform_on_demand_host_check_3x()\n");
-
-	/* make sure we have a host */
-	if(hst == NULL)
-		return ERROR;
-
-	log_debug_info(DEBUGL_CHECKS, 0, "** On-demand check for host '%s'...\n", hst->name);
-
-	/* check the status of the host */
-	result = run_sync_host_check_3x(hst, check_result_code, check_options, use_cached_result, check_timestamp_horizon);
-
-	return result;
-	}
-
-
-
-/* perform a synchronous check of a host */
-/* on-demand host checks will use this... */
-int run_sync_host_check_3x(host *hst, int *check_result_code, int check_options, int use_cached_result, unsigned long check_timestamp_horizon) {
+int perform_on_demand_host_check(host *hst, int *check_result_code, int check_options, int use_cached_result, unsigned long check_timestamp_horizon) {
 	int result = OK;
 	time_t current_time = 0L;
 	int host_result = HOST_UP;
@@ -2049,8 +1934,7 @@ int run_sync_host_check_3x(host *hst, int *check_result_code, int check_options,
 	struct timeval start_time;
 	struct timeval end_time;
 
-
-	log_debug_info(DEBUGL_FUNCTIONS, 0, "run_sync_host_check_3x()\n");
+	log_debug_info(DEBUGL_FUNCTIONS, 0, "perform_on_demand_host_check()\n");
 
 	/* make sure we have a host */
 	if(hst == NULL)
@@ -2060,7 +1944,7 @@ int run_sync_host_check_3x(host *hst, int *check_result_code, int check_options,
 
 	/* is the host check viable at this time? */
 	/* if not, return current state and bail out */
-	if(check_host_check_viability_3x(hst, check_options, NULL, NULL) == ERROR) {
+	if(check_host_check_viability(hst, check_options, NULL, NULL) == ERROR) {
 		if(check_result_code)
 			*check_result_code = hst->current_state;
 		log_debug_info(DEBUGL_CHECKS, 0, "Host check is not viable at this time.\n");
@@ -2105,7 +1989,7 @@ int run_sync_host_check_3x(host *hst, int *check_result_code, int check_options,
 	hst->latency = 0.0;
 
 	/* adjust host check attempt */
-	adjust_host_check_attempt_3x(hst, TRUE);
+	adjust_host_check_attempt(hst, TRUE);
 
 	/* save old host state */
 	hst->last_state = hst->current_state;
@@ -2135,14 +2019,14 @@ int run_sync_host_check_3x(host *hst, int *check_result_code, int check_options,
 	/* send data to event broker */
 	end_time.tv_sec = 0L;
 	end_time.tv_usec = 0L;
-	broker_host_check(NEBTYPE_HOSTCHECK_INITIATE, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, hst->current_state, hst->state_type, start_time, end_time, hst->host_check_command, hst->latency, 0.0, host_check_timeout, FALSE, 0, NULL, NULL, NULL, NULL, NULL, NULL);
+	broker_host_check(NEBTYPE_HOSTCHECK_INITIATE, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, hst->current_state, hst->state_type, start_time, end_time, hst->check_command, hst->latency, 0.0, host_check_timeout, FALSE, 0, NULL, NULL, NULL, NULL, NULL, NULL);
 #endif
 
 	/* execute the host check */
-	host_result = execute_sync_host_check_3x(hst);
+	host_result = execute_sync_host_check(hst);
 
 	/* process the host check result */
-	process_host_check_result_3x(hst, host_result, old_plugin_output, check_options, FALSE, use_cached_result, check_timestamp_horizon);
+	process_host_check_result(hst, host_result, old_plugin_output, check_options, FALSE, use_cached_result, check_timestamp_horizon);
 
 	/* free memory */
 	my_free(old_plugin_output);
@@ -2154,7 +2038,7 @@ int run_sync_host_check_3x(host *hst, int *check_result_code, int check_options,
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */
-	broker_host_check(NEBTYPE_HOSTCHECK_PROCESSED, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, hst->current_state, hst->state_type, start_time, end_time, hst->host_check_command, hst->latency, hst->execution_time, host_check_timeout, FALSE, hst->current_state, NULL, hst->plugin_output, hst->long_plugin_output, hst->perf_data, hst->saved_data, NULL);
+	broker_host_check(NEBTYPE_HOSTCHECK_PROCESSED, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, hst->current_state, hst->state_type, start_time, end_time, hst->check_command, hst->latency, hst->execution_time, host_check_timeout, FALSE, hst->current_state, NULL, hst->plugin_output, hst->long_plugin_output, hst->perf_data, hst->saved_data, NULL);
 #endif
 
 	return result;
@@ -2164,7 +2048,7 @@ int run_sync_host_check_3x(host *hst, int *check_result_code, int check_options,
 
 /* run an "alive" check on a host */
 /* on-demand host checks will use this... */
-int execute_sync_host_check_3x(host *hst) {
+int execute_sync_host_check(host *hst) {
 	nagios_macros mac;
 	int result = STATE_OK;
 	int return_result = HOST_UP;
@@ -2181,7 +2065,7 @@ int execute_sync_host_check_3x(host *hst) {
 #endif
 
 
-	log_debug_info(DEBUGL_FUNCTIONS, 0, "execute_sync_host_check_3x()\n");
+	log_debug_info(DEBUGL_FUNCTIONS, 0, "execute_sync_host_check()\n");
 
 	if(hst == NULL)
 		return HOST_DOWN;
@@ -2196,7 +2080,7 @@ int execute_sync_host_check_3x(host *hst) {
 	end_time.tv_usec = 0L;
 
 	/* send data to event broker */
-	neb_result = broker_host_check(NEBTYPE_HOSTCHECK_SYNC_PRECHECK, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, hst->current_state, hst->state_type, start_time, end_time, hst->host_check_command, hst->latency, 0.0, host_check_timeout, FALSE, 0, NULL, NULL, NULL, NULL, NULL, NULL);
+	neb_result = broker_host_check(NEBTYPE_HOSTCHECK_SYNC_PRECHECK, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, hst->current_state, hst->state_type, start_time, end_time, hst->check_command, hst->latency, 0.0, host_check_timeout, FALSE, 0, NULL, NULL, NULL, NULL, NULL, NULL);
 
 	/* neb module wants to cancel the host check - return the current state of the host */
 	if(neb_result == NEBERROR_CALLBACKCANCEL)
@@ -2219,7 +2103,7 @@ int execute_sync_host_check_3x(host *hst) {
 	time(&hst->last_check);
 
 	/* get the raw command line */
-	get_raw_command_line_r(&mac, hst->check_command_ptr, hst->host_check_command, &raw_command, 0);
+	get_raw_command_line_r(&mac, hst->check_command_ptr, hst->check_command, &raw_command, 0);
 	if(raw_command == NULL) {
 		clear_volatile_macros_r(&mac);
 		return ERROR;
@@ -2237,7 +2121,7 @@ int execute_sync_host_check_3x(host *hst) {
 	/* send data to event broker */
 	end_time.tv_sec = 0L;
 	end_time.tv_usec = 0L;
-	broker_host_check(NEBTYPE_HOSTCHECK_RAW_START, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, return_result, hst->state_type, start_time, end_time, hst->host_check_command, 0.0, 0.0, host_check_timeout, early_timeout, result, processed_command, hst->plugin_output, hst->long_plugin_output, hst->perf_data, hst->saved_data, NULL);
+	broker_host_check(NEBTYPE_HOSTCHECK_RAW_START, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, return_result, hst->state_type, start_time, end_time, hst->check_command, 0.0, 0.0, host_check_timeout, early_timeout, result, processed_command, hst->plugin_output, hst->long_plugin_output, hst->perf_data, hst->saved_data, NULL);
 #endif
 
 	log_debug_info(DEBUGL_COMMANDS, 1, "Raw host check command: %s\n", raw_command);
@@ -2258,7 +2142,7 @@ int execute_sync_host_check_3x(host *hst) {
 	if(early_timeout == TRUE) {
 
 		my_free(temp_plugin_output);
-		asprintf(&temp_plugin_output, "Host check timed out after %d seconds\n", host_check_timeout);
+		(void) asprintf(&temp_plugin_output, "Host check timed out after %d seconds\n", host_check_timeout);
 
 		/* log the timeout */
 		logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: Host check command '%s' for host '%s' timed out after %d seconds\n", processed_command, hst->name, host_check_timeout);
@@ -2278,7 +2162,7 @@ int execute_sync_host_check_3x(host *hst) {
 	my_free(processed_command);
 
 	/* a NULL host check command means we should assume the host is UP */
-	if(hst->host_check_command == NULL) {
+	if(hst->check_command == NULL) {
 		my_free(hst->plugin_output);
 		hst->plugin_output = (char *)strdup("(Host assumed to be UP)");
 		result = STATE_OK;
@@ -2311,7 +2195,7 @@ int execute_sync_host_check_3x(host *hst) {
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */
-	broker_host_check(NEBTYPE_HOSTCHECK_RAW_END, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, return_result, hst->state_type, start_time, end_time, hst->host_check_command, 0.0, exectime, host_check_timeout, early_timeout, result, processed_command, hst->plugin_output, hst->long_plugin_output, hst->perf_data, hst->saved_data, NULL);
+	broker_host_check(NEBTYPE_HOSTCHECK_RAW_END, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, return_result, hst->state_type, start_time, end_time, hst->check_command, 0.0, exectime, host_check_timeout, early_timeout, result, processed_command, hst->plugin_output, hst->long_plugin_output, hst->perf_data, hst->saved_data, NULL);
 #endif
 
 	log_debug_info(DEBUGL_CHECKS, 0, "** Sync host check done: state=%d\n", return_result);
@@ -2322,7 +2206,7 @@ int execute_sync_host_check_3x(host *hst) {
 
 
 /* run a scheduled host check asynchronously */
-int run_scheduled_host_check_3x(host *hst, int check_options, double latency) {
+int run_scheduled_host_check(host *hst, int check_options, double latency) {
 	int result = OK;
 	time_t current_time = 0L;
 	time_t preferred_time = 0L;
@@ -2330,7 +2214,7 @@ int run_scheduled_host_check_3x(host *hst, int check_options, double latency) {
 	int time_is_valid = TRUE;
 
 
-	log_debug_info(DEBUGL_FUNCTIONS, 0, "run_scheduled_host_check_3x()\n");
+	log_debug_info(DEBUGL_FUNCTIONS, 0, "run_scheduled_host_check()\n");
 
 	if(hst == NULL)
 		return ERROR;
@@ -2344,7 +2228,7 @@ int run_scheduled_host_check_3x(host *hst, int check_options, double latency) {
 	hst->next_check_event = NULL;
 
 	/* attempt to run the check */
-	result = run_async_host_check_3x(hst, check_options, latency, TRUE, TRUE, &time_is_valid, &preferred_time);
+	result = run_async_host_check(hst, check_options, latency, TRUE, TRUE, &time_is_valid, &preferred_time);
 
 	/* an error occurred, so reschedule the check */
 	if(result == ERROR) {
@@ -2365,17 +2249,15 @@ int run_scheduled_host_check_3x(host *hst, int check_options, double latency) {
 			/* make sure we rescheduled the next host check at a valid time */
 			get_next_valid_time(preferred_time, &next_valid_time, hst->check_period_ptr);
 
-			/* the host could not be rescheduled properly - set the next check time for next week */
-			if(time_is_valid == FALSE && next_valid_time == preferred_time) {
+			/*
+			 * If the host really can't be rescheduled properly we
+			 * set next check time to preferred_time and try again then
+			 */
+			if(time_is_valid == FALSE && check_time_against_period(next_valid_time, hst->check_period_ptr) == ERROR) {
 
-				/*
-				hst->next_check=(time_t)(next_valid_time+(60*60*24*365));
-				hst->should_be_scheduled=FALSE;
-				*/
+				hst->next_check = preferred_time;
 
-				hst->next_check = (time_t)(next_valid_time + (60 * 60 * 24 * 7));
-
-				logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: Check of host '%s' could not be rescheduled properly.  Scheduling check for next week...\n", hst->name);
+				logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: Check of host '%s' could not be rescheduled properly.  Scheduling check for %s...\n", hst->name, ctime(&preferred_time));
 
 				log_debug_info(DEBUGL_CHECKS, 1, "Unable to find any valid times to reschedule the next host check!\n");
 				}
@@ -2407,7 +2289,7 @@ int run_scheduled_host_check_3x(host *hst, int check_options, double latency) {
 
 /* perform an asynchronous check of a host */
 /* scheduled host checks will use this, as will some checks that result from on-demand checks... */
-int run_async_host_check_3x(host *hst, int check_options, double latency, int scheduled_check, int reschedule_check, int *time_is_valid, time_t *preferred_time) {
+int run_async_host_check(host *hst, int check_options, double latency, int scheduled_check, int reschedule_check, int *time_is_valid, time_t *preferred_time) {
 	nagios_macros mac;
 	char *raw_command = NULL;
 	char *processed_command = NULL;
@@ -2418,7 +2300,7 @@ int run_async_host_check_3x(host *hst, int check_options, double latency, int sc
 	int neb_result = OK;
 #endif
 
-	log_debug_info(DEBUGL_FUNCTIONS, 0, "run_async_host_check_3x()\n");
+	log_debug_info(DEBUGL_FUNCTIONS, 0, "run_async_host_check()\n");
 
 	/* make sure we have a host */
 	if(hst == NULL)
@@ -2427,7 +2309,7 @@ int run_async_host_check_3x(host *hst, int check_options, double latency, int sc
 	log_debug_info(DEBUGL_CHECKS, 0, "** Running async check of host '%s'...\n", hst->name);
 
 	/* is the host check viable at this time? */
-	if(check_host_check_viability_3x(hst, check_options, time_is_valid, preferred_time) == ERROR)
+	if(check_host_check_viability(hst, check_options, time_is_valid, preferred_time) == ERROR)
 		return ERROR;
 
 	/* 08/04/07 EG don't execute a new host check if one is already running */
@@ -2446,7 +2328,7 @@ int run_async_host_check_3x(host *hst, int check_options, double latency, int sc
 	end_time.tv_usec = 0L;
 
 	/* send data to event broker */
-	neb_result = broker_host_check(NEBTYPE_HOSTCHECK_ASYNC_PRECHECK, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, hst->current_state, hst->state_type, start_time, end_time, hst->host_check_command, hst->latency, 0.0, host_check_timeout, FALSE, 0, NULL, NULL, NULL, NULL, NULL, NULL);
+	neb_result = broker_host_check(NEBTYPE_HOSTCHECK_ASYNC_PRECHECK, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, hst->current_state, hst->state_type, start_time, end_time, hst->check_command, hst->latency, 0.0, host_check_timeout, FALSE, 0, NULL, NULL, NULL, NULL, NULL, NULL);
 
 	/* neb module wants to cancel the host check - the check will be rescheduled for a later time by the scheduling logic */
 	if(neb_result == NEBERROR_CALLBACKCANCEL)
@@ -2466,7 +2348,7 @@ int run_async_host_check_3x(host *hst, int check_options, double latency, int sc
 		hst->check_options = CHECK_OPTION_NONE;
 
 	/* adjust host check attempt */
-	adjust_host_check_attempt_3x(hst, TRUE);
+	adjust_host_check_attempt(hst, TRUE);
 
 	/* set latency (temporarily) for macros and event broker */
 	old_latency = hst->latency;
@@ -2477,7 +2359,7 @@ int run_async_host_check_3x(host *hst, int check_options, double latency, int sc
 	grab_host_macros_r(&mac, hst);
 
 	/* get the raw command line */
-	get_raw_command_line_r(&mac, hst->check_command_ptr, hst->host_check_command, &raw_command, 0);
+	get_raw_command_line_r(&mac, hst->check_command_ptr, hst->check_command, &raw_command, 0);
 	if(raw_command == NULL) {
 		clear_volatile_macros_r(&mac);
 		log_debug_info(DEBUGL_CHECKS, 0, "Raw check command for host '%s' was NULL - aborting.\n", hst->name);
@@ -2533,7 +2415,7 @@ int run_async_host_check_3x(host *hst, int check_options, double latency, int sc
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */
-	broker_host_check(NEBTYPE_HOSTCHECK_INITIATE, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, hst->current_state, hst->state_type, start_time, end_time, hst->host_check_command, hst->latency, 0.0, host_check_timeout, FALSE, 0, processed_command, NULL, NULL, NULL, NULL, NULL);
+	broker_host_check(NEBTYPE_HOSTCHECK_INITIATE, NEBFLAG_NONE, NEBATTR_NONE, hst, HOST_CHECK_ACTIVE, hst->current_state, hst->state_type, start_time, end_time, hst->check_command, hst->latency, 0.0, host_check_timeout, FALSE, 0, processed_command, NULL, NULL, NULL, NULL, NULL);
 #endif
 
 	/* reset latency (permanent value for this check will get set later) */
@@ -2555,7 +2437,7 @@ int run_async_host_check_3x(host *hst, int check_options, double latency, int sc
 
 
 /* process results of an asynchronous host check */
-int handle_async_host_check_result_3x(host *temp_host, check_result *queued_check_result) {
+int handle_async_host_check_result(host *temp_host, check_result *queued_check_result) {
 	time_t current_time;
 	int result = STATE_OK;
 	int reschedule_check = FALSE;
@@ -2564,7 +2446,7 @@ int handle_async_host_check_result_3x(host *temp_host, check_result *queued_chec
 	struct timeval start_time_hires;
 	struct timeval end_time_hires;
 
-	log_debug_info(DEBUGL_FUNCTIONS, 0, "handle_async_host_check_result_3x()\n");
+	log_debug_info(DEBUGL_FUNCTIONS, 0, "handle_async_host_check_result()\n");
 
 	/* make sure we have what we need */
 	if(temp_host == NULL || queued_check_result == NULL)
@@ -2572,7 +2454,7 @@ int handle_async_host_check_result_3x(host *temp_host, check_result *queued_chec
 
 	time(&current_time);
 
-	log_debug_info(DEBUGL_CHECKS, 1, "** Handling async check result for host '%s'...\n", temp_host->name);
+	log_debug_info(DEBUGL_CHECKS, 1, "** Handling async check result for host '%s' from '%s'...\n", temp_host->name, check_result_source(queued_check_result));
 
 	log_debug_info(DEBUGL_CHECKS, 2, "\tCheck Type:         %s\n", (queued_check_result->check_type == HOST_CHECK_ACTIVE) ? "Active" : "Passive");
 	log_debug_info(DEBUGL_CHECKS, 2, "\tCheck Options:      %d\n", queued_check_result->check_options);
@@ -2594,7 +2476,7 @@ int handle_async_host_check_result_3x(host *temp_host, check_result *queued_chec
 			log_debug_info(DEBUGL_CHECKS, 0, "Discarding passive host check result because passive host checks are disabled globally.\n");
 			return ERROR;
 			}
-		if(temp_host->accept_passive_host_checks == FALSE) {
+		if(temp_host->accept_passive_checks == FALSE) {
 			log_debug_info(DEBUGL_CHECKS, 0, "Discarding passive host check result because passive checks are disabled for this host.\n");
 			return ERROR;
 			}
@@ -2712,13 +2594,13 @@ int handle_async_host_check_result_3x(host *temp_host, check_result *queued_chec
 			my_free(temp_host->perf_data);
 			my_free(temp_host->saved_data);
 
-			asprintf(&temp_host->plugin_output, "(Return code of %d is out of bounds%s)", queued_check_result->return_code, (queued_check_result->return_code == 126 || queued_check_result->return_code == 127) ? " - plugin may be missing" : "");
+			(void)asprintf(&temp_host->plugin_output, "(Return code of %d is out of bounds%s)", queued_check_result->return_code, (queued_check_result->return_code == 126 || queued_check_result->return_code == 127) ? " - plugin may be missing" : "");
 
 			result = STATE_CRITICAL;
 			}
 
 		/* a NULL host check command means we should assume the host is UP */
-		if(temp_host->host_check_command == NULL) {
+		if(temp_host->check_command == NULL) {
 			my_free(temp_host->plugin_output);
 			temp_host->plugin_output = (char *)strdup("(Host assumed to be UP)");
 			result = STATE_OK;
@@ -2746,7 +2628,7 @@ int handle_async_host_check_result_3x(host *temp_host, check_result *queued_chec
 	/******************* PROCESS THE CHECK RESULTS ******************/
 
 	/* process the host check result */
-	process_host_check_result_3x(temp_host, result, old_plugin_output, CHECK_OPTION_NONE, reschedule_check, TRUE, cached_host_check_horizon);
+	process_host_check_result(temp_host, result, old_plugin_output, CHECK_OPTION_NONE, reschedule_check, TRUE, cached_host_check_horizon);
 
 	/* free memory */
 	my_free(old_plugin_output);
@@ -2761,7 +2643,7 @@ int handle_async_host_check_result_3x(host *temp_host, check_result *queued_chec
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */
-	broker_host_check(NEBTYPE_HOSTCHECK_PROCESSED, NEBFLAG_NONE, NEBATTR_NONE, temp_host, temp_host->check_type, temp_host->current_state, temp_host->state_type, start_time_hires, end_time_hires, temp_host->host_check_command, temp_host->latency, temp_host->execution_time, host_check_timeout, queued_check_result->early_timeout, queued_check_result->return_code, NULL, temp_host->plugin_output, temp_host->long_plugin_output, temp_host->perf_data, temp_host->saved_data, NULL);
+	broker_host_check(NEBTYPE_HOSTCHECK_PROCESSED, NEBFLAG_NONE, NEBATTR_NONE, temp_host, temp_host->check_type, temp_host->current_state, temp_host->state_type, start_time_hires, end_time_hires, temp_host->check_command, temp_host->latency, temp_host->execution_time, host_check_timeout, queued_check_result->early_timeout, queued_check_result->return_code, NULL, temp_host->plugin_output, temp_host->long_plugin_output, temp_host->perf_data, temp_host->saved_data, NULL);
 #endif
 
 	return OK;
@@ -2770,7 +2652,7 @@ int handle_async_host_check_result_3x(host *temp_host, check_result *queued_chec
 
 
 /* processes the result of a synchronous or asynchronous host check */
-int process_host_check_result_3x(host *hst, int new_state, char *old_plugin_output, int check_options, int reschedule_check, int use_cached_result, unsigned long check_timestamp_horizon) {
+int process_host_check_result(host *hst, int new_state, char *old_plugin_output, int check_options, int reschedule_check, int use_cached_result, unsigned long check_timestamp_horizon) {
 	hostsmember *temp_hostsmember = NULL;
 	host *child_host = NULL;
 	host *parent_host = NULL;
@@ -2787,7 +2669,7 @@ int process_host_check_result_3x(host *hst, int new_state, char *old_plugin_outp
 	int run_async_check = TRUE;
 
 
-	log_debug_info(DEBUGL_FUNCTIONS, 0, "process_host_check_result_3x()\n");
+	log_debug_info(DEBUGL_FUNCTIONS, 0, "process_host_check_result()\n");
 
 	log_debug_info(DEBUGL_CHECKS, 1, "HOST: %s, ATTEMPT=%d/%d, CHECK TYPE=%s, STATE TYPE=%s, OLD STATE=%d, NEW STATE=%d\n", hst->name, hst->current_attempt, hst->max_attempts, (hst->check_type == HOST_CHECK_ACTIVE) ? "ACTIVE" : "PASSIVE", (hst->state_type == HARD_STATE) ? "HARD" : "SOFT", hst->current_state, new_state);
 
@@ -2799,7 +2681,7 @@ int process_host_check_result_3x(host *hst, int new_state, char *old_plugin_outp
 
 	/* we have to adjust current attempt # for passive checks, as it isn't done elsewhere */
 	if(hst->check_type == HOST_CHECK_PASSIVE && passive_host_checks_are_soft == TRUE)
-		adjust_host_check_attempt_3x(hst, FALSE);
+		adjust_host_check_attempt(hst, FALSE);
 
 	/* log passive checks - we need to do this here, as some my bypass external commands by getting dropped in checkresults dir */
 	if(hst->check_type == HOST_CHECK_PASSIVE) {
@@ -2970,7 +2852,7 @@ int process_host_check_result_3x(host *hst, int new_state, char *old_plugin_outp
 						log_debug_info(DEBUGL_CHECKS, 1, "Running serial check parent host '%s'...\n", parent_host->name);
 
 						/* run an immediate check of the parent host */
-						run_sync_host_check_3x(parent_host, &parent_state, check_options, use_cached_result, check_timestamp_horizon);
+						perform_on_demand_host_check(parent_host, &parent_state, check_options, use_cached_result, check_timestamp_horizon);
 
 						/* bail out as soon as we find one parent host that is UP */
 						if(parent_state == HOST_UP) {
@@ -3126,14 +3008,7 @@ int process_host_check_result_3x(host *hst, int new_state, char *old_plugin_outp
 
 	/* if the plugin output differs from previous check and no state change, log the current state/output if state stalking is enabled */
 	if(hst->last_state == hst->current_state && compare_strings(old_plugin_output, hst->plugin_output)) {
-
-		if(hst->current_state == HOST_UP && hst->stalk_on_up == TRUE)
-			log_host_event(hst);
-
-		else if(hst->current_state == HOST_DOWN && hst->stalk_on_down == TRUE)
-			log_host_event(hst);
-
-		else if(hst->current_state == HOST_UNREACHABLE && hst->stalk_on_unreachable == TRUE)
+		if(should_stalk(hst))
 			log_host_event(hst);
 		}
 
@@ -3192,7 +3067,7 @@ int process_host_check_result_3x(host *hst, int new_state, char *old_plugin_outp
 		if(temp_host->is_executing == TRUE)
 			run_async_check = FALSE;
 		if(run_async_check == TRUE)
-			run_async_host_check_3x(temp_host, CHECK_OPTION_NONE, 0.0, FALSE, FALSE, NULL, NULL);
+			run_async_host_check(temp_host, CHECK_OPTION_NONE, 0.0, FALSE, FALSE, NULL, NULL);
 		}
 	free_objectlist(&check_hostlist);
 
@@ -3202,14 +3077,14 @@ int process_host_check_result_3x(host *hst, int new_state, char *old_plugin_outp
 
 
 /* checks viability of performing a host check */
-int check_host_check_viability_3x(host *hst, int check_options, int *time_is_valid, time_t *new_time) {
+int check_host_check_viability(host *hst, int check_options, int *time_is_valid, time_t *new_time) {
 	int result = OK;
 	int perform_check = TRUE;
 	time_t current_time = 0L;
 	time_t preferred_time = 0L;
 	int check_interval = 0;
 
-	log_debug_info(DEBUGL_FUNCTIONS, 0, "check_host_check_viability_3x()\n");
+	log_debug_info(DEBUGL_FUNCTIONS, 0, "check_host_check_viability()\n");
 
 	/* make sure we have a host */
 	if(hst == NULL)
@@ -3267,9 +3142,9 @@ int check_host_check_viability_3x(host *hst, int check_options, int *time_is_val
 
 
 /* adjusts current host check attempt before a new check is performed */
-int adjust_host_check_attempt_3x(host *hst, int is_active) {
+int adjust_host_check_attempt(host *hst, int is_active) {
 
-	log_debug_info(DEBUGL_FUNCTIONS, 0, "adjust_host_check_attempt_3x()\n");
+	log_debug_info(DEBUGL_FUNCTIONS, 0, "adjust_host_check_attempt()\n");
 
 	if(hst == NULL)
 		return ERROR;
@@ -3398,8 +3273,8 @@ int handle_host_state(host *hst) {
 	if(state_change == TRUE || hard_state_change == TRUE) {
 
 		/* reset the next and last notification times */
-		hst->last_host_notification = (time_t)0;
-		hst->next_host_notification = (time_t)0;
+		hst->last_notification = (time_t)0;
+		hst->next_notification = (time_t)0;
 
 		/* reset notification suppression option */
 		hst->no_more_notifications = FALSE;
@@ -3475,8 +3350,7 @@ int handle_host_state(host *hst) {
 		if(hst->current_state == HOST_UP) {
 			hst->current_attempt = 1;
 			hst->current_notification_number = 0;
-			hst->notified_on_down = FALSE;
-			hst->notified_on_unreachable = FALSE;
+			hst->notified_on = 0;
 			}
 		}
 
