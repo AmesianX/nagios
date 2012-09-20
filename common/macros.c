@@ -31,14 +31,7 @@
 #include "../include/cgiutils.h"
 #endif
 
-#ifdef NSCORE
-extern int      use_large_installation_tweaks;
-extern int      enable_environment_macros;
-#endif
-
-extern char     *illegal_output_chars;
-
-char *macro_x_names[MACRO_X_COUNT]; /* the macro names */
+static char *macro_x_names[MACRO_X_COUNT]; /* the macro names */
 char *macro_user[MAX_USER_MACROS]; /* $USERx$ macros */
 
 struct macro_key_code {
@@ -1650,8 +1643,8 @@ int grab_standard_host_macro_r(nagios_macros *mac, int macro_type, host *temp_ho
 			break;
 #endif
 		case MACRO_HOSTCHECKCOMMAND:
-			if(temp_host->host_check_command)
-				*output = (char *)strdup(temp_host->host_check_command);
+			if(temp_host->check_command)
+				*output = (char *)strdup(temp_host->check_command);
 			break;
 #ifdef NSCORE
 		case MACRO_HOSTATTEMPT:
@@ -1806,7 +1799,20 @@ int grab_standard_host_macro_r(nagios_macros *mac, int macro_type, host *temp_ho
 			/* tell caller to NOT free memory when done */
 			*free_macro = FALSE;
 			break;
+		case MACRO_HOSTVALUE:
+			*free_macro = FALSE;
+			*output = (char *)mkstr("%u", mac->host_ptr->hourly_value);
+			break;
+		case MACRO_SERVICEVALUE:
+			*free_macro = FALSE;
+			*output = (char *)mkstr("%u", host_services_value(mac->host_ptr));
+			break;
+		case MACRO_PROBLEMVALUE:
+			*free_macro = FALSE;
+			*output = (char *)mkstr("%u", mac->host_ptr->hourly_value + host_services_value(mac->host_ptr));
+			break;
 #endif
+
 			/***************/
 			/* MISC MACROS */
 			/***************/
@@ -1883,6 +1889,12 @@ int grab_standard_hostgroup_macro_r(nagios_macros *mac, int macro_type, hostgrou
 					temp_len += strlen(temp_hostsmember->host_name) + 2;
 					}
 				}
+			if(!temp_len) {
+				/* empty group, so return the nul string */
+				*output = calloc(1, 1);
+				return OK;
+				}
+
 			/* allocate or reallocate the memory buffer */
 			if(*output == NULL) {
 				*output = (char *)malloc(temp_len);
@@ -1999,8 +2011,8 @@ int grab_standard_service_macro_r(nagios_macros *mac, int macro_type, service *t
 			break;
 #endif
 		case MACRO_SERVICECHECKCOMMAND:
-			if(temp_service->service_check_command)
-				*output = (char *)strdup(temp_service->service_check_command);
+			if(temp_service->check_command)
+				*output = (char *)strdup(temp_service->check_command);
 			break;
 #ifdef NSCORE
 		case MACRO_SERVICECHECKTYPE:
@@ -2222,6 +2234,11 @@ int grab_standard_servicegroup_macro_r(nagios_macros *mac, int macro_type, servi
 				else {
 					temp_len += strlen(temp_servicesmember->host_name) + strlen(temp_servicesmember->service_description) + 3;
 					}
+				}
+			if(!temp_len) {
+				/* empty group, so return the nul string */
+				*output = calloc(1, 1);
+				return OK;
 				}
 			/* allocate or reallocate the memory buffer */
 			if(*output == NULL) {
@@ -2764,6 +2781,9 @@ int init_macrox_names(void) {
 	add_macrox_name(LASTHOSTSTATEID);
 	add_macrox_name(LASTSERVICESTATE);
 	add_macrox_name(LASTSERVICESTATEID);
+	add_macrox_name(HOSTVALUE);
+	add_macrox_name(SERVICEVALUE);
+	add_macrox_name(PROBLEMVALUE);
 
 	return OK;
 	}
@@ -3199,24 +3219,31 @@ int set_all_macro_environment_vars(int set) {
 int set_macrox_environment_vars_r(nagios_macros *mac, int set) {
 	register int x = 0;
 	int free_macro = FALSE;
-	int generate_macro = TRUE;
 
 	/* set each of the macrox environment variables */
 	for(x = 0; x < MACRO_X_COUNT; x++) {
 
 		free_macro = FALSE;
 
+		/* large installations don't get all macros */
+		if(use_large_installation_tweaks == TRUE) {
+			/*
+			 * member macros tend to overflow the
+			 * environment on large installations
+			 */
+			if(x == MACRO_SERVICEGROUPMEMBERS || x == MACRO_HOSTGROUPMEMBERS)
+				continue;
+
+			/* summary macros are CPU intensive to compute */
+			if(x >= MACRO_TOTALHOSTSUP && x <= MACRO_TOTALSERVICEPROBLEMSUNHANDLED)
+				continue;
+			}
+
 		/* generate the macro value if it hasn't already been done */
 		/* THIS IS EXPENSIVE */
 		if(set == TRUE) {
 
-			generate_macro = TRUE;
-
-			/* skip summary macro generation if lage installation tweaks are enabled */
-			if((x >= MACRO_TOTALHOSTSUP && x <= MACRO_TOTALSERVICEPROBLEMSUNHANDLED) && use_large_installation_tweaks == TRUE)
-				generate_macro = FALSE;
-
-			if(mac->x[x] == NULL && generate_macro == TRUE)
+			if(mac->x[x] == NULL)
 				grab_macrox_value_r(mac, x, NULL, NULL, &mac->x[x], &free_macro);
 			}
 

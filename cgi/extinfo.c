@@ -37,22 +37,6 @@ extern char             nagios_process_info[MAX_INPUT_BUFFER];
 extern int              nagios_process_state;
 extern int              refresh_rate;
 
-extern time_t		program_start;
-extern int              nagios_pid;
-extern int              daemon_mode;
-extern time_t           last_log_rotation;
-extern int              enable_notifications;
-extern int              execute_service_checks;
-extern int              accept_passive_service_checks;
-extern int              execute_host_checks;
-extern int              accept_passive_host_checks;
-extern int              enable_event_handlers;
-extern int              obsess_over_services;
-extern int              obsess_over_hosts;
-extern int              enable_flap_detection;
-extern int              enable_failure_prediction;
-extern int              process_performance_data;
-
 extern int              buffer_stats[1][3];
 extern int              program_stats[MAX_CHECK_STATS_TYPES][3];
 
@@ -853,18 +837,8 @@ void show_process_info(void) {
 	/* flap detection enabled */
 	printf("<TR><TD CLASS='dataVar'>Flap Detection Enabled?</TD><TD CLASS='dataVal'>%s</TD></TR>\n", (enable_flap_detection == TRUE) ? "Yes" : "No");
 
-#ifdef PREDICT_FAILURES
-	/* failure prediction enabled */
-	printf("<TR><TD CLASS='dataVar'>Failure Prediction Enabled?</TD><TD CLASS='dataVal'>%s</TD></TR>\n", (enable_failure_prediction == TRUE) ? "Yes" : "No");
-#endif
-
 	/* process performance data */
 	printf("<TR><TD CLASS='dataVar'>Performance Data Being Processed?</TD><TD CLASS='dataVal'>%s</TD></TR>\n", (process_performance_data == TRUE) ? "Yes" : "No");
-
-#ifdef USE_OLDCRUD
-	/* daemon mode */
-	printf("<TR><TD CLASS='dataVar'>Running As A Daemon?</TD><TD CLASS='dataVal'>%s</TD></TR>\n", (daemon_mode == TRUE) ? "Yes" : "No");
-#endif
 
 	printf("</TABLE>\n");
 	printf("</TD></TR>\n");
@@ -931,12 +905,6 @@ void show_process_info(void) {
 		else
 			printf("<TR CLASS='command'><TD><img src='%s%s' border=0 ALT='Enable Flap Detection' TITLE='Enable Flap Detection'></td><td CLASS='command'><a href='%s?cmd_typ=%d'>Enable flap detection</a></td></tr>\n", url_images_path, ENABLED_ICON, COMMAND_CGI, CMD_ENABLE_FLAP_DETECTION);
 
-#ifdef PREDICT_FAILURES
-		if(enable_failure_prediction == TRUE)
-			printf("<TR CLASS='command'><TD><img src='%s%s' border=0 ALT='Disable Failure Prediction' TITLE='Disable Failure Prediction'></td><td CLASS='command'><a href='%s?cmd_typ=%d'>Disable failure prediction</a></td></tr>\n", url_images_path, DISABLED_ICON, COMMAND_CGI, CMD_DISABLE_FAILURE_PREDICTION);
-		else
-			printf("<TR CLASS='command'><TD><img src='%s%s' border=0 ALT='Enable Failure Prediction' TITLE='Enable Failure Prediction'></td><td CLASS='command'><a href='%s?cmd_typ=%d'>Enable failure prediction</a></td></tr>\n", url_images_path, ENABLED_ICON, COMMAND_CGI, CMD_ENABLE_FAILURE_PREDICTION);
-#endif
 		if(process_performance_data == TRUE)
 			printf("<TR CLASS='command'><TD><img src='%s%s' border=0 ALT='Disable Performance Data' TITLE='Disable Performance Data'></td><td CLASS='command'><a href='%s?cmd_typ=%d'>Disable performance data</a></td></tr>\n", url_images_path, DISABLED_ICON, COMMAND_CGI, CMD_DISABLE_PERFORMANCE_DATA);
 		else
@@ -1049,15 +1017,15 @@ void show_host_info(void) {
 			snprintf(state_duration, sizeof(state_duration) - 1, "%2dd %2dh %2dm %2ds%s", days, hours, minutes, seconds, (temp_hoststatus->last_state_change == (time_t)0) ? "+" : "");
 		state_duration[sizeof(state_duration) - 1] = '\x0';
 
-		if(temp_hoststatus->status == HOST_UP) {
+		if(temp_hoststatus->status == SD_HOST_UP) {
 			strcpy(state_string, "UP");
 			bg_class = "hostUP";
 			}
-		else if(temp_hoststatus->status == HOST_DOWN) {
+		else if(temp_hoststatus->status == SD_HOST_DOWN) {
 			strcpy(state_string, "DOWN");
 			bg_class = "hostDOWN";
 			}
-		else if(temp_hoststatus->status == HOST_UNREACHABLE) {
+		else if(temp_hoststatus->status == SD_HOST_UNREACHABLE) {
 			strcpy(state_string, "UNREACHABLE");
 			bg_class = "hostUNREACHABLE";
 			}
@@ -1145,9 +1113,9 @@ void show_host_info(void) {
 
 		printf("<TR><TD CLASS='dataVar'>Active Checks:</TD><TD CLASS='dataVal'><DIV CLASS='checks%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></TD></TR>\n", (temp_hoststatus->checks_enabled == TRUE) ? "ENABLED" : "DISABLED", (temp_hoststatus->checks_enabled == TRUE) ? "ENABLED" : "DISABLED");
 
-		printf("<TR><TD CLASS='dataVar'>Passive Checks:</TD><td CLASS='dataVal'><DIV CLASS='checks%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></TD></TR>\n", (temp_hoststatus->accept_passive_host_checks == TRUE) ? "ENABLED" : "DISABLED", (temp_hoststatus->accept_passive_host_checks) ? "ENABLED" : "DISABLED");
+		printf("<TR><TD CLASS='dataVar'>Passive Checks:</TD><td CLASS='dataVal'><DIV CLASS='checks%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></TD></TR>\n", (temp_hoststatus->accept_passive_checks == TRUE) ? "ENABLED" : "DISABLED", (temp_hoststatus->accept_passive_checks) ? "ENABLED" : "DISABLED");
 
-		printf("<TR><TD CLASS='dataVar'>Obsessing:</TD><td CLASS='dataVal'><DIV CLASS='checks%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></TD></TR>\n", (temp_hoststatus->obsess_over_host == TRUE) ? "ENABLED" : "DISABLED", (temp_hoststatus->obsess_over_host) ? "ENABLED" : "DISABLED");
+		printf("<TR><TD CLASS='dataVar'>Obsessing:</TD><td CLASS='dataVal'><DIV CLASS='checks%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></TD></TR>\n", (temp_hoststatus->obsess == TRUE) ? "ENABLED" : "DISABLED", (temp_hoststatus->obsess) ? "ENABLED" : "DISABLED");
 
 		printf("<TR><TD CLASS='dataVar'>Notifications:</td><td CLASS='dataVal'><DIV CLASS='notifications%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></td></tr>\n", (temp_hoststatus->notifications_enabled) ? "ENABLED" : "DISABLED", (temp_hoststatus->notifications_enabled) ? "ENABLED" : "DISABLED");
 
@@ -1187,19 +1155,19 @@ void show_host_info(void) {
 			printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Enable Active Checks Of This Host' TITLE='Enable Active Checks Of This Host'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s'>Enable active checks of this host</a></td></tr>\n", url_images_path, ENABLED_ICON, COMMAND_CGI, CMD_ENABLE_HOST_CHECK, url_encode(host_name));
 		printf("<tr CLASS='data'><td><img src='%s%s' border=0 ALT='Re-schedule Next Host Check' TITLE='Re-schedule Next Host Check'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s%s'>Re-schedule the next check of this host</a></td></tr>\n", url_images_path, DELAY_ICON, COMMAND_CGI, CMD_SCHEDULE_HOST_CHECK, url_encode(host_name), (temp_hoststatus->checks_enabled == TRUE) ? "&force_check" : "");
 
-		if(temp_hoststatus->accept_passive_host_checks == TRUE) {
+		if(temp_hoststatus->accept_passive_checks == TRUE) {
 			printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Submit Passive Check Result For This Host' TITLE='Submit Passive Check Result For This Host'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s'>Submit passive check result for this host</a></td></tr>\n", url_images_path, PASSIVE_ICON, COMMAND_CGI, CMD_PROCESS_HOST_CHECK_RESULT, url_encode(host_name));
 			printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Stop Accepting Passive Checks For This Host' TITLE='Stop Accepting Passive Checks For This Host'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s'>Stop accepting passive checks for this host</a></td></tr>\n", url_images_path, DISABLED_ICON, COMMAND_CGI, CMD_DISABLE_PASSIVE_HOST_CHECKS, url_encode(host_name));
 			}
 		else
 			printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Start Accepting Passive Checks For This Host' TITLE='Start Accepting Passive Checks For This Host'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s'>Start accepting passive checks for this host</a></td></tr>\n", url_images_path, ENABLED_ICON, COMMAND_CGI, CMD_ENABLE_PASSIVE_HOST_CHECKS, url_encode(host_name));
 
-		if(temp_hoststatus->obsess_over_host == TRUE)
+		if(temp_hoststatus->obsess == TRUE)
 			printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Stop Obsessing Over This Host' TITLE='Stop Obsessing Over This Host'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s'>Stop obsessing over this host</a></td></tr>\n", url_images_path, DISABLED_ICON, COMMAND_CGI, CMD_STOP_OBSESSING_OVER_HOST, url_encode(host_name));
 		else
 			printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Start Obsessing Over This Host' TITLE='Start Obsessing Over This Host'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s'>Start obsessing over this host</a></td></tr>\n", url_images_path, ENABLED_ICON, COMMAND_CGI, CMD_START_OBSESSING_OVER_HOST, url_encode(host_name));
 
-		if(temp_hoststatus->status == HOST_DOWN || temp_hoststatus->status == HOST_UNREACHABLE) {
+		if(temp_hoststatus->status == SD_HOST_DOWN || temp_hoststatus->status == SD_HOST_UNREACHABLE) {
 			if(temp_hoststatus->problem_has_been_acknowledged == FALSE)
 				printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Acknowledge This Host Problem' TITLE='Acknowledge This Host Problem'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s'>Acknowledge this host problem</a></td></tr>\n", url_images_path, ACKNOWLEDGEMENT_ICON, COMMAND_CGI, CMD_ACKNOWLEDGE_HOST_PROBLEM, url_encode(host_name));
 			else
@@ -1213,7 +1181,7 @@ void show_host_info(void) {
 
 		printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Send Custom Notification' TITLE='Send Custom Notification'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s'>Send custom host notification</a></td></tr>\n", url_images_path, NOTIFICATION_ICON, COMMAND_CGI, CMD_SEND_CUSTOM_HOST_NOTIFICATION, url_encode(host_name));
 
-		if(temp_hoststatus->status != HOST_UP)
+		if(temp_hoststatus->status != SD_HOST_UP)
 			printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Delay Next Host Notification' TITLE='Delay Next Host Notification'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s'>Delay next host notification</a></td></tr>\n", url_images_path, DELAY_ICON, COMMAND_CGI, CMD_DELAY_HOST_NOTIFICATION, url_encode(host_name));
 
 		printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Schedule Downtime For This Host' TITLE='Schedule Downtime For This Host'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s'>Schedule downtime for this host</a></td></tr>\n", url_images_path, DOWNTIME_ICON, COMMAND_CGI, CMD_SCHEDULE_HOST_DOWNTIME, url_encode(host_name));
@@ -1462,9 +1430,9 @@ void show_service_info(void) {
 
 		printf("<TR><TD CLASS='dataVar'>Active Checks:</TD><td CLASS='dataVal'><DIV CLASS='checks%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></TD></TR>\n", (temp_svcstatus->checks_enabled) ? "ENABLED" : "DISABLED", (temp_svcstatus->checks_enabled) ? "ENABLED" : "DISABLED");
 
-		printf("<TR><TD CLASS='dataVar'>Passive Checks:</TD><td CLASS='dataVal'><DIV CLASS='checks%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></TD></TR>\n", (temp_svcstatus->accept_passive_service_checks == TRUE) ? "ENABLED" : "DISABLED", (temp_svcstatus->accept_passive_service_checks) ? "ENABLED" : "DISABLED");
+		printf("<TR><TD CLASS='dataVar'>Passive Checks:</TD><td CLASS='dataVal'><DIV CLASS='checks%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></TD></TR>\n", (temp_svcstatus->accept_passive_checks == TRUE) ? "ENABLED" : "DISABLED", (temp_svcstatus->accept_passive_checks) ? "ENABLED" : "DISABLED");
 
-		printf("<TR><TD CLASS='dataVar'>Obsessing:</TD><td CLASS='dataVal'><DIV CLASS='checks%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></TD></TR>\n", (temp_svcstatus->obsess_over_service == TRUE) ? "ENABLED" : "DISABLED", (temp_svcstatus->obsess_over_service) ? "ENABLED" : "DISABLED");
+		printf("<TR><TD CLASS='dataVar'>Obsessing:</TD><td CLASS='dataVal'><DIV CLASS='checks%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></TD></TR>\n", (temp_svcstatus->obsess == TRUE) ? "ENABLED" : "DISABLED", (temp_svcstatus->obsess) ? "ENABLED" : "DISABLED");
 
 		printf("<TR><td CLASS='dataVar'>Notifications:</TD><td CLASS='dataVal'><DIV CLASS='notifications%s'>&nbsp;&nbsp;%s&nbsp;&nbsp;</DIV></TD></TR>\n", (temp_svcstatus->notifications_enabled) ? "ENABLED" : "DISABLED", (temp_svcstatus->notifications_enabled) ? "ENABLED" : "DISABLED");
 
@@ -1510,7 +1478,7 @@ void show_service_info(void) {
 		printf("<tr CLASS='data'><td><img src='%s%s' border=0 ALT='Re-schedule Next Service Check' TITLE='Re-schedule Next Service Check'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s", url_images_path, DELAY_ICON, COMMAND_CGI, CMD_SCHEDULE_SVC_CHECK, url_encode(host_name));
 		printf("&service=%s%s'>Re-schedule the next check of this service</a></td></tr>\n", url_encode(service_desc), (temp_svcstatus->checks_enabled == TRUE) ? "&force_check" : "");
 
-		if(temp_svcstatus->accept_passive_service_checks == TRUE) {
+		if(temp_svcstatus->accept_passive_checks == TRUE) {
 			printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Submit Passive Check Result For This Service' TITLE='Submit Passive Check Result For This Service'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s", url_images_path, PASSIVE_ICON, COMMAND_CGI, CMD_PROCESS_SERVICE_CHECK_RESULT, url_encode(host_name));
 			printf("&service=%s'>Submit passive check result for this service</a></td></tr>\n", url_encode(service_desc));
 
@@ -1522,7 +1490,7 @@ void show_service_info(void) {
 			printf("&service=%s'>Start accepting passive checks for this service</a></td></tr>\n", url_encode(service_desc));
 			}
 
-		if(temp_svcstatus->obsess_over_service == TRUE) {
+		if(temp_svcstatus->obsess == TRUE) {
 			printf("<tr CLASS='command'><td><img src='%s%s' border=0 ALT='Stop Obsessing Over This Service' TITLE='Stop Obsessing Over This Service'></td><td CLASS='command'><a href='%s?cmd_typ=%d&host=%s", url_images_path, DISABLED_ICON, COMMAND_CGI, CMD_STOP_OBSESSING_OVER_SVC, url_encode(host_name));
 			printf("&service=%s'>Stop obsessing over this service</a></td></tr>\n", url_encode(service_desc));
 			}

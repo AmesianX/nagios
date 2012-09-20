@@ -35,7 +35,6 @@ extern char main_config_file[MAX_FILENAME_LENGTH];
 extern char url_html_path[MAX_FILENAME_LENGTH];
 extern char url_images_path[MAX_FILENAME_LENGTH];
 extern char command_file[MAX_FILENAME_LENGTH];
-extern char comment_file[MAX_FILENAME_LENGTH];
 
 extern char url_stylesheets_path[MAX_FILENAME_LENGTH];
 
@@ -46,11 +45,6 @@ extern int  check_external_commands;
 extern int  use_authentication;
 
 extern int  lock_author_names;
-
-extern scheduled_downtime *scheduled_downtime_list;
-extern comment *comment_list;
-
-extern int date_format;
 
 
 #define MAX_AUTHOR_LENGTH	64
@@ -849,11 +843,6 @@ void request_command_data(int cmd) {
 			printf("cancel scheduled downtime for a particular %s", (cmd == CMD_DEL_HOST_DOWNTIME) ? "host" : "service");
 			break;
 
-		case CMD_ENABLE_FAILURE_PREDICTION:
-		case CMD_DISABLE_FAILURE_PREDICTION:
-			printf("%s failure prediction for hosts and service", (cmd == CMD_ENABLE_FAILURE_PREDICTION) ? "enable" : "disable");
-			break;
-
 		case CMD_ENABLE_PERFORMANCE_DATA:
 		case CMD_DISABLE_PERFORMANCE_DATA:
 			printf("%s performance data processing for hosts and services", (cmd == CMD_ENABLE_PERFORMANCE_DATA) ? "enable" : "disable");
@@ -1123,8 +1112,6 @@ void request_command_data(int cmd) {
 		case CMD_STOP_OBSESSING_OVER_SVC_CHECKS:
 		case CMD_ENABLE_FLAP_DETECTION:
 		case CMD_DISABLE_FLAP_DETECTION:
-		case CMD_ENABLE_FAILURE_PREDICTION:
-		case CMD_DISABLE_FAILURE_PREDICTION:
 		case CMD_ENABLE_PERFORMANCE_DATA:
 		case CMD_DISABLE_PERFORMANCE_DATA:
 		case CMD_START_EXECUTING_HOST_CHECKS:
@@ -1627,8 +1614,6 @@ void commit_command_data(int cmd) {
 		case CMD_STOP_OBSESSING_OVER_SVC_CHECKS:
 		case CMD_ENABLE_FLAP_DETECTION:
 		case CMD_DISABLE_FLAP_DETECTION:
-		case CMD_ENABLE_FAILURE_PREDICTION:
-		case CMD_DISABLE_FAILURE_PREDICTION:
 		case CMD_ENABLE_PERFORMANCE_DATA:
 		case CMD_DISABLE_PERFORMANCE_DATA:
 		case CMD_START_EXECUTING_HOST_CHECKS:
@@ -1983,8 +1968,6 @@ int commit_command(int cmd) {
 		case CMD_STOP_OBSESSING_OVER_SVC_CHECKS:
 		case CMD_ENABLE_FLAP_DETECTION:
 		case CMD_DISABLE_FLAP_DETECTION:
-		case CMD_ENABLE_FAILURE_PREDICTION:
-		case CMD_DISABLE_FAILURE_PREDICTION:
 		case CMD_ENABLE_PERFORMANCE_DATA:
 		case CMD_DISABLE_PERFORMANCE_DATA:
 		case CMD_START_EXECUTING_HOST_CHECKS:
@@ -2622,14 +2605,6 @@ void show_command_help(cmd) {
 
 		case CMD_DEL_SVC_DOWNTIME:
 			printf("This command is used to cancel active or pending scheduled downtime for the specified service.\n");
-			break;
-
-		case CMD_ENABLE_FAILURE_PREDICTION:
-			printf("This command is used to enable failure prediction for hosts and services on a program-wide basis.  Individual hosts and services may have failure prediction disabled.\n");
-			break;
-
-		case CMD_DISABLE_FAILURE_PREDICTION:
-			printf("This command is used to disable failure prediction for hosts and services on a program-wide basis.\n");
 			break;
 
 		case CMD_ENABLE_PERFORMANCE_DATA:

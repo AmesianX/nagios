@@ -30,18 +30,6 @@
 #include "../include/nagios.h"
 #include "../include/broker.h"
 
-extern int      interval_length;
-
-extern int      enable_flap_detection;
-
-extern double   low_service_flap_threshold;
-extern double   high_service_flap_threshold;
-extern double   low_host_flap_threshold;
-extern double   high_host_flap_threshold;
-
-extern unsigned long    modified_host_process_attributes;
-extern unsigned long    modified_service_process_attributes;
-
 
 /******************************************************************/
 /******************** FLAP DETECTION FUNCTIONS ********************/
@@ -86,14 +74,9 @@ void check_for_service_flapping(service *svc, int update, int allow_flapstart_no
 	/* should we update state history for this state? */
 	if(update_history == TRUE) {
 
-		if(svc->current_state == STATE_OK  && svc->flap_detection_on_ok == FALSE)
+		if(!should_flap_detect(svc))
 			update_history = FALSE;
-		if(svc->current_state == STATE_WARNING && svc->flap_detection_on_warning == FALSE)
-			update_history = FALSE;
-		if(svc->current_state == STATE_UNKNOWN && svc->flap_detection_on_unknown == FALSE)
-			update_history = FALSE;
-		if(svc->current_state == STATE_CRITICAL && svc->flap_detection_on_critical == FALSE)
-			update_history = FALSE;
+
 		}
 
 	/* record current service state */
@@ -210,12 +193,9 @@ void check_for_host_flapping(host *hst, int update, int actual_check, int allow_
 	/* should we update state history for this state? */
 	if(update_history == TRUE) {
 
-		if(hst->current_state == HOST_UP  && hst->flap_detection_on_up == FALSE)
+		if(!(hst->flap_detection_options & (1 << hst->current_state)))
 			update_history = FALSE;
-		if(hst->current_state == HOST_DOWN && hst->flap_detection_on_down == FALSE)
-			update_history = FALSE;
-		if(hst->current_state == HOST_UNREACHABLE && hst->flap_detection_on_unreachable == FALSE)
-			update_history = FALSE;
+
 		}
 
 	/* if we didn't have an actual check, only update if we've waited long enough */

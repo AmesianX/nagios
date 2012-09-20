@@ -37,59 +37,6 @@
 
 #include "xrddefault.h"
 
-extern comment        *comment_list;
-extern scheduled_downtime *scheduled_downtime_list;
-
-extern char           *global_host_event_handler;
-extern char           *global_service_event_handler;
-
-extern int            enable_notifications;
-extern int            execute_service_checks;
-extern int            accept_passive_service_checks;
-extern int            execute_host_checks;
-extern int            accept_passive_host_checks;
-extern int            enable_event_handlers;
-extern int            obsess_over_services;
-extern int            obsess_over_hosts;
-extern int            enable_flap_detection;
-extern int            enable_failure_prediction;
-extern int            process_performance_data;
-extern int            check_service_freshness;
-extern int            check_host_freshness;
-
-extern int            test_scheduling;
-
-extern int            use_large_installation_tweaks;
-
-extern int            use_retained_program_state;
-extern int            use_retained_scheduling_info;
-extern int            retention_scheduling_horizon;
-
-extern time_t         last_program_stop;
-extern time_t         last_update_check;
-extern unsigned long  update_uid;
-extern char           *last_program_version;
-extern int            update_available;
-extern char           *last_program_version;
-extern char           *new_program_version;
-
-extern unsigned long  next_comment_id;
-extern unsigned long  next_downtime_id;
-extern unsigned long  next_event_id;
-extern unsigned long  next_problem_id;
-extern unsigned long  next_notification_id;
-
-extern unsigned long  modified_host_process_attributes;
-extern unsigned long  modified_service_process_attributes;
-
-extern unsigned long  retained_host_attribute_mask;
-extern unsigned long  retained_service_attribute_mask;
-extern unsigned long  retained_contact_host_attribute_mask;
-extern unsigned long  retained_contact_service_attribute_mask;
-extern unsigned long  retained_process_host_attribute_mask;
-extern unsigned long  retained_process_service_attribute_mask;
-
-
 char *xrddefault_retention_file = NULL;
 char *xrddefault_temp_file = NULL;
 
@@ -334,7 +281,6 @@ int xrddefault_save_state_information(void) {
 	fprintf(fp, "check_service_freshness=%d\n", check_service_freshness);
 	fprintf(fp, "check_host_freshness=%d\n", check_host_freshness);
 	fprintf(fp, "enable_flap_detection=%d\n", enable_flap_detection);
-	fprintf(fp, "enable_failure_prediction=%d\n", enable_failure_prediction);
 	fprintf(fp, "process_performance_data=%d\n", process_performance_data);
 	fprintf(fp, "global_host_event_handler=%s\n", (global_host_event_handler == NULL) ? "" : global_host_event_handler);
 	fprintf(fp, "global_service_event_handler=%s\n", (global_service_event_handler == NULL) ? "" : global_service_event_handler);
@@ -351,7 +297,7 @@ int xrddefault_save_state_information(void) {
 		fprintf(fp, "host {\n");
 		fprintf(fp, "host_name=%s\n", temp_host->name);
 		fprintf(fp, "modified_attributes=%lu\n", (temp_host->modified_attributes & ~host_attribute_mask));
-		fprintf(fp, "check_command=%s\n", (temp_host->host_check_command == NULL) ? "" : temp_host->host_check_command);
+		fprintf(fp, "check_command=%s\n", (temp_host->check_command == NULL) ? "" : temp_host->check_command);
 		fprintf(fp, "check_period=%s\n", (temp_host->check_period == NULL) ? "" : temp_host->check_period);
 		fprintf(fp, "notification_period=%s\n", (temp_host->notification_period == NULL) ? "" : temp_host->notification_period);
 		fprintf(fp, "event_handler=%s\n", (temp_host->event_handler == NULL) ? "" : temp_host->event_handler);
@@ -383,21 +329,20 @@ int xrddefault_save_state_information(void) {
 		fprintf(fp, "last_time_up=%lu\n", temp_host->last_time_up);
 		fprintf(fp, "last_time_down=%lu\n", temp_host->last_time_down);
 		fprintf(fp, "last_time_unreachable=%lu\n", temp_host->last_time_unreachable);
-		fprintf(fp, "notified_on_down=%d\n", temp_host->notified_on_down);
-		fprintf(fp, "notified_on_unreachable=%d\n", temp_host->notified_on_unreachable);
-		fprintf(fp, "last_notification=%lu\n", temp_host->last_host_notification);
+		fprintf(fp, "notified_on_down=%d\n", flag_isset(temp_host->notified_on, OPT_DOWN));
+		fprintf(fp, "notified_on_unreachable=%d\n", flag_isset(temp_host->notified_on, OPT_UNREACHABLE));
+		fprintf(fp, "last_notification=%lu\n", temp_host->last_notification);
 		fprintf(fp, "current_notification_number=%d\n", temp_host->current_notification_number);
 		fprintf(fp, "current_notification_id=%lu\n", temp_host->current_notification_id);
 		fprintf(fp, "notifications_enabled=%d\n", temp_host->notifications_enabled);
 		fprintf(fp, "problem_has_been_acknowledged=%d\n", temp_host->problem_has_been_acknowledged);
 		fprintf(fp, "acknowledgement_type=%d\n", temp_host->acknowledgement_type);
 		fprintf(fp, "active_checks_enabled=%d\n", temp_host->checks_enabled);
-		fprintf(fp, "passive_checks_enabled=%d\n", temp_host->accept_passive_host_checks);
+		fprintf(fp, "passive_checks_enabled=%d\n", temp_host->accept_passive_checks);
 		fprintf(fp, "event_handler_enabled=%d\n", temp_host->event_handler_enabled);
 		fprintf(fp, "flap_detection_enabled=%d\n", temp_host->flap_detection_enabled);
-		fprintf(fp, "failure_prediction_enabled=%d\n", temp_host->failure_prediction_enabled);
 		fprintf(fp, "process_performance_data=%d\n", temp_host->process_performance_data);
-		fprintf(fp, "obsess_over_host=%d\n", temp_host->obsess_over_host);
+		fprintf(fp, "obsess=%d\n", temp_host->obsess);
 		fprintf(fp, "is_flapping=%d\n", temp_host->is_flapping);
 		fprintf(fp, "percent_state_change=%.2f\n", temp_host->percent_state_change);
 		fprintf(fp, "check_flapping_recovery_notification=%d\n", temp_host->check_flapping_recovery_notification);
@@ -423,7 +368,7 @@ int xrddefault_save_state_information(void) {
 		fprintf(fp, "host_name=%s\n", temp_service->host_name);
 		fprintf(fp, "service_description=%s\n", temp_service->description);
 		fprintf(fp, "modified_attributes=%lu\n", (temp_service->modified_attributes & ~service_attribute_mask));
-		fprintf(fp, "check_command=%s\n", (temp_service->service_check_command == NULL) ? "" : temp_service->service_check_command);
+		fprintf(fp, "check_command=%s\n", (temp_service->check_command == NULL) ? "" : temp_service->check_command);
 		fprintf(fp, "check_period=%s\n", (temp_service->check_period == NULL) ? "" : temp_service->check_period);
 		fprintf(fp, "notification_period=%s\n", (temp_service->notification_period == NULL) ? "" : temp_service->notification_period);
 		fprintf(fp, "event_handler=%s\n", (temp_service->event_handler == NULL) ? "" : temp_service->event_handler);
@@ -456,22 +401,21 @@ int xrddefault_save_state_information(void) {
 		fprintf(fp, "last_check=%lu\n", temp_service->last_check);
 		fprintf(fp, "next_check=%lu\n", temp_service->next_check);
 		fprintf(fp, "check_options=%d\n", temp_service->check_options);
-		fprintf(fp, "notified_on_unknown=%d\n", temp_service->notified_on_unknown);
-		fprintf(fp, "notified_on_warning=%d\n", temp_service->notified_on_warning);
-		fprintf(fp, "notified_on_critical=%d\n", temp_service->notified_on_critical);
+		fprintf(fp, "notified_on_unknown=%d\n", flag_isset(temp_service->notified_on, OPT_UNKNOWN));
+		fprintf(fp, "notified_on_warning=%d\n", flag_isset(temp_service->notified_on, OPT_WARNING));
+		fprintf(fp, "notified_on_critical=%d\n", flag_isset(temp_service->notified_on, OPT_CRITICAL));
 		fprintf(fp, "current_notification_number=%d\n", temp_service->current_notification_number);
 		fprintf(fp, "current_notification_id=%lu\n", temp_service->current_notification_id);
 		fprintf(fp, "last_notification=%lu\n", temp_service->last_notification);
 		fprintf(fp, "notifications_enabled=%d\n", temp_service->notifications_enabled);
 		fprintf(fp, "active_checks_enabled=%d\n", temp_service->checks_enabled);
-		fprintf(fp, "passive_checks_enabled=%d\n", temp_service->accept_passive_service_checks);
+		fprintf(fp, "passive_checks_enabled=%d\n", temp_service->accept_passive_checks);
 		fprintf(fp, "event_handler_enabled=%d\n", temp_service->event_handler_enabled);
 		fprintf(fp, "problem_has_been_acknowledged=%d\n", temp_service->problem_has_been_acknowledged);
 		fprintf(fp, "acknowledgement_type=%d\n", temp_service->acknowledgement_type);
 		fprintf(fp, "flap_detection_enabled=%d\n", temp_service->flap_detection_enabled);
-		fprintf(fp, "failure_prediction_enabled=%d\n", temp_service->failure_prediction_enabled);
 		fprintf(fp, "process_performance_data=%d\n", temp_service->process_performance_data);
-		fprintf(fp, "obsess_over_service=%d\n", temp_service->obsess_over_service);
+		fprintf(fp, "obsess=%d\n", temp_service->obsess);
 		fprintf(fp, "is_flapping=%d\n", temp_service->is_flapping);
 		fprintf(fp, "percent_state_change=%.2f\n", temp_service->percent_state_change);
 		fprintf(fp, "check_flapping_recovery_notification=%d\n", temp_service->check_flapping_recovery_notification);
@@ -758,8 +702,8 @@ int xrddefault_read_state_information(void) {
 							}
 
 						/* calculate next possible notification time */
-						if(temp_host->current_state != HOST_UP && temp_host->last_host_notification != (time_t)0)
-							temp_host->next_host_notification = get_next_host_notification_time(temp_host, temp_host->last_host_notification);
+						if(temp_host->current_state != HOST_UP && temp_host->last_notification != (time_t)0)
+							temp_host->next_notification = get_next_host_notification_time(temp_host, temp_host->last_notification);
 
 						/* ADDED 01/23/2009 adjust current check attempts if host in hard problem state (max attempts may have changed in config since restart) */
 						if(temp_host->current_state != HOST_UP && temp_host->state_type == HARD_STATE)
@@ -1091,10 +1035,6 @@ int xrddefault_read_state_information(void) {
 							if(modified_host_process_attributes & MODATTR_FLAP_DETECTION_ENABLED)
 								enable_flap_detection = (atoi(val) > 0) ? TRUE : FALSE;
 							}
-						else if(!strcmp(var, "enable_failure_prediction")) {
-							if(modified_host_process_attributes & MODATTR_FAILURE_PREDICTION_ENABLED)
-								enable_failure_prediction = (atoi(val) > 0) ? TRUE : FALSE;
-							}
 						else if(!strcmp(var, "process_performance_data")) {
 							if(modified_host_process_attributes & MODATTR_PERFORMANCE_DATA_ENABLED)
 								process_performance_data = (atoi(val) > 0) ? TRUE : FALSE;
@@ -1227,11 +1167,11 @@ int xrddefault_read_state_information(void) {
 							else if(!strcmp(var, "last_time_unreachable"))
 								temp_host->last_time_unreachable = strtoul(val, NULL, 10);
 							else if(!strcmp(var, "notified_on_down"))
-								temp_host->notified_on_down = (atoi(val) > 0) ? TRUE : FALSE;
+								temp_host->notified_on |= (atoi(val) > 0 ? 1 : 0) << OPT_DOWN;
 							else if(!strcmp(var, "notified_on_unreachable"))
-								temp_host->notified_on_unreachable = (atoi(val) > 0) ? TRUE : FALSE;
+								temp_host->notified_on |= (atoi(val) > 0 ? 1 : 0) << OPT_UNREACHABLE;
 							else if(!strcmp(var, "last_notification"))
-								temp_host->last_host_notification = strtoul(val, NULL, 10);
+								temp_host->last_notification = strtoul(val, NULL, 10);
 							else if(!strcmp(var, "current_notification_number"))
 								temp_host->current_notification_number = atoi(val);
 							else if(!strcmp(var, "current_notification_id"))
@@ -1273,7 +1213,7 @@ int xrddefault_read_state_information(void) {
 								}
 							else if(!strcmp(var, "passive_checks_enabled")) {
 								if(temp_host->modified_attributes & MODATTR_PASSIVE_CHECKS_ENABLED)
-									temp_host->accept_passive_host_checks = (atoi(val) > 0) ? TRUE : FALSE;
+									temp_host->accept_passive_checks = (atoi(val) > 0) ? TRUE : FALSE;
 								}
 							else if(!strcmp(var, "event_handler_enabled")) {
 								if(temp_host->modified_attributes & MODATTR_EVENT_HANDLER_ENABLED)
@@ -1283,17 +1223,13 @@ int xrddefault_read_state_information(void) {
 								if(temp_host->modified_attributes & MODATTR_FLAP_DETECTION_ENABLED)
 									temp_host->flap_detection_enabled = (atoi(val) > 0) ? TRUE : FALSE;
 								}
-							else if(!strcmp(var, "failure_prediction_enabled")) {
-								if(temp_host->modified_attributes & MODATTR_FAILURE_PREDICTION_ENABLED)
-									temp_host->failure_prediction_enabled = (atoi(val) > 0) ? TRUE : FALSE;
-								}
 							else if(!strcmp(var, "process_performance_data")) {
 								if(temp_host->modified_attributes & MODATTR_PERFORMANCE_DATA_ENABLED)
 									temp_host->process_performance_data = (atoi(val) > 0) ? TRUE : FALSE;
 								}
-							else if(!strcmp(var, "obsess_over_host")) {
+							else if(!strcmp(var, "obsess_over_host") || !strcmp(var, "obsess")) {
 								if(temp_host->modified_attributes & MODATTR_OBSESSIVE_HANDLER_ENABLED)
-									temp_host->obsess_over_host = (atoi(val) > 0) ? TRUE : FALSE;
+									temp_host->obsess = (atoi(val) > 0) ? TRUE : FALSE;
 								}
 							else if(!strcmp(var, "check_command")) {
 								if(temp_host->modified_attributes & MODATTR_CHECK_COMMAND) {
@@ -1306,8 +1242,8 @@ int xrddefault_read_state_information(void) {
 									my_free(tempval);
 
 									if(temp_command != NULL && temp_ptr != NULL) {
-										my_free(temp_host->host_check_command);
-										temp_host->host_check_command = temp_ptr;
+										my_free(temp_host->check_command);
+										temp_host->check_command = temp_ptr;
 										}
 									else
 										temp_host->modified_attributes -= MODATTR_CHECK_COMMAND;
@@ -1504,11 +1440,11 @@ int xrddefault_read_state_information(void) {
 									temp_service->check_options = atoi(val);
 								}
 							else if(!strcmp(var, "notified_on_unknown"))
-								temp_service->notified_on_unknown = (atoi(val) > 0) ? TRUE : FALSE;
+								temp_service->notified_on |= ((atoi(val) > 0) ? 1 : 0) << OPT_UNKNOWN;
 							else if(!strcmp(var, "notified_on_warning"))
-								temp_service->notified_on_warning = (atoi(val) > 0) ? TRUE : FALSE;
+								temp_service->notified_on |= ((atoi(val) > 0) ? 0 : 1) << OPT_WARNING;
 							else if(!strcmp(var, "notified_on_critical"))
-								temp_service->notified_on_critical = (atoi(val) > 0) ? TRUE : FALSE;
+								temp_service->notified_on = ((atoi(val) > 0) ? 0 : 1) << OPT_CRITICAL;
 							else if(!strcmp(var, "current_notification_number"))
 								temp_service->current_notification_number = atoi(val);
 							else if(!strcmp(var, "current_notification_id"))
@@ -1552,7 +1488,7 @@ int xrddefault_read_state_information(void) {
 								}
 							else if(!strcmp(var, "passive_checks_enabled")) {
 								if(temp_service->modified_attributes & MODATTR_PASSIVE_CHECKS_ENABLED)
-									temp_service->accept_passive_service_checks = (atoi(val) > 0) ? TRUE : FALSE;
+									temp_service->accept_passive_checks = (atoi(val) > 0) ? TRUE : FALSE;
 								}
 							else if(!strcmp(var, "event_handler_enabled")) {
 								if(temp_service->modified_attributes & MODATTR_EVENT_HANDLER_ENABLED)
@@ -1562,17 +1498,13 @@ int xrddefault_read_state_information(void) {
 								if(temp_service->modified_attributes & MODATTR_FLAP_DETECTION_ENABLED)
 									temp_service->flap_detection_enabled = (atoi(val) > 0) ? TRUE : FALSE;
 								}
-							else if(!strcmp(var, "failure_prediction_enabled")) {
-								if(temp_service->modified_attributes & MODATTR_FAILURE_PREDICTION_ENABLED)
-									temp_service->failure_prediction_enabled = (atoi(val) > 0) ? TRUE : FALSE;
-								}
 							else if(!strcmp(var, "process_performance_data")) {
 								if(temp_service->modified_attributes & MODATTR_PERFORMANCE_DATA_ENABLED)
 									temp_service->process_performance_data = (atoi(val) > 0) ? TRUE : FALSE;
 								}
-							else if(!strcmp(var, "obsess_over_service")) {
+							else if(!strcmp(var, "obsess_over_service") || !strcmp(var, "obsess")) {
 								if(temp_service->modified_attributes & MODATTR_OBSESSIVE_HANDLER_ENABLED)
-									temp_service->obsess_over_service = (atoi(val) > 0) ? TRUE : FALSE;
+									temp_service->obsess = (atoi(val) > 0) ? TRUE : FALSE;
 								}
 							else if(!strcmp(var, "check_command")) {
 								if(temp_service->modified_attributes & MODATTR_CHECK_COMMAND) {
@@ -1585,8 +1517,8 @@ int xrddefault_read_state_information(void) {
 									my_free(tempval);
 
 									if(temp_command != NULL && temp_ptr != NULL) {
-										my_free(temp_service->service_check_command);
-										temp_service->service_check_command = temp_ptr;
+										my_free(temp_service->check_command);
+										temp_service->check_command = temp_ptr;
 										}
 									else
 										temp_service->modified_attributes -= MODATTR_CHECK_COMMAND;

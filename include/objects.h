@@ -30,7 +30,7 @@ NAGIOS_BEGIN_DECL
 
 /*************** CURRENT OBJECT REVISION **************/
 
-#define CURRENT_OBJECT_STRUCTURE_VERSION        400     /* increment when changes are made to data structures... */
+#define CURRENT_OBJECT_STRUCTURE_VERSION        402     /* increment when changes are made to data structures... */
 /* Nagios 3 starts at 300, Nagios 4 at 400, etc. */
 
 
@@ -61,11 +61,163 @@ NAGIOS_BEGIN_DECL
 #define SERVICEESCALATION_SKIPLIST             11
 
 
+/***************** DATE RANGE TYPES *******************/
+
+#define DATERANGE_CALENDAR_DATE  0  /* 2008-12-25 */
+#define DATERANGE_MONTH_DATE     1  /* july 4 (specific month) */
+#define DATERANGE_MONTH_DAY      2  /* day 21 (generic month) */
+#define DATERANGE_MONTH_WEEK_DAY 3  /* 3rd thursday (specific month) */
+#define DATERANGE_WEEK_DAY       4  /* 3rd thursday (generic month) */
+#define DATERANGE_TYPES          5
+
+
+/*
+ * flags for notification_options, flapping_options and other similar
+ * flags. They overlap (hosts and services), so we can't use enum's.
+ */
+#define OPT_NOTHING       0 /* no options selected */
+#define OPT_ALL           (~0) /* everything selected, so all bits set */
+#define OPT_DOWN          (1 << HOST_DOWN)
+#define OPT_UP            (1 << HOST_UP)
+#define OPT_UNREACHABLE   (1 << HOST_UNREACHABLE)
+#define OPT_OK            (1 << STATE_OK)
+#define OPT_WARNING       (1 << STATE_WARNING)
+#define OPT_CRITICAL      (1 << STATE_CRITICAL)
+#define OPT_UNKNOWN       (1 << STATE_UNKNOWN)
+#define OPT_RECOVERY      OPT_OK
+/* and now the "unreal" states... */
+#define OPT_PENDING       (1 << 10)
+#define OPT_FLAPPING      (1 << 11)
+#define OPT_DOWNTIME      (1 << 12)
+#define OPT_DISABLED      (1 << 15) /* will denote disabled checks some day */
+
+/* macros useful with both hosts and services */
+#define flag_set(c, flag)    (c |= (flag))
+#define flag_get(c, flag)    (c & (flag))
+#define flag_isset(c, flag)  (flag_get((c), (flag)) == (flag))
+#define flag_unset(c, flag)  (c &= ~(flag))
+#define should_stalk(o) flag_isset(o->stalking_options, 1 << o->current_state)
+#define should_flap_detect(o) flag_isset(o->flap_detection_options, 1 << o->current_state)
+#define should_notify(o) flag_isset(o->notification_options, 1 << o->current_state)
+#define add_notified_on(o, f) (o->notified_on |= (1 << f))
+
+
 /****************** DATA STRUCTURES *******************/
 
 typedef struct host_struct host;
 typedef struct service_struct service;
 typedef struct contact_struct contact;
+
+/* TIMED_EVENT structure */
+typedef struct timed_event_struct {
+	int event_type;
+	time_t run_time;
+	int recurring;
+	unsigned long event_interval;
+	int compensate_for_time_change;
+	void *timing_func;
+	void *event_data;
+	void *event_args;
+	int event_options;
+	unsigned int priority; /* 0 is auto, 1 is highest. n+1 < n */
+	struct squeue_event *sq_event;
+	} timed_event;
+
+
+/* NOTIFY_LIST structure */
+typedef struct notify_list_struct {
+	contact *contact;
+	struct notify_list_struct *next;
+	} notification;
+
+
+/*
+ * *name can be "Nagios Core", "Merlin", "mod_gearman" or "DNX", fe.
+ * source_name gets passed the 'source' pointer from check_result
+ * and must return a non-free()'able string useful for printing what
+ * we need to determine exactly where the check was received from,
+ * such as "mod_gearman worker@10.11.12.13", or "Nagios Core command
+ * file worker" (for passive checks submitted locally), which will be
+ * stashed with hosts and services and used as the "CHECKSOURCE" macro.
+ */
+struct check_engine {
+	char *name;         /* "Nagios Core", "Merlin", "Mod Gearman" fe */
+	const char *(*source_name)(void *);
+	void (*clean_result)(void *);
+};
+
+/* CHECK_RESULT structure */
+typedef struct check_result_struct {
+	int object_check_type;                          /* is this a service or a host check? */
+	char *host_name;                                /* host name */
+	char *service_description;                      /* service description */
+	int check_type;					/* was this an active or passive service check? */
+	int check_options;
+	int scheduled_check;                            /* was this a scheduled or an on-demand check? */
+	int reschedule_check;                           /* should we reschedule the next check */
+	char *output_file;                              /* what file is the output stored in? */
+	FILE *output_file_fp;
+	double latency;
+	struct timeval start_time;			/* time the service check was initiated */
+	struct timeval finish_time;			/* time the service check was completed */
+	int early_timeout;                              /* did the service check timeout? */
+	int exited_ok;					/* did the plugin check return okay? */
+	int return_code;				/* plugin return code */
+	char *output;	                                /* plugin output */
+	struct rusage rusage;			/* resource usage by this check */
+	struct check_engine *engine;	/* where did we get this check from? */
+	void *source;					/* engine handles this */
+	} check_result;
+
+
+/* SCHED_INFO structure */
+typedef struct sched_info_struct {
+	int total_services;
+	int total_scheduled_services;
+	int total_hosts;
+	int total_scheduled_hosts;
+	double average_services_per_host;
+	double average_scheduled_services_per_host;
+	unsigned long service_check_interval_total;
+	unsigned long host_check_interval_total;
+	double average_service_execution_time;
+	double average_service_check_interval;
+	double average_host_check_interval;
+	double average_service_inter_check_delay;
+	double average_host_inter_check_delay;
+	double service_inter_check_delay;
+	double host_inter_check_delay;
+	int service_interleave_factor;
+	int max_service_check_spread;
+	int max_host_check_spread;
+	time_t first_service_check;
+	time_t last_service_check;
+	time_t first_host_check;
+	time_t last_host_check;
+	} sched_info;
+
+
+/* DBUF structure - dynamic string storage */
+typedef struct dbuf_struct {
+	char *buf;
+	unsigned long used_size;
+	unsigned long allocated_size;
+	unsigned long chunk_size;
+	} dbuf;
+
+
+#define CHECK_STATS_BUCKETS                  15
+
+/* used for tracking host and service check statistics */
+typedef struct check_stats_struct {
+	int current_bucket;
+	int bucket[CHECK_STATS_BUCKETS];
+	int overflow_bucket;
+	int minute_stats[3];
+	time_t last_update;
+	} check_stats;
+
+
 
 /* OBJECT LIST STRUCTURE */
 typedef struct objectlist_struct {
@@ -189,17 +341,9 @@ struct contact_struct {
 	char    *address[MAX_CONTACT_ADDRESSES];
 	commandsmember *host_notification_commands;
 	commandsmember *service_notification_commands;
-	int     notify_on_service_unknown;
-	int     notify_on_service_warning;
-	int     notify_on_service_critical;
-	int     notify_on_service_recovery;
-	int     notify_on_service_flapping;
-	int     notify_on_service_downtime;
-	int 	notify_on_host_down;
-	int	notify_on_host_unreachable;
-	int	notify_on_host_recovery;
-	int     notify_on_host_flapping;
-	int     notify_on_host_downtime;
+	unsigned int host_notification_options;
+	unsigned int service_notification_options;
+	unsigned int minimum_value;
 	char	*host_notification_period;
 	char	*service_notification_period;
 	int     host_notifications_enabled;
@@ -267,7 +411,7 @@ struct host_struct {
 	hostsmember *parent_hosts;
 	hostsmember *child_hosts;
 	servicesmember *services;
-	char    *host_check_command;
+	char    *check_command;
 	int     initial_state;
 	double  check_interval;
 	double  retry_interval;
@@ -277,40 +421,39 @@ struct host_struct {
 	contactsmember *contacts;
 	double  notification_interval;
 	double  first_notification_delay;
-	int	notify_on_down;
-	int	notify_on_unreachable;
-	int     notify_on_recovery;
-	int     notify_on_flapping;
-	int     notify_on_downtime;
+	unsigned int notification_options;
+	unsigned int hourly_value;
 	char	*notification_period;
 	char    *check_period;
 	int     flap_detection_enabled;
 	double  low_flap_threshold;
 	double  high_flap_threshold;
-	int     flap_detection_on_up;
-	int     flap_detection_on_down;
-	int     flap_detection_on_unreachable;
-	int     stalk_on_up;
-	int     stalk_on_down;
-	int     stalk_on_unreachable;
+	int     flap_detection_options;
+	unsigned int stalking_options;
 	int     check_freshness;
 	int     freshness_threshold;
 	int     process_performance_data;
 	int     checks_enabled;
-	int     accept_passive_host_checks;
+	const char *check_source;
+	int     accept_passive_checks;
 	int     event_handler_enabled;
 	int     retain_status_information;
 	int     retain_nonstatus_information;
-	int     failure_prediction_enabled;
-	char    *failure_prediction_options;
-	int     obsess_over_host;
+	int     obsess;
 	char    *notes;
 	char    *notes_url;
 	char    *action_url;
 	char    *icon_image;
 	char    *icon_image_alt;
+	char    *statusmap_image; /* used by lots of graphing tools */
+/* #ifdef NSCGI */
+	/*
+	 * these are kept in ancillary storage for the daemon and
+	 * thrown out as soon as we've created the object cache.
+	 * The CGI's still attach them though, since they are the
+	 * only users of this utter crap.
+	 */
 	char    *vrml_image;
-	char    *statusmap_image;
 	int     have_2d_coords;
 	int     x_2d;
 	int     y_2d;
@@ -319,6 +462,7 @@ struct host_struct {
 	double  y_3d;
 	double  z_3d;
 	int     should_be_drawn;
+/* #endif */
 	customvariablesmember *custom_variables;
 #ifdef NSCORE
 	int     problem_has_been_acknowledged;
@@ -342,8 +486,8 @@ struct host_struct {
 	int     is_executing;
 	int     check_options;
 	int     notifications_enabled;
-	time_t  last_host_notification;
-	time_t  next_host_notification;
+	time_t  last_notification;
+	time_t  next_notification;
 	time_t  next_check;
 	int     should_be_scheduled;
 	time_t  last_check;
@@ -354,8 +498,7 @@ struct host_struct {
 	time_t  last_time_unreachable;
 	int     has_been_checked;
 	int     is_being_freshened;
-	int     notified_on_down;
-	int     notified_on_unreachable;
+	int     notified_on;
 	int     current_notification_number;
 	int     no_more_notifications;
 	unsigned long current_notification_id;
@@ -405,7 +548,9 @@ struct service_struct {
 	char	*host_name;
 	char	*description;
 	char    *display_name;
-	char    *service_check_command;
+	servicesmember *parents;
+	servicesmember *children;
+	char    *check_command;
 	char    *event_handler;
 	int     initial_state;
 	double	check_interval;
@@ -416,38 +561,27 @@ struct service_struct {
 	contactsmember *contacts;
 	double	notification_interval;
 	double  first_notification_delay;
-	int     notify_on_unknown;
-	int	notify_on_warning;
-	int	notify_on_critical;
-	int	notify_on_recovery;
-	int     notify_on_flapping;
-	int     notify_on_downtime;
-	int     stalk_on_ok;
-	int     stalk_on_warning;
-	int     stalk_on_unknown;
-	int     stalk_on_critical;
+	unsigned int notification_options;
+	unsigned int stalking_options;
+	unsigned int hourly_value;
 	int     is_volatile;
 	char	*notification_period;
 	char	*check_period;
 	int     flap_detection_enabled;
 	double  low_flap_threshold;
 	double  high_flap_threshold;
-	int     flap_detection_on_ok;
-	int     flap_detection_on_warning;
-	int     flap_detection_on_unknown;
-	int     flap_detection_on_critical;
+	unsigned int flap_detection_options;
 	int     process_performance_data;
 	int     check_freshness;
 	int     freshness_threshold;
-	int     accept_passive_service_checks;
+	int     accept_passive_checks;
 	int     event_handler_enabled;
 	int	checks_enabled;
+	const char *check_source;
 	int     retain_status_information;
 	int     retain_nonstatus_information;
 	int     notifications_enabled;
-	int     obsess_over_service;
-	int     failure_prediction_enabled;
-	char    *failure_prediction_options;
+	int     obsess;
 	char    *notes;
 	char    *notes_url;
 	char    *action_url;
@@ -487,9 +621,7 @@ struct service_struct {
 	time_t  last_time_critical;
 	int     has_been_checked;
 	int     is_being_freshened;
-	int     notified_on_unknown;
-	int     notified_on_warning;
-	int     notified_on_critical;
+	unsigned int notified_on;
 	int     current_notification_number;
 	unsigned long current_notification_id;
 	double  latency;
@@ -530,17 +662,13 @@ typedef struct serviceescalation_struct {
 	int     last_notification;
 	double  notification_interval;
 	char    *escalation_period;
-	int     escalate_on_recovery;
-	int     escalate_on_warning;
-	int     escalate_on_unknown;
-	int     escalate_on_critical;
+	int     escalation_options;
 	contactgroupsmember *contact_groups;
 	contactsmember *contacts;
 #ifdef NSCORE
 	service *service_ptr;
 	timeperiod *escalation_period_ptr;
 #endif
-	struct  serviceescalation_struct *next;
 	} serviceescalation;
 
 
@@ -554,17 +682,12 @@ typedef struct servicedependency_struct {
 	char    *service_description;
 	char    *dependency_period;
 	int     inherits_parent;
-	int     fail_on_ok;
-	int     fail_on_warning;
-	int     fail_on_unknown;
-	int     fail_on_critical;
-	int     fail_on_pending;
+	int     failure_options;
 #ifdef NSCORE
 	service *master_service_ptr;
 	service *dependent_service_ptr;
 	timeperiod *dependency_period_ptr;
 #endif
-	struct servicedependency_struct *next;
 	} servicedependency;
 
 
@@ -576,16 +699,13 @@ typedef struct hostescalation_struct {
 	int     last_notification;
 	double  notification_interval;
 	char    *escalation_period;
-	int     escalate_on_recovery;
-	int     escalate_on_down;
-	int     escalate_on_unreachable;
+	int     escalation_options;
 	contactgroupsmember *contact_groups;
 	contactsmember *contacts;
 #ifdef NSCORE
 	host    *host_ptr;
 	timeperiod *escalation_period_ptr;
 #endif
-	struct  hostescalation_struct *next;
 	} hostescalation;
 
 
@@ -597,16 +717,12 @@ typedef struct hostdependency_struct {
 	char    *host_name;
 	char    *dependency_period;
 	int     inherits_parent;
-	int     fail_on_up;
-	int     fail_on_down;
-	int     fail_on_unreachable;
-	int     fail_on_pending;
+	int     failure_options;
 #ifdef NSCORE
 	host    *master_host_ptr;
 	host    *dependent_host_ptr;
 	timeperiod *dependency_period_ptr;
 #endif
-	struct hostdependency_struct *next;
 	} hostdependency;
 
 extern command *command_list;
@@ -626,16 +742,17 @@ extern servicedependency *servicedependency_list;
 /********************* FUNCTIONS **********************/
 
 /**** Top-level input functions ****/
-int read_object_config_data(char *, int, int, int);     /* reads all external configuration data of specific types */
+int read_object_config_data(char *, int);     /* reads all external configuration data of specific types */
 
 
 /**** Object Creation Functions ****/
-contact *add_contact(char *, char *, char *, char *, char **, char *, char *, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int);	/* adds a contact definition */
+contact *add_contact(char *name, char *alias, char *email, char *pager, char **addresses, char *svc_notification_period, char *host_notification_period, int service_notification_options, int host_notification_options, int service_notifications_enabled, int host_notifications_enabled, int can_submit_commands, int retain_status_information, int retain_nonstatus_information, unsigned int minimum_value);
 commandsmember *add_service_notification_command_to_contact(contact *, char *);				/* adds a service notification command to a contact definition */
 commandsmember *add_host_notification_command_to_contact(contact *, char *);				/* adds a host notification command to a contact definition */
 customvariablesmember *add_custom_variable_to_contact(contact *, char *, char *);                       /* adds a custom variable to a service definition */
-host *add_host(char *, char *, char *, char *, char *, int, double, double, int, int, int, int, int, int, double, double, char *, int, char *, int, int, char *, int, int, double, double, int, int, int, int, int, int, int, int, char *, int, int, char *, char *, char *, char *, char *, char *, char *, int, int, int, double, double, double, int, int, int, int, int);	/* adds a host definition */
+host *add_host(char *name, char *display_name, char *alias, char *address, char *check_period, int initial_state, double check_interval, double retry_interval, int max_attempts, int notification_options, double notification_interval, double first_notification_delay, char *notification_period, int notifications_enabled, char *check_command, int checks_enabled, int accept_passive_checks, char *event_handler, int event_handler_enabled, int flap_detection_enabled, double low_flap_threshold, double high_flap_threshold, int flap_detection_options, int stalking_options, int process_perfdata, int check_freshness, int freshness_threshold, char *notes, char *notes_url, char *action_url, char *icon_image, char *icon_image_alt, char *vrml_image, char *statusmap_image, int x_2d, int y_2d, int have_2d_coords, double x_3d, double y_3d, double z_3d, int have_3d_coords, int should_be_drawn, int retain_status_information, int retain_nonstatus_information, int obsess_over_host, unsigned int hourly_value);
 hostsmember *add_parent_host_to_host(host *, char *);							/* adds a parent host to a host definition */
+servicesmember *add_parent_service_to_service(service *, char *host_name, char *description);
 hostsmember *add_child_link_to_host(host *, host *);						       /* adds a child host to a host definition */
 contactgroupsmember *add_contactgroup_to_host(host *, char *);					       /* adds a contactgroup to a host definition */
 contactsmember *add_contact_to_host(host *, char *);                                                    /* adds a contact to a host definition */
@@ -652,16 +769,16 @@ servicesmember *add_service_to_servicegroup(servicegroup *, char *, char *);    
 contactgroup *add_contactgroup(char *, char *);								/* adds a contactgroup definition */
 contactsmember *add_contact_to_contactgroup(contactgroup *, char *);					/* adds a contact to a contact group definition */
 command *add_command(char *, char *);									/* adds a command definition */
-service *add_service(char *, char *, char *, char *, int, int, int, int, double, double, double, double, char *, int, int, int, int, int, int, int, int, char *, int, char *, int, int, double, double, int, int, int, int, int, int, int, int, int, int, char *, int, int, char *, char *, char *, char *, char *, int, int, int);	/* adds a service definition */
+service *add_service(char *host_name, char *description, char *display_name, char *check_period, int initial_state, int max_attempts, int parallelize, int accept_passive_checks, double check_interval, double retry_interval, double notification_interval, double first_notification_delay, char *notification_period, int notification_options, int notifications_enabled, int is_volatile, char *event_handler, int event_handler_enabled, char *check_command, int checks_enabled, int flap_detection_enabled, double low_flap_threshold, double high_flap_threshold, int flap_detection_options, int stalking_options, int process_perfdata, int check_freshness, int freshness_threshold, char *notes, char *notes_url, char *action_url, char *icon_image, char *icon_image_alt, int retain_status_information, int retain_nonstatus_information, int obsess_over_service, unsigned int hourly_value);
 contactgroupsmember *add_contactgroup_to_service(service *, char *);					/* adds a contact group to a service definition */
 contactsmember *add_contact_to_service(service *, char *);                                              /* adds a contact to a host definition */
-serviceescalation *add_serviceescalation(char *, char *, int, int, double, char *, int, int, int, int); /* adds a service escalation definition */
+serviceescalation *add_serviceescalation(char *host_name, char *description, int first_notification, int last_notification, double notification_interval, char *escalation_period, int escalation_options);
 contactgroupsmember *add_contactgroup_to_serviceescalation(serviceescalation *, char *);                /* adds a contact group to a service escalation definition */
 contactsmember *add_contact_to_serviceescalation(serviceescalation *, char *);                          /* adds a contact to a service escalation definition */
 customvariablesmember *add_custom_variable_to_service(service *, char *, char *);                       /* adds a custom variable to a service definition */
-servicedependency *add_service_dependency(char *, char *, char *, char *, int, int, int, int, int, int, int, char *); /* adds a service dependency definition */
-hostdependency *add_host_dependency(char *, char *, int, int, int, int, int, int, char *);                     /* adds a host dependency definition */
-hostescalation *add_hostescalation(char *, int, int, double, char *, int, int, int);                    /* adds a host escalation definition */
+servicedependency *add_service_dependency(char *dependent_host_name, char *dependent_service_description, char *host_name, char *service_description, int dependency_type, int inherits_parent, int failure_options, char *dependency_period);
+hostdependency *add_host_dependency(char *dependent_host_name, char *host_name, int dependency_type, int inherits_parent, int failure_options, char *dependency_period);
+hostescalation *add_hostescalation(char *host_name, int first_notification, int last_notification, double notification_interval, char *escalation_period, int escalation_options);
 contactsmember *add_contact_to_hostescalation(hostescalation *, char *);                                /* adds a contact to a host escalation definition */
 contactgroupsmember *add_contactgroup_to_hostescalation(hostescalation *, char *);                      /* adds a contact group to a host escalation definition */
 
@@ -690,11 +807,15 @@ command *find_command(const char *);							                /* finds a command ob
 service *find_service(const char *, const char *);								/* finds a service object */
 
 
+#define OBJECTLIST_DUPE 1
 int add_object_to_objectlist(objectlist **, void *);
+int prepend_object_to_objectlist(objectlist **, void *);
+int prepend_unique_object_to_objectlist(objectlist **, void *, size_t size);
 int free_objectlist(objectlist **);
 
 
 /**** Object Query Functions ****/
+unsigned int host_services_value(host *h);
 int is_host_immediate_child_of_host(host *, host *);	               /* checks if a host is an immediate child of another host */
 int is_host_primary_immediate_child_of_host(host *, host *);            /* checks if a host is an immediate child (and primary child) of another host */
 int is_host_immediate_parent_of_host(host *, host *);	               /* checks if a host is an immediate child of another host */
@@ -713,8 +834,39 @@ int number_of_total_child_hosts(host *);				/* counts the number of total child 
 int number_of_immediate_parent_hosts(host *);				/* counts the number of immediate parents hosts for a particular host */
 
 #ifdef NSCORE
-int check_for_circular_servicedependency_path(servicedependency *, servicedependency *, int); /* checks if a circular dependency exists for a given service */
-int check_for_circular_hostdependency_path(hostdependency *, hostdependency *, int); /* checks if a circular dependency exists for a given host */
+void fcache_contactlist(FILE *fp, const char *prefix, contactsmember *list);
+void fcache_contactgrouplist(FILE *fp, const char *prefix, contactgroupsmember *list);
+void fcache_hostlist(FILE *fp, const char *prefix, hostsmember *list);
+void fcache_customvars(FILE *fp, customvariablesmember *cvlist);
+void fcache_timeperiod(FILE *fp, timeperiod *temp_timeperiod);
+void fcache_command(FILE *fp, command *temp_command);
+void fcache_contactgroup(FILE *fp, contactgroup *temp_contactgroup);
+void fcache_hostgroup(FILE *fp, hostgroup *temp_hostgroup);
+void fcache_servicegroup(FILE *fp, servicegroup *temp_servicegroup);
+void fcache_contact(FILE *fp, contact *temp_contact);
+void fcache_host(FILE *fp, host *temp_host);
+void fcache_service(FILE *fp, service *temp_service);
+void fcache_servicedependency(FILE *fp, servicedependency *temp_servicedependency);
+void fcache_serviceescalation(FILE *fp, serviceescalation *temp_serviceescalation);
+void fcache_hostdependency(FILE *fp, hostdependency *temp_hostdependency);
+void fcache_hostescalation(FILE *fp, hostescalation *temp_hostescalation);
+void fcache_contactlist(FILE *fp, const char *prefix, contactsmember *list);
+void fcache_contactgrouplist(FILE *fp, const char *prefix, contactgroupsmember *list);
+void fcache_hostlist(FILE *fp, const char *prefix, hostsmember *list);
+void fcache_customvars(FILE *fp, customvariablesmember *cvlist);
+void fcache_timeperiod(FILE *fp, timeperiod *temp_timeperiod);
+void fcache_command(FILE *fp, command *temp_command);
+void fcache_contactgroup(FILE *fp, contactgroup *temp_contactgroup);
+void fcache_hostgroup(FILE *fp, hostgroup *temp_hostgroup);
+void fcache_servicegroup(FILE *fp, servicegroup *temp_servicegroup);
+void fcache_contact(FILE *fp, contact *temp_contact);
+void fcache_host(FILE *fp, host *temp_host);
+void fcache_service(FILE *fp, service *temp_service);
+void fcache_servicedependency(FILE *fp, servicedependency *temp_servicedependency);
+void fcache_serviceescalation(FILE *fp, serviceescalation *temp_serviceescalation);
+void fcache_hostdependency(FILE *fp, hostdependency *temp_hostdependency);
+void fcache_hostescalation(FILE *fp, hostescalation *temp_hostescalation);
+int fcache_objects(char *cache_file);
 #endif
 
 

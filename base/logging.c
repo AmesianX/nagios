@@ -28,57 +28,7 @@
 #include "../include/broker.h"
 
 
-extern char	*log_file;
-extern char	*log_archive_path;
-
-extern int	use_syslog;
-extern int      log_service_retries;
-extern int      log_initial_states;
-
-extern unsigned long      logging_options;
-extern unsigned long      syslog_options;
-
-extern int      verify_config;
-extern int      test_scheduling;
-
-extern time_t   last_log_rotation;
-extern int      log_rotation_method;
-
-extern int      daemon_mode;
-
-extern char     *debug_file;
-extern int      debug_level;
-extern int      debug_verbosity;
-extern unsigned long max_debug_file_size;
-FILE            *debug_file_fp = NULL;
-
-/* These simple helpers should most likely be elsewhere */
-static const char *service_state_name(int state)
-{
-	switch (state) {
-	case STATE_OK: return "OK";
-	case STATE_WARNING: return "WARNING";
-	case STATE_CRITICAL: return "CRITICAL";
-	}
-
-	return "UNKNOWN";
-}
-
-static const char *host_state_name(int state)
-{
-	switch (state) {
-	case HOST_UP: return "UP";
-	case HOST_DOWN: return "DOWN";
-	case HOST_UNREACHABLE: return "UNREACHABLE";
-	}
-
-	return "(unknown)";
-}
-
-static const char *state_type_name(int state_type)
-{
-	return state_type == HARD_STATE ? "HARD" : "SOFT";
-}
+static FILE *debug_file_fp;
 
 /******************************************************************/
 /************************ LOGGING FUNCTIONS ***********************/
@@ -167,7 +117,7 @@ int write_to_log(char *buffer, unsigned long data_type, time_t *timestamp) {
 		return ERROR;
 
 	/* don't log anything if we're not actually running... */
-	if(verify_config == TRUE || test_scheduling == TRUE)
+	if(verify_config || test_scheduling == TRUE)
 		return OK;
 
 	/* make sure we can log this type of entry */
@@ -211,7 +161,7 @@ int write_to_syslog(char *buffer, unsigned long data_type) {
 		return ERROR;
 
 	/* don't log anything if we're not actually running... */
-	if(verify_config == TRUE || test_scheduling == TRUE)
+	if(verify_config || test_scheduling == TRUE)
 		return OK;
 
 	/* bail out if we shouldn't write to syslog */
@@ -411,9 +361,11 @@ int rotate_log_file(time_t rotation_time) {
 		chown(log_file, log_file_stat.st_uid, log_file_stat.st_gid);
 		}
 
-	/* log current host and service state */
-	log_host_states(CURRENT_STATES, &rotation_time);
-	log_service_states(CURRENT_STATES, &rotation_time);
+	/* log current host and service state if activated */
+	if(log_current_states==TRUE) {
+		log_host_states(CURRENT_STATES, &rotation_time);
+		log_service_states(CURRENT_STATES, &rotation_time);
+	}
 
 	/* free memory */
 	my_free(log_archive);
@@ -439,7 +391,7 @@ int write_log_file_info(time_t *timestamp) {
 int open_debug_log(void) {
 
 	/* don't do anything if we're not actually running... */
-	if(verify_config == TRUE || test_scheduling == TRUE)
+	if(verify_config || test_scheduling == TRUE)
 		return OK;
 
 	/* don't do anything if we're not debugging */

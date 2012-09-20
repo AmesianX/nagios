@@ -164,8 +164,6 @@ int             sig_id = 0;
 int             restarting = FALSE;
 
 int             verify_config = FALSE;
-int             verify_object_relationships = TRUE;
-int             verify_circular_paths = TRUE;
 int             test_scheduling = FALSE;
 int             precache_objects = FALSE;
 int             use_precached_objects = FALSE;
@@ -188,12 +186,10 @@ int             accept_passive_host_checks = TRUE;
 int             enable_event_handlers = TRUE;
 int             obsess_over_services = FALSE;
 int             obsess_over_hosts = FALSE;
-int             enable_failure_prediction = TRUE;
 
 int             translate_passive_host_checks = DEFAULT_TRANSLATE_PASSIVE_HOST_CHECKS;
 int             passive_host_checks_are_soft = DEFAULT_PASSIVE_HOST_CHECKS_SOFT;
 
-int             aggregate_status_updates = TRUE;
 int             status_update_interval = DEFAULT_STATUS_UPDATE_INTERVAL;
 
 int             time_change_threshold = DEFAULT_TIME_CHANGE_THRESHOLD;
@@ -217,9 +213,6 @@ int             child_processes_fork_twice = -1;
 int             date_format = DATE_FORMAT_US;
 char            *use_timezone = NULL;
 
-int             command_file_fd;
-FILE            *command_file_fp;
-int             command_file_created = FALSE;
 unsigned long   update_uid = 0L;
 
 
@@ -227,7 +220,6 @@ extern char	*xrddefault_retention_file;
 
 notification    *notification_list;
 
-check_result    check_result_info;
 unsigned long	max_check_result_file_age = DEFAULT_MAX_CHECK_RESULT_AGE;
 
 check_stats     check_statistics[MAX_CHECK_STATS_TYPES];

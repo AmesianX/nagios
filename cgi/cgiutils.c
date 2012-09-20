@@ -53,8 +53,6 @@ char            *normal_sound = NULL;
 char            *statusmap_background_image = NULL;
 char            *statuswrl_include = NULL;
 
-char            *illegal_output_chars = NULL;
-
 char            *notes_url_target = NULL;
 char            *action_url_target = NULL;
 
@@ -68,23 +66,11 @@ int             enable_splunk_integration = FALSE;
 char            *splunk_url = NULL;
 int             lock_author_names = TRUE;
 
-extern time_t   program_start;
-extern int      enable_notifications;
-extern int      execute_service_checks;
-
-int             check_external_commands = 0;
-
-int             date_format = DATE_FORMAT_US;
-
-int             log_rotation_method = LOG_ROTATION_NONE;
-
 time_t          this_scheduled_log_rotation = 0L;
 time_t          last_scheduled_log_rotation = 0L;
 time_t          next_scheduled_log_rotation = 0L;
 
 int             use_authentication = TRUE;
-
-int             interval_length = 60;
 
 int             show_context_help = FALSE;
 
@@ -116,14 +102,6 @@ lifo            *lifo_list = NULL;
 char encoded_url_string[2][MAX_INPUT_BUFFER]; // 2 to be able use url_encode twice
 char *encoded_html_string = NULL;
 
-#ifdef HAVE_TZNAME
-#ifdef CYGWIN
-extern char     *_tzname[2] __declspec(dllimport);
-#else
-extern char     *tzname[2];
-#endif
-#endif
-
 
 
 /*
@@ -139,6 +117,9 @@ void logit(int data_type, int display, const char *fmt, ...) {
 	}
 int log_debug_info(int leve, int verbosity, const char *fmt, ...) {
 	return 0;
+	}
+void timing_point(const char *fmt, ...) {
+	return;
 	}
 
 /**********************************************************
@@ -545,7 +526,7 @@ int read_all_object_configuration_data(char *config_file, int options) {
 	int result = OK;
 
 	/* read in all external config data of the desired type(s) */
-	result = read_object_config_data(config_file, options, FALSE, FALSE);
+	result = read_object_config_data(config_file, options);
 
 	return result;
 	}

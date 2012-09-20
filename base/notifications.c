@@ -30,19 +30,6 @@
 #include "../include/neberrors.h"
 #include "../include/workers.h"
 
-extern notification    *notification_list;
-extern time_t          program_start;
-
-extern int             interval_length;
-extern int             log_notifications;
-
-extern int             enable_notifications;
-
-extern unsigned long   next_notification_id;
-
-extern char            *generic_summary;
-
-
 /*** silly helpers ****/
 static contact *find_contact_by_name_or_alias(const char *name)
 {
@@ -279,12 +266,7 @@ int service_notification(service *svc, int type, char *not_author, char *not_dat
 				svc->last_notification = current_time;
 
 				/* update notifications flags */
-				if(svc->current_state == STATE_UNKNOWN)
-					svc->notified_on_unknown = TRUE;
-				else if(svc->current_state == STATE_WARNING)
-					svc->notified_on_warning = TRUE;
-				else if(svc->current_state == STATE_CRITICAL)
-					svc->notified_on_critical = TRUE;
+				add_notified_on(svc, svc->current_state);
 				}
 
 			/* we didn't end up notifying anyone */
@@ -365,6 +347,22 @@ int check_service_notification_viability(service *svc, int type, int options) {
 		return ERROR;
 		}
 
+	/* if all parents are bad (usually just one), we shouldn't notify */
+	if(svc->parents) {
+		int bad_parents = 0, total_parents = 0;
+		servicesmember *sm;
+		for(sm = svc->parents; sm; sm = sm->next) {
+			/* @todo: tweak this so it handles hard states and whatnot */
+			if(sm->service_ptr->current_state == STATE_OK)
+				bad_parents += !!sm->service_ptr->current_state;
+			total_parents++;
+			}
+		if(bad_parents == total_parents) {
+			log_debug_info(DEBUGL_NOTIFICATIONS, 1, "This service has no good parents, so notification will be blocked.\n");
+			return ERROR;
+			}
+		}
+
 	/* if the service has no notification period, inherit one from the host */
 	temp_period = svc->notification_period_ptr;
 	if(temp_period == NULL) {
@@ -443,7 +441,7 @@ int check_service_notification_viability(service *svc, int type, int options) {
 	if(type == NOTIFICATION_FLAPPINGSTART || type == NOTIFICATION_FLAPPINGSTOP || type == NOTIFICATION_FLAPPINGDISABLED) {
 
 		/* don't send a notification if we're not supposed to... */
-		if(svc->notify_on_flapping == FALSE) {
+		if(flag_isset(svc->notification_options, OPT_FLAPPING) == FALSE) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about FLAPPING events for this service.\n");
 			return ERROR;
 			}
@@ -467,7 +465,7 @@ int check_service_notification_viability(service *svc, int type, int options) {
 	if(type == NOTIFICATION_DOWNTIMESTART || type == NOTIFICATION_DOWNTIMEEND || type == NOTIFICATION_DOWNTIMECANCELLED) {
 
 		/* don't send a notification if we're not supposed to... */
-		if(svc->notify_on_downtime == FALSE) {
+		if(flag_isset(svc->notification_options, OPT_DOWNTIME) == FALSE) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about DOWNTIME events for this service.\n");
 			return ERROR;
 			}
@@ -512,28 +510,15 @@ int check_service_notification_viability(service *svc, int type, int options) {
 		}
 
 	/* see if we should notify about problems with this service */
-	if(svc->current_state == STATE_UNKNOWN && svc->notify_on_unknown == FALSE) {
-		log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about UNKNOWN states for this service.\n");
+	if(should_notify(svc) == FALSE) {
+		log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about %s states for this service.\n", service_state_name(svc->current_state));
 		return ERROR;
 		}
-	if(svc->current_state == STATE_WARNING && svc->notify_on_warning == FALSE) {
-		log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about WARNING states for this service.\n");
+	if(svc->notified_on == 0) {
+		log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about this recovery.\n");
 		return ERROR;
 		}
-	if(svc->current_state == STATE_CRITICAL && svc->notify_on_critical == FALSE) {
-		log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about CRITICAL states for this service.\n");
-		return ERROR;
-		}
-	if(svc->current_state == STATE_OK) {
-		if(svc->notify_on_recovery == FALSE) {
-			log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about RECOVERY states for this service.\n");
-			return ERROR;
-			}
-		if(!(svc->notified_on_unknown == TRUE || svc->notified_on_warning == TRUE || svc->notified_on_critical == TRUE)) {
-			log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about this recovery.\n");
-			return ERROR;
-			}
-		}
+
 
 	/* see if enough time has elapsed for first notification (Mathias Sundman) */
 	/* 10/02/07 don't place restrictions on recoveries or non-normal notifications, must use last time ok (or program start) in calculation */
@@ -614,6 +599,12 @@ int check_contact_service_notification_viability(contact *cntct, service *svc, i
 		return OK;
 		}
 
+	/* is this service not important enough? */
+	if(cntct->minimum_value > svc->hourly_value) {
+		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "Contact's minimum_value is higher than service's hourly value. Notification will be blocked\n");
+		return ERROR;
+		}
+
 	/* are notifications enabled? */
 	if(cntct->service_notifications_enabled == FALSE) {
 		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "Service notifications are disabled for this contact.\n");
@@ -641,7 +632,7 @@ int check_contact_service_notification_viability(contact *cntct, service *svc, i
 
 	if(type == NOTIFICATION_FLAPPINGSTART || type == NOTIFICATION_FLAPPINGSTOP || type == NOTIFICATION_FLAPPINGDISABLED) {
 
-		if(cntct->notify_on_service_flapping == FALSE) {
+		if((cntct->service_notification_options & OPT_FLAPPING) == FALSE) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about FLAPPING service events.\n");
 			return ERROR;
 			}
@@ -655,7 +646,7 @@ int check_contact_service_notification_viability(contact *cntct, service *svc, i
 
 	if(type == NOTIFICATION_DOWNTIMESTART || type == NOTIFICATION_DOWNTIMEEND || type == NOTIFICATION_DOWNTIMECANCELLED) {
 
-		if(cntct->notify_on_service_downtime == FALSE) {
+		if((cntct->service_notification_options & OPT_DOWNTIME) == FALSE) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about DOWNTIME service events.\n");
 			return ERROR;
 			}
@@ -668,29 +659,19 @@ int check_contact_service_notification_viability(contact *cntct, service *svc, i
 	/*************************************/
 
 	/* see if we should notify about problems with this service */
-	if(svc->current_state == STATE_UNKNOWN && cntct->notify_on_service_unknown == FALSE) {
-		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about UNKNOWN service states.\n");
-		return ERROR;
-		}
-
-	if(svc->current_state == STATE_WARNING && cntct->notify_on_service_warning == FALSE) {
-		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about WARNING service states.\n");
-		return ERROR;
-		}
-
-	if(svc->current_state == STATE_CRITICAL && cntct->notify_on_service_critical == FALSE) {
-		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about CRITICAL service states.\n");
+	if(!(cntct->service_notification_options & (1 << svc->current_state))) {
+		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about %s service states.\n", service_state_name(svc->current_state));
 		return ERROR;
 		}
 
 	if(svc->current_state == STATE_OK) {
 
-		if(cntct->notify_on_service_recovery == FALSE) {
+		if((cntct->service_notification_options & OPT_RECOVERY) == FALSE) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about RECOVERY service states.\n");
 			return ERROR;
 			}
 
-		if(!((svc->notified_on_unknown == TRUE && cntct->notify_on_service_unknown == TRUE) || (svc->notified_on_warning == TRUE && cntct->notify_on_service_warning == TRUE) || (svc->notified_on_critical == TRUE && cntct->notify_on_service_critical == TRUE))) {
+		if(!(svc->notified_on & cntct->service_notification_options)) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify about this recovery.\n");
 			return ERROR;
 			}
@@ -878,18 +859,12 @@ int is_valid_escalation_for_service_notification(service *svc, serviceescalation
 	if(se->last_notification != 0 && se->last_notification < notification_number)
 		return FALSE;
 
-	/* skip this escalation if it has a timeperiod and the current time isn't valid */
-	if(se->escalation_period != NULL && check_time_against_period(current_time, se->escalation_period_ptr) == ERROR)
+	/* skip this escalation if the state options don't match */
+	if(flag_isset(se->escalation_options, 1 << svc->current_state) == FALSE)
 		return FALSE;
 
-	/* skip this escalation if the state options don't match */
-	if(svc->current_state == STATE_OK && se->escalate_on_recovery == FALSE)
-		return FALSE;
-	else if(svc->current_state == STATE_WARNING && se->escalate_on_warning == FALSE)
-		return FALSE;
-	else if(svc->current_state == STATE_UNKNOWN && se->escalate_on_unknown == FALSE)
-		return FALSE;
-	else if(svc->current_state == STATE_CRITICAL && se->escalate_on_critical == FALSE)
+	/* skip this escalation if it has a timeperiod and the current time isn't valid */
+	if(se->escalation_period != NULL && check_time_against_period(current_time, se->escalation_period_ptr) == ERROR)
 		return FALSE;
 
 	return TRUE;
@@ -1056,7 +1031,7 @@ int host_notification(host *hst, int type, char *not_author, char *not_data, int
 	time(&current_time);
 	gettimeofday(&start_time, NULL);
 
-	log_debug_info(DEBUGL_NOTIFICATIONS, 0, "** Host Notification Attempt ** Host: '%s', Type: %d, Options: %d, Current State: %d, Last Notification: %s", hst->name, type, options, hst->current_state, ctime(&hst->last_host_notification));
+	log_debug_info(DEBUGL_NOTIFICATIONS, 0, "** Host Notification Attempt ** Host: '%s', Type: %d, Options: %d, Current State: %d, Last Notification: %s", hst->name, type, options, hst->current_state, ctime(&hst->last_notification));
 
 
 	/* check viability of sending out a host notification */
@@ -1237,18 +1212,15 @@ int host_notification(host *hst, int type, char *not_author, char *not_data, int
 			if(contacts_notified > 0) {
 
 				/* calculate the next acceptable re-notification time */
-				hst->next_host_notification = get_next_host_notification_time(hst, current_time);
+				hst->next_notification = get_next_host_notification_time(hst, current_time);
 
 				/* update the last notification time for this host (this is needed for scheduling the next problem notification) */
-				hst->last_host_notification = current_time;
+				hst->last_notification = current_time;
 
 				/* update notifications flags */
-				if(hst->current_state == HOST_DOWN)
-					hst->notified_on_down = TRUE;
-				else if(hst->current_state == HOST_UNREACHABLE)
-					hst->notified_on_unreachable = TRUE;
+				hst->notified_on = (1 << hst->current_state);
 
-				log_debug_info(DEBUGL_NOTIFICATIONS, 0, "%d contacts were notified.  Next possible notification time: %s", contacts_notified, ctime(&hst->next_host_notification));
+				log_debug_info(DEBUGL_NOTIFICATIONS, 0, "%d contacts were notified.  Next possible notification time: %s", contacts_notified, ctime(&hst->next_notification));
 				}
 
 			/* we didn't end up notifying anyone */
@@ -1257,7 +1229,7 @@ int host_notification(host *hst, int type, char *not_author, char *not_data, int
 				/* adjust current notification number */
 				hst->current_notification_number--;
 
-				log_debug_info(DEBUGL_NOTIFICATIONS, 0, "No contacts were notified.  Next possible notification time: %s", ctime(&hst->next_host_notification));
+				log_debug_info(DEBUGL_NOTIFICATIONS, 0, "No contacts were notified.  Next possible notification time: %s", ctime(&hst->next_notification));
 				}
 			}
 
@@ -1328,13 +1300,13 @@ int check_host_notification_viability(host *hst, int type, int options) {
 
 			/* it looks like there is no notification time defined, so schedule next one far into the future (one year)... */
 			if(timeperiod_start == (time_t)0)
-				hst->next_host_notification = (time_t)(current_time + (60 * 60 * 24 * 365));
+				hst->next_notification = (time_t)(current_time + (60 * 60 * 24 * 365));
 
 			/* else use the next valid notification time */
 			else
-				hst->next_host_notification = timeperiod_start;
+				hst->next_notification = timeperiod_start;
 
-			log_debug_info(DEBUGL_NOTIFICATIONS, 1, "Next possible notification time: %s\n", ctime(&hst->next_host_notification));
+			log_debug_info(DEBUGL_NOTIFICATIONS, 1, "Next possible notification time: %s\n", ctime(&hst->next_notification));
 			}
 
 		return ERROR;
@@ -1388,7 +1360,7 @@ int check_host_notification_viability(host *hst, int type, int options) {
 	if(type == NOTIFICATION_FLAPPINGSTART || type == NOTIFICATION_FLAPPINGSTOP || type == NOTIFICATION_FLAPPINGDISABLED) {
 
 		/* don't send a notification if we're not supposed to... */
-		if(hst->notify_on_flapping == FALSE) {
+		if(!(hst->notification_options & OPT_FLAPPING)) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about FLAPPING events for this host.\n");
 			return ERROR;
 			}
@@ -1412,7 +1384,7 @@ int check_host_notification_viability(host *hst, int type, int options) {
 	if(type == NOTIFICATION_DOWNTIMESTART || type == NOTIFICATION_DOWNTIMEEND || type == NOTIFICATION_DOWNTIMECANCELLED) {
 
 		/* don't send a notification if we're not supposed to... */
-		if(hst->notify_on_downtime == FALSE) {
+		if((hst->notification_options & OPT_DOWNTIME) == FALSE) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about DOWNTIME events for this host.\n");
 			return ERROR;
 			}
@@ -1451,21 +1423,17 @@ int check_host_notification_viability(host *hst, int type, int options) {
 		}
 
 	/* see if we should notify about problems with this host */
-	if(hst->current_state == HOST_UNREACHABLE && hst->notify_on_unreachable == FALSE) {
-		log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about UNREACHABLE status for this host.\n");
-		return ERROR;
-		}
-	if(hst->current_state == HOST_DOWN && hst->notify_on_down == FALSE) {
-		log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about DOWN states for this host.\n");
+	if((hst->notification_options & (1 << hst->current_state)) == FALSE) {
+		log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about %s status for this host.\n", host_state_name(hst->current_state));
 		return ERROR;
 		}
 	if(hst->current_state == HOST_UP) {
 
-		if(hst->notify_on_recovery == FALSE) {
+		if((hst->notification_options & OPT_RECOVERY) == FALSE) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about RECOVERY states for this host.\n");
 			return ERROR;
 			}
-		if(!(hst->notified_on_down == TRUE || hst->notified_on_unreachable == TRUE)) {
+		if(!hst->notified_on) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 1, "We shouldn't notify about this recovery.\n");
 			return ERROR;
 			}
@@ -1513,9 +1481,9 @@ int check_host_notification_viability(host *hst, int type, int options) {
 		}
 
 	/* check if its time to re-notify the contacts about the host... */
-	if(current_time < hst->next_host_notification) {
+	if(current_time < hst->next_notification) {
 		log_debug_info(DEBUGL_NOTIFICATIONS, 1, "Its not yet time to re-notify the contacts about this host problem...\n");
-		log_debug_info(DEBUGL_NOTIFICATIONS, 1, "Next acceptable notification time: %s", ctime(&hst->next_host_notification));
+		log_debug_info(DEBUGL_NOTIFICATIONS, 1, "Next acceptable notification time: %s", ctime(&hst->next_notification));
 		return ERROR;
 		}
 
@@ -1543,6 +1511,12 @@ int check_contact_host_notification_viability(contact *cntct, host *hst, int typ
 		return ERROR;
 		}
 
+	/* is this host important enough? */
+	if(cntct->minimum_value > hst->hourly_value && cntct->minimum_value > hst->hourly_value + host_services_value(hst)) {
+		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "Contact's minimum_value is greater than that of the host and all its services. Notification will be blocked\n");
+		return ERROR;
+		}
+
 	/* see if the contact can be notified at this time */
 	if(check_time_against_period(time(NULL), cntct->host_notification_period_ptr) == ERROR) {
 		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "This contact shouldn't be notified at this time.\n");
@@ -1565,7 +1539,7 @@ int check_contact_host_notification_viability(contact *cntct, host *hst, int typ
 
 	if(type == NOTIFICATION_FLAPPINGSTART || type == NOTIFICATION_FLAPPINGSTOP || type == NOTIFICATION_FLAPPINGDISABLED) {
 
-		if(cntct->notify_on_host_flapping == FALSE) {
+		if((cntct->host_notification_options & OPT_FLAPPING) == FALSE) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about FLAPPING host events.\n");
 			return ERROR;
 			}
@@ -1580,7 +1554,7 @@ int check_contact_host_notification_viability(contact *cntct, host *hst, int typ
 
 	if(type == NOTIFICATION_DOWNTIMESTART || type == NOTIFICATION_DOWNTIMEEND || type == NOTIFICATION_DOWNTIMECANCELLED) {
 
-		if(cntct->notify_on_host_downtime == FALSE) {
+		if(flag_isset(cntct->host_notification_options, OPT_DOWNTIME) == FALSE) {
 			log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about DOWNTIME host events.\n");
 			return ERROR;
 			}
@@ -1594,28 +1568,14 @@ int check_contact_host_notification_viability(contact *cntct, host *hst, int typ
 	/*************************************/
 
 	/* see if we should notify about problems with this host */
-	if(hst->current_state == HOST_DOWN && cntct->notify_on_host_down == FALSE) {
-		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about DOWN states.\n");
+	if(flag_isset(cntct->host_notification_options, 1 << hst->current_state) == FALSE) {
+		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about %s states.\n", host_state_name(hst->current_state));
 		return ERROR;
 		}
 
-	if(hst->current_state == HOST_UNREACHABLE && cntct->notify_on_host_unreachable == FALSE) {
-		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about UNREACHABLE states,\n");
+	if(hst->current_state == HOST_UP && hst->notified_on == 0) {
+		log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify about this recovery.\n");
 		return ERROR;
-		}
-
-	if(hst->current_state == HOST_UP) {
-
-		if(cntct->notify_on_host_recovery == FALSE) {
-			log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify this contact about RECOVERY states.\n");
-			return ERROR;
-			}
-
-		if(!((hst->notified_on_down == TRUE && cntct->notify_on_host_down == TRUE) || (hst->notified_on_unreachable == TRUE && cntct->notify_on_host_unreachable == TRUE))) {
-			log_debug_info(DEBUGL_NOTIFICATIONS, 2, "We shouldn't notify about this recovery.\n");
-			return ERROR;
-			}
-
 		}
 
 	log_debug_info(DEBUGL_NOTIFICATIONS, 2, "** Host notification viability for contact '%s' PASSED.\n", cntct->name);
@@ -1805,16 +1765,12 @@ int is_valid_escalation_for_host_notification(host *hst, hostescalation *he, int
 	if(he->last_notification != 0 && he->last_notification < notification_number)
 		return FALSE;
 
-	/* skip this escalation if it has a timeperiod and the current time isn't valid */
-	if(he->escalation_period != NULL && check_time_against_period(current_time, he->escalation_period_ptr) == ERROR)
+	/* skip this escalation if the state options don't match */
+	if(flag_isset(he->escalation_options, 1 << hst->current_state) == FALSE)
 		return FALSE;
 
-	/* skip this escalation if the state options don't match */
-	if(hst->current_state == HOST_UP && he->escalate_on_recovery == FALSE)
-		return FALSE;
-	else if(hst->current_state == HOST_DOWN && he->escalate_on_down == FALSE)
-		return FALSE;
-	else if(hst->current_state == HOST_UNREACHABLE && he->escalate_on_unreachable == FALSE)
+	/* skip this escalation if it has a timeperiod and the current time isn't valid */
+	if(he->escalation_period != NULL && check_time_against_period(current_time, he->escalation_period_ptr) == ERROR)
 		return FALSE;
 
 	return TRUE;

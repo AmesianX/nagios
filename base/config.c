@@ -30,163 +30,6 @@
 #include "../include/nebmodules.h"
 
 
-extern char	*log_file;
-extern char     *command_file;
-extern char     *temp_file;
-extern char     *temp_path;
-extern char     *check_result_path;
-extern char     *lock_file;
-extern char	*log_archive_path;
-
-extern char     *nagios_user;
-extern char     *nagios_group;
-
-extern char     *macro_user[MAX_USER_MACROS];
-
-extern char     *global_host_event_handler;
-extern char     *global_service_event_handler;
-extern command  *global_host_event_handler_ptr;
-extern command  *global_service_event_handler_ptr;
-
-extern char     *ocsp_command;
-extern char     *ochp_command;
-extern command  *ocsp_command_ptr;
-extern command  *ochp_command_ptr;
-
-extern char     *illegal_object_chars;
-extern char     *illegal_output_chars;
-
-extern int      use_regexp_matches;
-extern int      use_true_regexp_matching;
-
-extern int	use_syslog;
-extern int      log_notifications;
-extern int      log_service_retries;
-extern int      log_host_retries;
-extern int      log_event_handlers;
-extern int      log_external_commands;
-extern int      log_passive_checks;
-
-extern int      service_check_timeout;
-extern int      service_check_timeout_state;
-extern int      host_check_timeout;
-extern int      event_handler_timeout;
-extern int      notification_timeout;
-extern int      ocsp_timeout;
-extern int      ochp_timeout;
-
-extern int      log_initial_states;
-
-extern int      daemon_mode;
-extern int      daemon_dumps_core;
-
-extern int      verify_config;
-extern int      verify_object_relationships;
-extern int      verify_circular_paths;
-extern int      test_scheduling;
-extern int      precache_objects;
-extern int      use_precached_objects;
-
-extern int      interval_length;
-extern int      service_inter_check_delay_method;
-extern int      host_inter_check_delay_method;
-extern int      service_interleave_factor_method;
-extern int      max_host_check_spread;
-extern int      max_service_check_spread;
-
-extern sched_info scheduling_info;
-
-extern int      max_child_process_time;
-
-extern int      max_parallel_service_checks;
-
-extern int      check_reaper_interval;
-extern int      max_check_reaper_time;
-extern int      service_freshness_check_interval;
-extern int      host_freshness_check_interval;
-extern int      auto_rescheduling_interval;
-extern int      auto_rescheduling_window;
-
-extern int      check_external_commands;
-extern int      check_orphaned_services;
-extern int      check_orphaned_hosts;
-extern int      check_service_freshness;
-extern int      check_host_freshness;
-extern int      auto_reschedule_checks;
-
-extern int      additional_freshness_latency;
-
-extern int      check_for_updates;
-extern int      bare_update_check;
-
-extern int      use_aggressive_host_checking;
-extern unsigned long cached_host_check_horizon;
-extern unsigned long cached_service_check_horizon;
-extern int      enable_predictive_host_dependency_checks;
-extern int      enable_predictive_service_dependency_checks;
-
-extern int      soft_state_dependencies;
-
-extern int      retain_state_information;
-extern int      retention_update_interval;
-extern int      use_retained_program_state;
-extern int      use_retained_scheduling_info;
-extern int      retention_scheduling_horizon;
-extern unsigned long retained_host_attribute_mask;
-extern unsigned long retained_service_attribute_mask;
-extern unsigned long retained_contact_host_attribute_mask;
-extern unsigned long retained_contact_service_attribute_mask;
-extern unsigned long retained_process_host_attribute_mask;
-extern unsigned long retained_process_service_attribute_mask;
-
-extern int      log_rotation_method;
-
-extern int      enable_notifications;
-extern int      execute_service_checks;
-extern int      accept_passive_service_checks;
-extern int      execute_host_checks;
-extern int      accept_passive_host_checks;
-extern int      enable_event_handlers;
-extern int      obsess_over_services;
-extern int      obsess_over_hosts;
-extern int      enable_failure_prediction;
-
-extern int      translate_passive_host_checks;
-extern int      passive_host_checks_are_soft;
-
-extern int      aggregate_status_updates;
-extern int      status_update_interval;
-
-extern int      time_change_threshold;
-
-extern unsigned long event_broker_options;
-
-extern int      process_performance_data;
-
-extern int      enable_flap_detection;
-
-extern double   low_service_flap_threshold;
-extern double   high_service_flap_threshold;
-extern double   low_host_flap_threshold;
-extern double   high_host_flap_threshold;
-
-extern int      use_large_installation_tweaks;
-extern int      enable_environment_macros;
-extern int      free_child_process_memory;
-extern int      child_processes_fork_twice;
-
-extern int      date_format;
-extern char     *use_timezone;
-
-extern unsigned long    max_check_result_file_age;
-
-extern char             *debug_file;
-extern int              debug_level;
-extern int              debug_verbosity;
-extern unsigned long    max_debug_file_size;
-
-extern int              allow_empty_hostgroup_assignment;
-
 /*** helpers ****/
 /*
  * find a command with arguments still attached
@@ -220,21 +63,11 @@ static command *find_bang_command(char *name)
 int read_all_object_data(char *main_config_file) {
 	int result = OK;
 	int options = 0;
-	int cache = FALSE;
-	int precache = FALSE;
 
 	options = READ_ALL_OBJECT_DATA;
 
-	/* cache object definitions if we're up and running */
-	if(verify_config == FALSE && test_scheduling == FALSE)
-		cache = TRUE;
-
-	/* precache object definitions */
-	if(precache_objects == TRUE && (verify_config == TRUE || test_scheduling == TRUE))
-		precache = TRUE;
-
 	/* read in all host configuration data from external sources */
-	result = read_object_config_data(main_config_file, options, cache, precache);
+	result = read_object_config_data(main_config_file, options);
 	if(result != OK)
 		return ERROR;
 
@@ -606,6 +439,17 @@ int read_main_config_file(char *main_config_file) {
 
 			log_initial_states = (atoi(value) > 0) ? TRUE : FALSE;
 			}
+
+                else if(!strcmp(variable, "log_current_states")) {
+
+                        if(strlen(value) != 1 || value[0] < '0' || value[0] > '1') {
+                                asprintf(&error_message, "Illegal value for log_current_states");
+                                error = TRUE;
+                                break;
+                                }
+
+                        log_current_states = (atoi(value) > 0) ? TRUE : FALSE;
+                        }
 
 		else if(!strcmp(variable, "retain_state_information")) {
 
@@ -1105,14 +949,6 @@ int read_main_config_file(char *main_config_file) {
 				}
 			}
 
-		else if(!strcmp(variable, "aggregate_status_updates")) {
-
-			/* DEPRECATED - ALL UPDATES ARE AGGREGATED AS OF NAGIOS 3.X */
-			/*aggregate_status_updates=(atoi(value)>0)?TRUE:FALSE;*/
-
-			logit(NSLOG_CONFIG_WARNING, TRUE, "Warning: aggregate_status_updates directive ignored.  All status file updates are now aggregated.");
-			}
-
 		else if(!strcmp(variable, "status_update_interval")) {
 
 			status_update_interval = atoi(value);
@@ -1141,7 +977,7 @@ int read_main_config_file(char *main_config_file) {
 			enable_flap_detection = (atoi(value) > 0) ? TRUE : FALSE;
 
 		else if(!strcmp(variable, "enable_failure_prediction"))
-			enable_failure_prediction = (atoi(value) > 0) ? TRUE : FALSE;
+			obsoleted_warning(variable, NULL);
 
 		else if(!strcmp(variable, "low_service_flap_threshold")) {
 
@@ -1280,14 +1116,6 @@ int read_main_config_file(char *main_config_file) {
 		else if(!strcmp(variable, "bare_update_check"))
 			bare_update_check = (atoi(value) > 0) ? TRUE : FALSE;
 
-		/* warn about old variables */
-		else if(!strcmp(variable, "comment_file") || !strcmp(variable, "xcddefault_comment_file")) {
-			logit(NSLOG_CONFIG_WARNING, TRUE, "Warning: comment_file variable ignored.  Comments are now stored in the status and retention files.");
-			}
-		else if(!strcmp(variable, "downtime_file") || !strcmp(variable, "xdddefault_downtime_file")) {
-			logit(NSLOG_CONFIG_WARNING, TRUE, "Warning: downtime_file variable ignored.  Downtime entries are now stored in the status and retention files.");
-			}
-
 		/* skip external data directives */
 		else if(strstr(input, "x") == input)
 			continue;
@@ -1310,9 +1138,9 @@ int read_main_config_file(char *main_config_file) {
 		else if(strstr(input, "state_retention_file=") == input)
 			continue;
 		else if(strstr(input, "object_cache_file=") == input)
-			continue;
+			object_cache_file = (char *)strdup(value);
 		else if(strstr(input, "precached_object_file=") == input)
-			continue;
+			object_precache_file = (char *)strdup(value);
 		else if(!strcmp(variable, "allow_empty_hostgroup_assignment")) {
 			allow_empty_hostgroup_assignment = (atoi(value) > 0) ? TRUE : FALSE;
 			}
@@ -1496,7 +1324,7 @@ int pre_flight_check(void) {
 	/********************************************/
 	/* check global event handler commands...   */
 	/********************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking global event handlers...\n");
 	if(global_host_event_handler != NULL) {
 		global_host_event_handler_ptr = find_bang_command(global_host_event_handler);
@@ -1517,7 +1345,7 @@ int pre_flight_check(void) {
 	/**************************************************/
 	/* check obsessive processor commands...          */
 	/**************************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking obsessive compulsive processor commands...\n");
 	if(ocsp_command != NULL) {
 		ocsp_command_ptr = find_bang_command(ocsp_command);
@@ -1537,7 +1365,7 @@ int pre_flight_check(void) {
 	/**************************************************/
 	/* check various settings...                      */
 	/**************************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking misc settings...\n");
 
 	/* check if we can write to temp_path */
@@ -1570,7 +1398,7 @@ int pre_flight_check(void) {
 		warnings++;
 		}
 
-	if(verify_config == TRUE) {
+	if(verify_config) {
 		printf("\n");
 		printf("Total Warnings: %d\n", warnings);
 		printf("Total Errors:   %d\n", errors);
@@ -1581,14 +1409,8 @@ int pre_flight_check(void) {
 
 	if(test_scheduling == TRUE) {
 
-		if(verify_object_relationships == TRUE)
-			runtime[0] = (double)((double)(tv[1].tv_sec - tv[0].tv_sec) + (double)((tv[1].tv_usec - tv[0].tv_usec) / 1000.0) / 1000.0);
-		else
-			runtime[0] = 0.0;
-		if(verify_circular_paths == TRUE)
-			runtime[1] = (double)((double)(tv[2].tv_sec - tv[1].tv_sec) + (double)((tv[2].tv_usec - tv[1].tv_usec) / 1000.0) / 1000.0);
-		else
-			runtime[1] = 0.0;
+		runtime[0] = tv_delta_f(&tv[0], &tv[1]);
+		runtime[1] = tv_delta_f(&tv[1], &tv[2]);
 		runtime[2] = (double)((double)(tv[3].tv_sec - tv[2].tv_sec) + (double)((tv[3].tv_usec - tv[2].tv_usec) / 1000.0) / 1000.0);
 		runtime[3] = runtime[0] + runtime[1] + runtime[2];
 
@@ -1619,6 +1441,7 @@ int pre_flight_object_check(int *w, int *e) {
 	host *temp_host = NULL;
 	host *temp_host2 = NULL;
 	hostsmember *temp_hostsmember = NULL;
+	servicesmember *sm = NULL;
 	hostgroup *temp_hostgroup = NULL;
 	servicegroup *temp_servicegroup = NULL;
 	servicesmember *temp_servicesmember = NULL;
@@ -1646,15 +1469,11 @@ int pre_flight_object_check(int *w, int *e) {
 		}
 #endif
 
-	/* bail out if we aren't supposed to verify object relationships */
-	if(verify_object_relationships == FALSE)
-		return OK;
-
 
 	/*****************************************/
 	/* check each service...                 */
 	/*****************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking services...\n");
 	if(get_service_count() == 0) {
 		logit(NSLOG_VERIFICATION_ERROR, TRUE, "Error: There are no services defined!");
@@ -1675,14 +1494,14 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 
 		/* check the service check_command */
-		temp_service->check_command_ptr = find_bang_command(temp_service->service_check_command);
+		temp_service->check_command_ptr = find_bang_command(temp_service->check_command);
 		if(temp_service->check_command_ptr == NULL) {
-			logit(NSLOG_VERIFICATION_ERROR, TRUE, "Error: Service check command '%s' specified in service '%s' for host '%s' not defined anywhere!", temp_service->service_check_command, temp_service->description, temp_service->host_name);
+			logit(NSLOG_VERIFICATION_ERROR, TRUE, "Error: Service check command '%s' specified in service '%s' for host '%s' not defined anywhere!", temp_service->check_command, temp_service->description, temp_service->host_name);
 			errors++;
 			}
 
 		/* check for sane recovery options */
-		if(temp_service->notify_on_recovery == TRUE && temp_service->notify_on_warning == FALSE && temp_service->notify_on_critical == FALSE) {
+		if(temp_service->notification_options == OPT_RECOVERY) {
 			logit(NSLOG_VERIFICATION_WARNING, TRUE, "Warning: Recovery notification option in service '%s' for host '%s' doesn't make any sense - specify warning and/or critical options as well", temp_service->description, temp_service->host_name);
 			warnings++;
 			}
@@ -1705,6 +1524,17 @@ int pre_flight_object_check(int *w, int *e) {
 			warnings++;
 			}
 
+		/* check parent services */
+		for(sm = temp_service->parents; sm; sm = sm->next) {
+			sm->service_ptr = find_service(sm->host_name, sm->service_description);
+			if(sm->service_ptr == NULL) {
+				logit(NSLOG_VERIFICATION_ERROR, TRUE, "Error: Service '%s' on host '%s' is not a valid parent for service '%s' on host '%s'\n",
+					  sm->host_name, sm->service_description,
+					  temp_service->host_name, temp_service->description);
+				errors++;
+				}
+			}
+
 		/* see if the notification interval is less than the check interval */
 		if(temp_service->notification_interval < temp_service->check_interval && temp_service->notification_interval != 0) {
 			logit(NSLOG_VERIFICATION_WARNING, TRUE, "Warning: Service '%s' on host '%s'  has a notification interval less than its check interval!  Notifications are only re-sent after checks are made, so the effective notification interval will be that of the check interval.", temp_service->description, temp_service->host_name);
@@ -1720,7 +1550,7 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 		}
 
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("\tChecked %d services.\n", total_objects);
 
 
@@ -1728,7 +1558,7 @@ int pre_flight_object_check(int *w, int *e) {
 	/*****************************************/
 	/* check all hosts...                    */
 	/*****************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking hosts...\n");
 
 	if(get_host_count() == 0) {
@@ -1742,7 +1572,7 @@ int pre_flight_object_check(int *w, int *e) {
 		total_objects++;
 
 		/* make sure each host has at least one service associated with it */
-		if(temp_host->total_services == 0) {
+		if(temp_host->total_services == 0 && verify_config >= 2) {
 			logit(NSLOG_VERIFICATION_WARNING, TRUE, "Warning: Host '%s' has no services associated with it!", temp_host->name);
 			warnings++;
 			}
@@ -1757,10 +1587,10 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 
 		/* hosts that don't have check commands defined shouldn't ever be checked... */
-		if(temp_host->host_check_command != NULL) {
-			temp_host->check_command_ptr = find_bang_command(temp_host->host_check_command);
+		if(temp_host->check_command != NULL) {
+			temp_host->check_command_ptr = find_bang_command(temp_host->check_command);
 			if(temp_host->check_command_ptr == NULL) {
-				logit(NSLOG_VERIFICATION_ERROR, TRUE, "Error: Host check command '%s' specified for host '%s' is not defined anywhere!", temp_host->host_check_command, temp_host->name);
+				logit(NSLOG_VERIFICATION_ERROR, TRUE, "Error: Host check command '%s' specified for host '%s' is not defined anywhere!", temp_host->check_command, temp_host->name);
 				errors++;
 				}
 			}
@@ -1839,7 +1669,7 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 
 		/* check for sane recovery options */
-		if(temp_host->notify_on_recovery == TRUE && temp_host->notify_on_down == FALSE && temp_host->notify_on_unreachable == FALSE) {
+		if(temp_host->notification_options == OPT_RECOVERY) {
 			logit(NSLOG_VERIFICATION_WARNING, TRUE, "Warning: Recovery notification option in host '%s' definition doesn't make any sense - specify down and/or unreachable options as well", temp_host->name);
 			warnings++;
 			}
@@ -1854,14 +1684,14 @@ int pre_flight_object_check(int *w, int *e) {
 		}
 
 
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("\tChecked %d hosts.\n", total_objects);
 
 
 	/*****************************************/
 	/* check each host group...              */
 	/*****************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking host groups...\n");
 	for(temp_hostgroup = hostgroup_list, total_objects = 0; temp_hostgroup != NULL; temp_hostgroup = temp_hostgroup->next, total_objects++) {
 
@@ -1891,14 +1721,14 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 		}
 
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("\tChecked %d host groups.\n", total_objects);
 
 
 	/*****************************************/
 	/* check each service group...           */
 	/*****************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking service groups...\n");
 	for(temp_servicegroup = servicegroup_list, total_objects = 0; temp_servicegroup != NULL; temp_servicegroup = temp_servicegroup->next, total_objects++) {
 
@@ -1928,7 +1758,7 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 		}
 
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("\tChecked %d service groups.\n", total_objects);
 
 
@@ -1936,7 +1766,7 @@ int pre_flight_object_check(int *w, int *e) {
 	/*****************************************/
 	/* check all contacts...                 */
 	/*****************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking contacts...\n");
 	if(contact_list == NULL) {
 		logit(NSLOG_VERIFICATION_ERROR, TRUE, "Error: There are no contacts defined!");
@@ -2005,13 +1835,13 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 
 		/* check for sane host recovery options */
-		if(temp_contact->notify_on_host_recovery == TRUE && temp_contact->notify_on_host_down == FALSE && temp_contact->notify_on_host_unreachable == FALSE) {
+		if(temp_contact->host_notification_options == OPT_RECOVERY) {
 			logit(NSLOG_VERIFICATION_WARNING, TRUE, "Warning: Host recovery notification option for contact '%s' doesn't make any sense - specify down and/or unreachable options as well", temp_contact->name);
 			warnings++;
 			}
 
 		/* check for sane service recovery options */
-		if(temp_contact->notify_on_service_recovery == TRUE && temp_contact->notify_on_service_critical == FALSE && temp_contact->notify_on_service_warning == FALSE) {
+		if(temp_contact->service_notification_options == OPT_RECOVERY) {
 			logit(NSLOG_VERIFICATION_WARNING, TRUE, "Warning: Service recovery notification option for contact '%s' doesn't make any sense - specify critical and/or warning options as well", temp_contact->name);
 			warnings++;
 			}
@@ -2025,7 +1855,7 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 		}
 
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("\tChecked %d contacts.\n", total_objects);
 
 
@@ -2033,7 +1863,7 @@ int pre_flight_object_check(int *w, int *e) {
 	/*****************************************/
 	/* check each contact group...           */
 	/*****************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking contact groups...\n");
 	for(temp_contactgroup = contactgroup_list, total_objects = 0; temp_contactgroup != NULL; temp_contactgroup = temp_contactgroup->next, total_objects++) {
 
@@ -2063,14 +1893,14 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 		}
 
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("\tChecked %d contact groups.\n", total_objects);
 
 
 	/*****************************************/
 	/* check all commands...                 */
 	/*****************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking commands...\n");
 
 	for(temp_command = command_list, total_objects = 0; temp_command != NULL; temp_command = temp_command->next, total_objects++) {
@@ -2084,7 +1914,7 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 		}
 
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("\tChecked %d commands.\n", total_objects);
 
 
@@ -2092,7 +1922,7 @@ int pre_flight_object_check(int *w, int *e) {
 	/*****************************************/
 	/* check all timeperiods...              */
 	/*****************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking time periods...\n");
 
 	for(temp_timeperiod = timeperiod_list, total_objects = 0; temp_timeperiod != NULL; temp_timeperiod = temp_timeperiod->next, total_objects++) {
@@ -2119,7 +1949,7 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 		}
 
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("\tChecked %d time periods.\n", total_objects);
 
 
@@ -2142,7 +1972,6 @@ int pre_flight_object_check(int *w, int *e) {
 #define dfs_get_status(obj) (obj ? ary[obj->id] : DFS_OK)
 #define dfs_set_status(obj, value) ary[obj->id] = (value)
 
-extern struct object_count num_objects;
 
 /**
  * Modified version of Depth-first Search
@@ -2321,10 +2150,6 @@ int pre_flight_circular_check(int *w, int *e) {
 	unsigned int alloc, dep_type;
 	char *ary[2];
 
-	/* bail out if we aren't supposed to verify circular paths */
-	if(verify_circular_paths == FALSE)
-		return OK;
-
 	/* this would be a valid but pathological case */
 	if(num_objects.hosts > num_objects.services)
 		alloc = num_objects.hosts;
@@ -2333,8 +2158,8 @@ int pre_flight_circular_check(int *w, int *e) {
 
 	for (i = 0; i < ARRAY_SIZE(ary); i++) {
 		if (!(ary[i] = calloc(1, alloc))) {
-			while (i) {
-				my_free(ary[--i]);
+			while (--i >= 0) {
+				my_free(ary[i]);
 				}
 			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Unable to allocate memory for circular path checks.\n");
 			errors++;
@@ -2346,7 +2171,7 @@ int pre_flight_circular_check(int *w, int *e) {
 	/********************************************/
 	/* check for circular paths between hosts   */
 	/********************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking for circular paths between hosts...\n");
 
 	for(temp_host = host_list; temp_host != NULL; temp_host = temp_host->next) {
@@ -2356,25 +2181,41 @@ int pre_flight_circular_check(int *w, int *e) {
 	/********************************************/
 	/* check for circular dependencies          */
 	/********************************************/
-	if(verify_config == TRUE)
+	if(verify_config)
 		printf("Checking for circular host and service dependencies...\n");
 
 	/* check service dependencies */
 	/* We must clean the dfs status from previous check */
 	for (i = 0; i < ARRAY_SIZE(ary); i++)
 		memset(ary[i], 0, alloc);
-	for(temp_sd = servicedependency_list; temp_sd != NULL; temp_sd = temp_sd->next) {
+	for(i = 0; i < num_objects.servicedependencies; i++) {
+		temp_sd = &servicedependency_list[i];
 		dep_type = temp_sd->dependency_type;
+		/*
+		 * this shouldn't happen, but it can in case dependencies are
+		 * added to services on hosts in empty hostgroups (ie, nonexistant)
+		 */
+		if(dep_type < 1 || dep_type > ARRAY_SIZE(ary))
+			continue;
 		dfs_servicedep_path(ary[dep_type - 1], temp_sd->dependent_service_ptr, dep_type, &errors);
 		}
+	if(verify_config)
+		printf("\tChecked %u service dependencies\n", num_objects.servicedependencies);
 
 	/* check host dependencies */
 	for (i = 0; i < ARRAY_SIZE(ary); i++)
 		memset(ary[i], 0, alloc);
-	for(temp_hd = hostdependency_list; temp_hd != NULL; temp_hd = temp_hd->next) {
+	for(i = 0; i < num_objects.hostdependencies; i++) {
+		temp_hd = &hostdependency_list[i];
 		dep_type = temp_hd->dependency_type;
+		/* see above */
+		if(dep_type < 1 || dep_type > ARRAY_SIZE(ary))
+			continue;
 		dfs_hostdep_path(ary[dep_type - 1], temp_hd->dependent_host_ptr, dep_type, &errors);
 		}
+
+	if(verify_config)
+		printf("\tChecked %u host dependencies\n", num_objects.hostdependencies);
 
 	/* update warning and error count */
 	*e += errors;

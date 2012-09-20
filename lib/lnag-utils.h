@@ -45,7 +45,8 @@
 #define TRUE (!FALSE) /** Not false */
 
 /** Useful macro to safely avoid double-free memory corruption */
-#define my_free(ptr) if (1) { if(ptr) { free(ptr); ptr = NULL; } } else {} (void)1 
+/* #define my_free(ptr) if (1) { if(ptr) { free(ptr); ptr = NULL; } } else {} (void)1  */
+#define my_free(ptr) { if(ptr) { free(ptr); ptr = NULL; } } (void)1
 
 #ifndef ARRAY_SIZE
 /** Useful for iterating over all elements in a static array */
@@ -54,6 +55,10 @@
 #ifndef veclen
 /** useful for iterating over all elements in a static array */
 # define veclen ARRAY_SIZE
+#endif
+
+#ifndef offsetof
+# define offsetof(t, f) ((unsigned long)&((t *)0)->f)
 #endif
 
 NAGIOS_BEGIN_DECL
