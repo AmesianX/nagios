@@ -355,8 +355,6 @@ int main(int argc, char **argv, char **env) {
 		/* keep monitoring things until we get a shutdown command */
 		do {
 
-			init_event_queue();
-
 			/* reset program variables */
 			reset_variables();
 
@@ -402,6 +400,14 @@ int main(int argc, char **argv, char **env) {
 			/* write log version/info */
 			write_log_file_info(NULL);
 
+			/*
+			 * Initialize query handler and event subscription service.
+			 * This must be done before modules are initialized, so
+			 * the modules can use our in-core stuff properly
+			 */
+			qh_init(qh_socket_path);
+			nerd_init();
+
 #ifdef USE_EVENT_BROKER
 			/* load modules */
 			neb_load_all_modules();
@@ -442,6 +448,8 @@ int main(int argc, char **argv, char **env) {
 				cleanup();
 				exit(ERROR);
 				}
+
+			init_event_queue();
 
 			/* write the objects.cache file */
 			fcache_objects(object_cache_file);
@@ -519,8 +527,8 @@ int main(int argc, char **argv, char **env) {
 			/* fire up command file worker */
 			launch_command_file_worker();
 
-			/* @TODO: get number of workers from config */
-			init_workers(4);
+			/* initialize check workers */
+			init_workers(num_check_workers);
 
 #ifdef USE_EVENT_BROKER
 			/* send program data to broker */

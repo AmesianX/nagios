@@ -213,7 +213,7 @@ int broker_event_handler(int type, int flags, int attr, int eventhandler_type, v
 
 
 /* send host check data to broker */
-int broker_host_check(int type, int flags, int attr, host *hst, int check_type, int state, int state_type, struct timeval start_time, struct timeval end_time, char *cmd, double latency, double exectime, int timeout, int early_timeout, int retcode, char *cmdline, char *output, char *long_output, char *perfdata, char *saveddata, struct timeval *timestamp) {
+int broker_host_check(int type, int flags, int attr, host *hst, int check_type, int state, int state_type, struct timeval start_time, struct timeval end_time, char *cmd, double latency, double exectime, int timeout, int early_timeout, int retcode, char *cmdline, char *output, char *long_output, char *perfdata, char *saveddata, struct timeval *timestamp, check_result *cr) {
 	char *command_buf = NULL;
 	char *command_name = NULL;
 	char *command_args = NULL;
@@ -260,6 +260,7 @@ int broker_host_check(int type, int flags, int attr, host *hst, int check_type, 
 	ds.long_output = long_output;
 	ds.perf_data = perfdata;
 	ds.saved_data = saveddata;
+	ds.check_result_ptr = cr;
 
 	/* make callbacks */
 	return_code = neb_make_callbacks(NEBCALLBACK_HOST_CHECK_DATA, (void *)&ds);
@@ -273,7 +274,7 @@ int broker_host_check(int type, int flags, int attr, host *hst, int check_type, 
 
 
 /* send service check data to broker */
-int broker_service_check(int type, int flags, int attr, service *svc, int check_type, struct timeval start_time, struct timeval end_time, char *cmd, double latency, double exectime, int timeout, int early_timeout, int retcode, char *cmdline, struct timeval *timestamp) {
+int broker_service_check(int type, int flags, int attr, service *svc, int check_type, struct timeval start_time, struct timeval end_time, char *cmd, double latency, double exectime, int timeout, int early_timeout, int retcode, char *cmdline, struct timeval *timestamp, check_result *cr) {
 	char *command_buf = NULL;
 	char *command_name = NULL;
 	char *command_args = NULL;
@@ -321,6 +322,7 @@ int broker_service_check(int type, int flags, int attr, service *svc, int check_
 	ds.long_output = svc->long_plugin_output;
 	ds.perf_data = svc->perf_data;
 	ds.saved_data = svc->saved_data;
+	ds.check_result_ptr = cr;
 
 	/* make callbacks */
 	return_code = neb_make_callbacks(NEBCALLBACK_SERVICE_CHECK_DATA, (void *)&ds);

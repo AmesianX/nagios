@@ -5,7 +5,6 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <errno.h>
-#include <features.h>
 #include <stdio.h>
 #include <string.h>
 #include "iobroker.h"
@@ -14,8 +13,11 @@
  * epoll_*() is linux specific and was added to glibc 2.3.2, so we
  * check for 2.4 and use epoll() if we're on that version or later.
  */
-#if defined(__linux) && __GLIBC_PREREQ(2, 4) && !defined(IOBROKER_USES_SELECT) && !defined(IOBROKER_USES_POLL)
-#define IOBROKER_USES_EPOLL
+#if defined(__GLIBC__) && defined(__linux)
+#include <features.h>
+# if __GLIBC_PREREQ(2, 4) && !defined(IOBROKER_USES_SELECT) && !defined(IOBROKER_USES_POLL)
+#  define IOBROKER_USES_EPOLL
+# endif
 #endif
 
 #ifdef IOBROKER_USES_EPOLL
@@ -86,16 +88,6 @@ const char *iobroker_strerror(int error)
 		return strerror(error);
 
 	return iobroker_errors[error].string;
-}
-
-void iobroker_print_set(int fd, iobroker_set *iobs)
-{
-	dprintf(fd, "iobroker_set:\n");
-	dprintf(fd, "\tmax_fds: %d\n", iobs->max_fds);
-	dprintf(fd, "\tnum_fds: %d\n", iobs->num_fds);
-#ifdef IOBROKER_USES_EPOLL
-	dprintf(fd, "\tepfd: %d\n", iobs->epfd);
-#endif
 }
 
 
@@ -201,6 +193,13 @@ int iobroker_register(iobroker_set *iobs, int fd, void *arg, int (*handler)(int,
 	}
 	if (fd < 0 || fd > iobs->max_fds)
 		return IOBROKER_EINVAL;
+
+	/*
+	 * Re-registering a socket is an error, as multiple input
+	 * handlers for a single socket makes no sense at all
+	 */
+	if (iobs->iobroker_fds[fd] != NULL)
+		return IOBROKER_EALREADY;
 
 #ifdef IOBROKER_USES_EPOLL
 	{

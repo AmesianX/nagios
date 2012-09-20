@@ -28,11 +28,12 @@
 #endif
 
 /** return codes */
-#define IOBROKER_SUCCESS 0
-#define IOBROKER_ENOSET -1
-#define IOBROKER_ENOINIT -2
-#define IOBROKER_ELIB -3
-#define IOBROKER_EINVAL -EINVAL
+#define IOBROKER_SUCCESS    0
+#define IOBROKER_ENOSET   (-1)
+#define IOBROKER_ENOINIT  (-2)
+#define IOBROKER_ELIB     (-3)
+#define IOBROKER_EALREADY (-EALREADY)
+#define IOBROKER_EINVAL   (-EINVAL)
 
 
 /** Flags for iobroker_destroy() */
@@ -49,13 +50,6 @@ typedef struct iobroker_set iobroker_set;
  * @return A string describing the meaning of the error code
  */
 extern const char *iobroker_strerror(int error);
-
-/**
- * Write an io broker set to the named filedescriptor
- * @param fd The filedescriptor to write to (using dprintf())
- * @param iobs The io broker set to print
- */
-extern void iobroker_print_set(int fd, iobroker_set *iobs);
 
 /**
  * Create a new socket set

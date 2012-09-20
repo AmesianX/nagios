@@ -43,6 +43,9 @@ extern char *check_result_path;
 extern char *lock_file;
 extern char *object_precache_file;
 
+extern int num_check_workers;
+extern char *qh_socket_path;
+
 extern char *nagios_user;
 extern char *nagios_group;
 
@@ -223,9 +226,9 @@ extern unsigned long modified_service_process_attributes;
 extern squeue_t *nagios_squeue;
 extern iobroker_set *nagios_iobs;
 
-extern check_stats check_statistics[MAX_CHECK_STATS_TYPES];
+extern struct check_stats check_statistics[MAX_CHECK_STATS_TYPES];
 
-extern notification *notification_list;
+extern struct notify_list *notification_list;
 
 extern struct check_engine nagios_check_engine;
 
@@ -359,6 +362,11 @@ extern struct check_engine nagios_check_engine;
 
 NAGIOS_BEGIN_DECL
 
+/* useful for hosts and services to determine time 'til next check */
+#define normal_check_window(o) ((time_t)(o->check_interval * interval_length))
+#define retry_check_window(o) ((time_t)(o->retry_interval * interval_length))
+#define check_window(o) (o->state_type == SOFT_STATE ? retry_check_window(o) : normal_check_window(o))
+
 /******************** FUNCTIONS **********************/
 
 /* silly helpers useful pretty much all over the place */
@@ -366,6 +374,22 @@ extern const char *service_state_name(int state);
 extern const char *host_state_name(int state);
 extern const char *state_type_name(int state_type);
 extern const char *check_result_source(check_result *cr);
+
+/*** Nagios Event Radio Dispatcher functions ***/
+extern int nerd_init(void);
+extern int nerd_mkchan(const char *name, int (*handler)(int, void *), unsigned int callbacks);
+
+/*** Query Handler functions, types and macros*/
+typedef int (*qh_handler)(int, char *, unsigned int);
+
+/* return codes for query_handlers() */
+#define QH_OK        0  /* keep listening */
+#define QH_CLOSE     1  /* we should close the socket */
+#define QH_INVALID   2  /* invalid query. Log and close */
+#define QH_TAKEOVER  3  /* handler will take full control. de-register but don't close */
+extern int qh_init(const char *path);
+extern int qh_deinit(void);
+extern int qh_register_handler(const char *name, unsigned int options, qh_handler handler);
 
 /**** Configuration Functions ****/
 int read_main_config_file(char *);                     		/* reads the main config file (nagios.cfg) */
