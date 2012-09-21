@@ -130,7 +130,7 @@ int read_main_config_file(char *main_config_file) {
 
 		/* get the variable and value */
 		if (!my_str2parts(input,'=', &variable,&value)) {
-			asprintf(&error_message, "bad variable declaration: %s", input);
+			(void)asprintf(&error_message, "bad variable declaration: %s", input);
 			error = TRUE;
 			break;
 			}
