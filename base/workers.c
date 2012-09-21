@@ -15,10 +15,6 @@
 /* perfect hash function for wproc response codes */
 #include "wp-phash.c"
 
-extern int service_check_timeout, host_check_timeout;
-extern int notification_timeout;
-
-iobroker_set *nagios_iobs = NULL;
 static worker_process **workers;
 static unsigned int num_workers;
 static unsigned int worker_index;
@@ -48,8 +44,6 @@ typedef struct wproc_result {
 	struct rusage rusage;
 	struct kvvec *response;
 } wproc_result;
-
-extern int nagios_pid;
 
 #define tv2float(tv) ((float)((tv)->tv_sec) + ((float)(tv)->tv_usec) / 1000000.0)
 
@@ -266,7 +260,7 @@ static int handle_worker_check(wproc_result *wpres, worker_process *wp, worker_j
 		cr->return_code = STATE_UNKNOWN;
 	}
 
-	if (wpres->outstd) {
+	if (wpres->outstd && *wpres->outstd) {
 		cr->output = strdup(wpres->outstd);
 	} else if (wpres->outerr) {
 		asprintf(&cr->output, "(No output on stdout) stderr: %s", wpres->outerr);
@@ -276,22 +270,10 @@ static int handle_worker_check(wproc_result *wpres, worker_process *wp, worker_j
 
 	cr->early_timeout = wpres->early_timeout;
 	cr->exited_ok = wpres->exited_ok;
+	cr->engine = &nagios_check_engine;
+	cr->source = wp;
 
-	if (cr->service_description) {
-		service *svc = find_service(cr->host_name, cr->service_description);
-		if (svc)
-			result = handle_async_service_check_result(svc, cr);
-		else
-			logit(NSLOG_RUNTIME_WARNING, TRUE, "Worker: Failed to locate service '%s' on host '%s'. Result from job %d (%s) will be dropped.\n",
-				  cr->service_description, cr->host_name, job->id, job->command);
-	} else {
-		host *hst = find_host(cr->host_name);
-		if (hst)
-			result = handle_async_host_check_result_3x(hst, cr);
-		else
-			logit(NSLOG_RUNTIME_WARNING, TRUE, "Worker: Failed to locate host '%s'. Result from job %d (%s) will be dropped.\n",
-				  cr->host_name, job->id, job->command);
-	}
+	process_check_result(cr);
 	free_check_result(cr);
 
 	return result;
@@ -545,13 +527,33 @@ int workers_alive(void)
 	return alive;
 }
 
+
 int init_workers(int desired_workers)
 {
 	worker_process **wps;
 	int i;
 
+	i = desired_workers;
 	if (desired_workers <= 0) {
-		desired_workers = 4;
+		int cpus = online_cpus();
+
+		if(cpus < 0) {
+			desired_workers = 4;
+		}
+		else {
+			if(!desired_workers) {
+				desired_workers = ((cpus / 2) + (cpus / 3));
+				/* max 12, min 2 workers, for arbitrary reasons */
+				if(desired_workers > 12)
+					desired_workers = 12;
+				if(desired_workers < 2)
+					desired_workers = 2;
+			}
+			else {
+				/* desired workers is a negative number */
+				desired_workers = cpus - desired_workers;
+			}
+		}
 	}
 
 	if (workers_alive() == desired_workers)
@@ -585,17 +587,18 @@ int init_workers(int desired_workers)
 
 		wp = spawn_worker(worker_init_func, (void *)get_global_macros());
 		if (!wp) {
-			logit(NSLOG_RUNTIME_WARNING, TRUE, "Failed to spawn worker: %s\n", strerror(errno));
+			logit(NSLOG_RUNTIME_ERROR, TRUE, "Failed to spawn worker: %s\n", strerror(errno));
 			free_worker_memory(0);
 			return ERROR;
 		}
 		set_socket_options(wp->sd, 256 * 1024);
+		asprintf(&wp->source_name, "Nagios Core worker %d", wp->pid);
 
 		wps[i] = wp;
 		ret = iobroker_register(nagios_iobs, wp->sd, wp, handle_worker_result);
 		if (ret < 0) {
-			printf("Failed to register worker socket with iobroker %p\n", nagios_iobs);
-			exit(1);
+			logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: Failed to register worker socket with io broker: %s\n", iobroker_strerror(ret));
+			return ERROR;
 		}
 	}
 	num_workers = desired_workers;

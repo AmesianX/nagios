@@ -133,19 +133,19 @@ int skiplist_insert(skiplist *list, void *data) {
 		return SKIPLIST_ERROR_ARGS;
 		}
 
-	/* initialize update vector */
-	if((update = (skiplistnode **)malloc(sizeof(skiplistnode *) * list->max_levels)) == NULL) {
-		return SKIPLIST_ERROR_MEMORY;
-		}
-	for(x = 0; x < list->max_levels; x++)
-		update[x] = NULL;
-
 	/* check to make sure we don't have duplicates */
 	/* NOTE: this could made be more efficient */
 	if(list->allow_duplicates == FALSE) {
 		if(skiplist_find_first(list, data, NULL))
 			return SKIPLIST_ERROR_DUPLICATE;
 		}
+
+	/* initialize update vector */
+	if((update = (skiplistnode **)malloc(sizeof(skiplistnode *) * list->max_levels)) == NULL) {
+		return SKIPLIST_ERROR_MEMORY;
+		}
+	for(x = 0; x < list->max_levels; x++)
+		update[x] = NULL;
 
 	/* find proper position for insert, remember pointers  with an update vector */
 	thisnode = list->head;
@@ -407,14 +407,6 @@ void *skiplist_find_next(skiplist *list, void *data, void **node_ptr) {
 
 
 
-/* delete (all) matching item(s) from list */
-int skiplist_delete(skiplist *list, void *data) {
-
-	return skiplist_delete_all(list, data);
-	}
-
-
-
 /* delete first matching item from list */
 int skiplist_delete_first(skiplist *list, void *data) {
 	skiplistnode **update = NULL;
@@ -481,7 +473,7 @@ int skiplist_delete_first(skiplist *list, void *data) {
 
 
 /* delete all matching items from list */
-int skiplist_delete_all(skiplist *list, void *data) {
+int skiplist_delete(skiplist *list, void *data) {
 	int deleted = 0;
 	int total_deleted = 0;
 

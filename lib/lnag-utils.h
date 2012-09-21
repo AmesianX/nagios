@@ -1,6 +1,9 @@
 #ifndef LIBNAGIOS_lnag_utils_h__
 #define LIBNAGIOS_lnag_utils_h__
 
+#include <unistd.h> /* for sysconf() */
+#include <stdlib.h> /* for rand() */
+
 /**
  * @file lnag-utils.h
  * @brief libnagios helper functions that lack a "real" home.
@@ -45,7 +48,7 @@
 #define TRUE (!FALSE) /** Not false */
 
 /** Useful macro to safely avoid double-free memory corruption */
-#define my_free(ptr) if(1) { if(ptr) { free(ptr); ptr = NULL; } }
+#define my_free(ptr) { if(ptr) { free(ptr); ptr = NULL; } } (void)1
 
 #ifndef ARRAY_SIZE
 /** Useful for iterating over all elements in a static array */
@@ -55,6 +58,13 @@
 /** useful for iterating over all elements in a static array */
 # define veclen ARRAY_SIZE
 #endif
+
+#ifndef offsetof
+# define offsetof(t, f) ((unsigned long)&((t *)0)->f)
+#endif
+
+/** Use this macro to dynamically increase vector lengths */
+#define alloc_nr(x) (((x)+16)*3/2)
 
 NAGIOS_BEGIN_DECL
 
@@ -95,6 +105,53 @@ static inline int lnag_clz(unsigned int x)
 static inline unsigned int rup2pof2(unsigned int r)
 {
 	return r < 2 ? 4 : lnag_ispof2(r) ? r : 1 << ((sizeof(r) * 8) - (lnag_clz(r)));
+}
+
+/**
+ * Grab a random unsigned int in the range between low and high.
+ * Note that the PRNG has to be seeded prior to calling this.
+ * @param low The lower bound, inclusive
+ * @param high The higher bound, inclusive
+ * @return An unsigned integer in the mathematical range [low, high]
+ */
+static inline unsigned int ranged_urand(unsigned int low, unsigned int high)
+{
+	return low + (rand() * (1.0 / (RAND_MAX + 1.0)) * (high - low));
+}
+
+
+#if defined(hpux) || defined(__hpux) || defined(_hpux)
+#  include <sys/pstat.h>
+#endif
+
+/*
+ * By doing this in two steps we can at least get
+ * the function to be somewhat coherent, even
+ * with this disgusting nest of #ifdefs.
+ */
+#ifndef _SC_NPROCESSORS_ONLN
+#  ifdef _SC_NPROC_ONLN
+#    define _SC_NPROCESSORS_ONLN _SC_NPROC_ONLN
+#  elif defined _SC_CRAY_NCPU
+#    define _SC_NPROCESSORS_ONLN _SC_CRAY_NCPU
+#  endif
+#endif
+
+static inline int online_cpus(void)
+{
+#ifdef _SC_NPROCESSORS_ONLN
+	long ncpus;
+
+	if ((ncpus = (long)sysconf(_SC_NPROCESSORS_ONLN)) > 0)
+		return (int)ncpus;
+#elif defined(hpux) || defined(__hpux) || defined(_hpux)
+	struct pst_dynamic psd;
+
+	if (!pstat_getdynamic(&psd, sizeof(psd), (size_t)1, 0))
+		return (int)psd.psd_proc_cnt;
+#endif
+
+	return 0;
 }
 
 NAGIOS_END_DECL

@@ -46,7 +46,7 @@ char *status_version = NULL;
 time_t program_start = 0L;
 int status_service_entries = 0;
 int status_host_entries = 0;
-unsigned long nagios_pid = 0L;
+int nagios_pid = 0;
 
 double min_service_state_change = 0.0;
 int have_min_service_state_change = FALSE;
@@ -454,9 +454,9 @@ int display_mrtg_values(void) {
 		else if(!strcmp(temp_ptr, "NAGIOSVERSION"))
 			printf("%s%s", status_version, mrtg_delimiter);
 		else if(!strcmp(temp_ptr, "NAGIOSPID"))
-			printf("%lu%s", nagios_pid, mrtg_delimiter);
+			printf("%d%s", nagios_pid, mrtg_delimiter);
 		else if(!strcmp(temp_ptr, "NAGIOSVERPID"))
-			printf("Nagios %s (pid=%lu)%s", status_version, nagios_pid, mrtg_delimiter);
+			printf("Nagios %s (pid=%d)%s", status_version, nagios_pid, mrtg_delimiter);
 
 
 		else if(!strcmp(temp_ptr, "NUMSERVICES"))
@@ -759,7 +759,7 @@ int display_stats(void) {
 	time_difference = (current_time - program_start);
 	get_time_breakdown(time_difference, &days, &hours, &minutes, &seconds);
 	printf("Program Running Time:                   %dd %dh %dm %ds\n", days, hours, minutes, seconds);
-	printf("Nagios PID:                             %lu\n", nagios_pid);
+	printf("Nagios PID:                             %d\n", nagios_pid);
 	printf("\n");
 	printf("Total Services:                         %d\n", status_service_entries);
 	printf("Services Checked:                       %d\n", services_checked);
@@ -880,7 +880,7 @@ int read_status_file(void) {
 
 	double execution_time = 0.0;
 	double latency = 0.0;
-	int check_type = SERVICE_CHECK_ACTIVE;
+	int check_type = CHECK_TYPE_ACTIVE;
 	int current_state = STATE_OK;
 	double state_change = 0.0;
 	int is_flapping = FALSE;
@@ -950,7 +950,7 @@ int read_status_file(void) {
 						have_max_host_state_change = TRUE;
 						max_host_state_change = state_change;
 						}
-					if(check_type == HOST_CHECK_ACTIVE) {
+					if(check_type == CHECK_TYPE_ACTIVE) {
 						active_host_checks++;
 						average_active_host_latency = (((average_active_host_latency * ((double)active_host_checks - 1.0)) + latency) / (double)active_host_checks);
 						if(have_min_active_host_latency == FALSE || min_active_host_latency > latency) {
@@ -1052,7 +1052,7 @@ int read_status_file(void) {
 						have_max_service_state_change = TRUE;
 						max_service_state_change = state_change;
 						}
-					if(check_type == SERVICE_CHECK_ACTIVE) {
+					if(check_type == CHECK_TYPE_ACTIVE) {
 						active_service_checks++;
 						average_active_service_latency = (((average_active_service_latency * ((double)active_service_checks - 1.0)) + latency) / (double)active_service_checks);
 						if(have_min_active_service_latency == FALSE || min_active_service_latency > latency) {

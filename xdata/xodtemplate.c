@@ -65,14 +65,10 @@
 
 #include "xodtemplate.h"
 
-
-#ifdef NSCORE
-extern int use_regexp_matches;
-extern int use_true_regexp_matching;
-extern int verify_config;
-extern int test_scheduling;
-extern int use_precached_objects;
-#endif
+#define XOD_NEW   0 /* not seen */
+#define XOD_SEEN  1 /* seen, but not yet loopy */
+#define XOD_LOOPY 2 /* loopy */
+#define XOD_OK    3 /* not loopy */
 
 xodtemplate_timeperiod *xodtemplate_timeperiod_list = NULL;
 xodtemplate_command *xodtemplate_command_list = NULL;
@@ -115,28 +111,45 @@ int xodtemplate_current_object_type = XODTEMPLATE_NONE;
 int xodtemplate_current_config_file = 0;
 char **xodtemplate_config_files = NULL;
 
-char *xodtemplate_cache_file = NULL;
-char *xodtemplate_precache_file = NULL;
-
 int presorted_objects = FALSE;
 
-extern int allow_empty_hostgroup_assignment;
+/* xodtemplate id / object counter */
+static struct object_count xodcount;
 
-/* add up execution and notification dependencies */
-static unsigned int host_deps, service_deps;
+#ifndef NSCGI
+/* reusable bitmaps for expanding objects */
+static bitmap *host_map, *contact_map;
+#endif
+static bitmap *service_map, *parent_map;
+
 
 /*
- * Macro magic used to determine if a service is assigned
- * via hostgroup_name or host_name. Those assigned via host_name
- * take precedence.
+ * simple inheritance macros. o = object, t = template, v = variable
+ * Note that these can be used for inter-object inheritance as well,
+ * so long as the variable names are identical.
  */
-#define X_SERVICE_IS_FROM_HOSTGROUP      (1 << 1)  /* flag to know if service come from a hostgroup def, apply on srv->have_initial_state */
-#define xodtemplate_set_service_is_from_hostgroup(srv) \
-	srv->have_initial_state |= X_SERVICE_IS_FROM_HOSTGROUP
-#define xodtemplate_unset_service_is_from_hostgroup(srv) \
-	srv->have_initial_state &= ~X_SERVICE_IS_FROM_HOSTGROUP
-#define xodtemplate_is_service_is_from_hostgroup(srv) \
-	((srv->have_initial_state & X_SERVICE_IS_FROM_HOSTGROUP) != 0)
+#define xod_inherit(o, t, v) \
+	do { \
+		if(o->have_##v == FALSE && t->have_##v == TRUE) { \
+			o->v = t->v; \
+			o->have_##v = TRUE; \
+		} \
+	} while(0)
+
+#define xod_inherit_str_nohave(o, t, v) \
+	do { \
+		if(o->v == NULL && t->v != NULL) { \
+			o->v = (char *)strdup(t->v); \
+		} \
+	} while(0)
+
+#define xod_inherit_str(o, t, v) \
+	do { \
+		if(o->have_##v == FALSE && t->have_##v == TRUE) { \
+			xod_inherit_str_nohave(o, t, v); \
+			o->have_##v = TRUE; \
+		} \
+	} while(0)
 
 
 
@@ -154,16 +167,26 @@ static char *xodtemplate_config_file_name(int config_file) {
 /************* TOP-LEVEL CONFIG DATA INPUT FUNCTION ***************/
 /******************************************************************/
 
+#ifndef NSCGI
+static void xodtemplate_free_template_skiplists(void) {
+	int x = 0;
+
+	for(x = 0; x < NUM_XOBJECT_SKIPLISTS; x++) {
+		skiplist_free(&xobject_template_skiplists[x]);
+		}
+	}
+#endif
+
 /* process all config files - both core and CGIs pass in name of main config file */
-int xodtemplate_read_config_data(char *main_config_file, int options, int cache, int precache) {
+int xodtemplate_read_config_data(char *main_config_file, int options) {
 #ifdef NSCORE
 	char *config_file = NULL;
 	char *config_base_dir = NULL;
 	char *input = NULL;
 	char *var = NULL;
 	char *val = NULL;
-	struct timeval tv[14];
-	double runtime[14];
+	struct timeval tv[12];
+	double runtime[11];
 	mmapfile *thefile = NULL;
 #endif
 	int result = OK;
@@ -175,6 +198,8 @@ int xodtemplate_read_config_data(char *main_config_file, int options, int cache,
 #endif
 		return ERROR;
 		}
+
+	timing_point("Reading config data from '%s'\n", main_config_file);
 
 	/* get variables from main config file */
 	xodtemplate_grab_config_info(main_config_file);
@@ -223,7 +248,7 @@ int xodtemplate_read_config_data(char *main_config_file, int options, int cache,
 
 	/* only process the precached object file as long as we're not regenerating it and we're not verifying the config */
 	if(use_precached_objects == TRUE)
-		result = xodtemplate_process_config_file(xodtemplate_precache_file, options);
+		result = xodtemplate_process_config_file(object_precache_file, options);
 
 	/* process object config files normally... */
 	else {
@@ -328,8 +353,9 @@ int xodtemplate_read_config_data(char *main_config_file, int options, int cache,
 
 #ifdef NSCGI
 	/* CGIs process only one file - the cached objects file */
-	result = xodtemplate_process_config_file(xodtemplate_cache_file, options);
+	result = xodtemplate_process_config_file(object_cache_file, options);
 #endif
+	timing_point("Done parsing config files\n");
 
 #ifdef NSCORE
 
@@ -339,32 +365,55 @@ int xodtemplate_read_config_data(char *main_config_file, int options, int cache,
 		/* resolve objects definitions */
 		if(result == OK)
 			result = xodtemplate_resolve_objects();
+		timing_point("Done resolving objects\n");
+
+		/* these are no longer needed */
+		xodtemplate_free_template_skiplists();
+
 		if(test_scheduling == TRUE)
 			gettimeofday(&tv[2], NULL);
 
 		/* cleanup some additive inheritance stuff... */
 		xodtemplate_clean_additive_strings();
 
+		host_map = bitmap_create(xodcount.hosts);
+		contact_map = bitmap_create(xodcount.contacts);
+		if(!host_map || !contact_map) {
+			logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: Failed to create bitmaps for resolving objects\n");
+			return ERROR;
+			}
+
 		/* do the meat and potatoes stuff... */
 		if(result == OK)
 			result = xodtemplate_recombobulate_contactgroups();
 		if(test_scheduling == TRUE)
 			gettimeofday(&tv[3], NULL);
+		timing_point("Done recombobulating contactgroups\n");
 
 		if(result == OK)
 			result = xodtemplate_recombobulate_hostgroups();
 		if(test_scheduling == TRUE)
 			gettimeofday(&tv[4], NULL);
+		timing_point("Done recombobulating hostgroups\n");
 
 		if(result == OK)
 			result = xodtemplate_duplicate_services();
 		if(test_scheduling == TRUE)
 			gettimeofday(&tv[5], NULL);
+		timing_point("Created %u services (dupes possible)\n", xodcount.services);
+
+		/* now we have an accurate service count */
+		service_map = bitmap_create(xodcount.services);
+		if(!service_map) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Failed to create service map\n");
+			return ERROR;
+			}
 
 		if(result == OK)
 			result = xodtemplate_recombobulate_servicegroups();
 		if(test_scheduling == TRUE)
 			gettimeofday(&tv[6], NULL);
+		timing_point("Done recombobulating servicegroups\n");
 
 		if(result == OK)
 			result = xodtemplate_duplicate_objects();
@@ -374,38 +423,13 @@ int xodtemplate_read_config_data(char *main_config_file, int options, int cache,
 		/* NOTE: some missing defaults (notification options, etc.) are also applied here */
 		if(result == OK)
 			result = xodtemplate_inherit_object_properties();
+		timing_point("Done propagating inherited object properties\n");
 		if(test_scheduling == TRUE)
 			gettimeofday(&tv[8], NULL);
-
-		if(result == OK)
-			result = xodtemplate_recombobulate_object_contacts();
-		if(test_scheduling == TRUE)
-			gettimeofday(&tv[9], NULL);
-
-		/* sort objects */
-		if(result == OK)
-			result = xodtemplate_sort_objects();
-		if(test_scheduling == TRUE)
-			gettimeofday(&tv[10], NULL);
-		}
-
-	if(result == OK) {
-
-		/* merge host/service extinfo definitions with host/service definitions */
-		/* this will be removed in Nagios 4.x */
-		xodtemplate_merge_extinfo_ojects();
-
-		/* cache object definitions for the CGIs and external apps */
-		if(cache == TRUE)
-			xodtemplate_cache_objects(xodtemplate_cache_file);
-
-		/* precache object definitions for future runs */
-		if(precache == TRUE)
-			xodtemplate_cache_objects(xodtemplate_precache_file);
 		}
 
 	if(test_scheduling == TRUE)
-		gettimeofday(&tv[11], NULL);
+		gettimeofday(&tv[9], NULL);
 
 #endif
 
@@ -414,22 +438,14 @@ int xodtemplate_read_config_data(char *main_config_file, int options, int cache,
 		result = xodtemplate_register_objects();
 #ifdef NSCORE
 	if(test_scheduling == TRUE)
-		gettimeofday(&tv[12], NULL);
+		gettimeofday(&tv[10], NULL);
 #endif
 
 	/* cleanup */
 	xodtemplate_free_memory();
 #ifdef NSCORE
-	if(test_scheduling == TRUE)
-		gettimeofday(&tv[13], NULL);
-#endif
-
-	/* free memory */
-	my_free(xodtemplate_cache_file);
-	my_free(xodtemplate_precache_file);
-
-#ifdef NSCORE
 	if(test_scheduling == TRUE) {
+		gettimeofday(&tv[11], NULL);
 
 		runtime[0] = (double)((double)(tv[1].tv_sec - tv[0].tv_sec) + (double)((tv[1].tv_usec - tv[0].tv_usec) / 1000.0) / 1000.0);
 		if(use_precached_objects == FALSE) {
@@ -440,10 +456,7 @@ int xodtemplate_read_config_data(char *main_config_file, int options, int cache,
 			runtime[5] = (double)((double)(tv[6].tv_sec - tv[5].tv_sec) + (double)((tv[6].tv_usec - tv[5].tv_usec) / 1000.0) / 1000.0);
 			runtime[6] = (double)((double)(tv[7].tv_sec - tv[6].tv_sec) + (double)((tv[7].tv_usec - tv[6].tv_usec) / 1000.0) / 1000.0);
 			runtime[7] = (double)((double)(tv[8].tv_sec - tv[7].tv_sec) + (double)((tv[8].tv_usec - tv[7].tv_usec) / 1000.0) / 1000.0);
-			runtime[8] = (double)((double)(tv[9].tv_sec - tv[8].tv_sec) + (double)((tv[9].tv_usec - tv[8].tv_usec) / 1000.0) / 1000.0);
-			runtime[9] = (double)((double)(tv[10].tv_sec - tv[9].tv_sec) + (double)((tv[10].tv_usec - tv[9].tv_usec) / 1000.0) / 1000.0);
-			runtime[10] = (double)((double)(tv[11].tv_sec - tv[10].tv_sec) + (double)((tv[11].tv_usec - tv[10].tv_usec) / 1000.0) / 1000.0);
-			runtime[11] = (double)((double)(tv[12].tv_sec - tv[11].tv_sec) + (double)((tv[12].tv_usec - tv[11].tv_usec) / 1000.0) / 1000.0);
+			runtime[8] = (double)((double)(tv[10].tv_sec - tv[9].tv_sec) + (double)((tv[10].tv_usec - tv[9].tv_usec) / 1000.0) / 1000.0);
 			}
 		else {
 			runtime[1] = 0.0;
@@ -453,13 +466,10 @@ int xodtemplate_read_config_data(char *main_config_file, int options, int cache,
 			runtime[5] = 0.0;
 			runtime[6] = 0.0;
 			runtime[7] = 0.0;
-			runtime[8] = 0.0;
-			runtime[9] = 0.0;
-			runtime[10] = 0.0;
-			runtime[11] = (double)((double)(tv[12].tv_sec - tv[1].tv_sec) + (double)((tv[12].tv_usec - tv[1].tv_usec) / 1000.0) / 1000.0);
+			runtime[8] = (double)((double)(tv[10].tv_sec - tv[1].tv_sec) + (double)((tv[10].tv_usec - tv[1].tv_usec) / 1000.0) / 1000.0);
 			}
-		runtime[12] = (double)((double)(tv[13].tv_sec - tv[12].tv_sec) + (double)((tv[13].tv_usec - tv[12].tv_usec) / 1000.0) / 1000.0);
-		runtime[13] = (double)((double)(tv[13].tv_sec - tv[0].tv_sec) + (double)((tv[13].tv_usec - tv[0].tv_usec) / 1000.0) / 1000.0);
+		runtime[9] = (double)((double)(tv[11].tv_sec - tv[10].tv_sec) + (double)((tv[11].tv_usec - tv[10].tv_usec) / 1000.0) / 1000.0);
+		runtime[10] = (double)((double)(tv[11].tv_sec - tv[0].tv_sec) + (double)((tv[11].tv_usec - tv[0].tv_usec) / 1000.0) / 1000.0);
 
 		printf("Timing information on object configuration processing is listed\n");
 		printf("below.  You can use this information to see if precaching your\n");
@@ -477,15 +487,12 @@ int xodtemplate_read_config_data(char *main_config_file, int options, int cache,
 		printf("Recomb Servicegroups: %.6lf sec  *\n", runtime[5]);
 		printf("Duplicate:            %.6lf sec  *\n", runtime[6]);
 		printf("Inherit:              %.6lf sec  *\n", runtime[7]);
-		printf("Recomb Contacts:      %.6lf sec  *\n", runtime[8]);
-		printf("Sort:                 %.6lf sec  *\n", runtime[9]);
-		/*		printf("Cache:                %.6lf sec\n",runtime[10]);*/
-		printf("Register:             %.6lf sec\n", runtime[11]);
-		printf("Free:                 %.6lf sec\n", runtime[12]);
+		printf("Register:             %.6lf sec\n", runtime[8]);
+		printf("Free:                 %.6lf sec\n", runtime[9]);
 		printf("                      ============\n");
-		printf("TOTAL:                %.6lf sec  ", runtime[13]);
+		printf("TOTAL:                %.6lf sec  ", runtime[10]);
 		if(use_precached_objects == FALSE)
-			printf("* = %.6lf sec (%.2f%%) estimated savings", runtime[13] - runtime[12] - runtime[11] - runtime[0], ((runtime[13] - runtime[12] - runtime[11] - runtime[0]) / runtime[13]) * 100.0);
+			printf("* = %.6lf sec (%.2f%%) estimated savings", runtime[10] - runtime[9] - runtime[8] - runtime[0], ((runtime[10] - runtime[9] - runtime[8] - runtime[0]) / runtime[10]) * 100.0);
 		printf("\n");
 		printf("\n\n");
 		}
@@ -533,33 +540,20 @@ int xodtemplate_grab_config_info(char *main_config_file) {
 		if((val = strtok(NULL, "\n")) == NULL)
 			continue;
 
-		/* cached object file definition (overrides default location) */
-		if(!strcmp(var, "object_cache_file"))
-			xodtemplate_cache_file = (char *)strdup(val);
-
-		/* pre-cached object file definition */
-		if(!strcmp(var, "precached_object_file"))
-			xodtemplate_precache_file = (char *)strdup(val);
 		}
 
 	/* close the file */
 	mmap_fclose(thefile);
 
-	/* default locations */
-	if(xodtemplate_cache_file == NULL)
-		xodtemplate_cache_file = (char *)strdup(DEFAULT_OBJECT_CACHE_FILE);
-	if(xodtemplate_precache_file == NULL)
-		xodtemplate_precache_file = (char *)strdup(DEFAULT_PRECACHED_OBJECT_FILE);
-
 	/* make sure we have what we need */
-	if(xodtemplate_cache_file == NULL || xodtemplate_precache_file == NULL)
+	if(object_cache_file == NULL)
 		return ERROR;
 
 #ifdef NSCORE
 	mac = get_global_macros();
 	/* save the object cache file macro */
 	my_free(mac->x[MACRO_OBJECTCACHEFILE]);
-	if((mac->x[MACRO_OBJECTCACHEFILE] = (char *)strdup(xodtemplate_cache_file)))
+	if((mac->x[MACRO_OBJECTCACHEFILE] = (char *)strdup(object_cache_file)))
 		strip(mac->x[MACRO_OBJECTCACHEFILE]);
 #endif
 
@@ -578,7 +572,7 @@ int xodtemplate_process_config_dir(char *dirname, int options) {
 	struct stat stat_buf;
 
 #ifdef NSCORE
-	if(verify_config == TRUE)
+	if(verify_config >= 2)
 		printf("Processing object config directory '%s'...\n", dirname);
 #endif
 
@@ -660,7 +654,7 @@ int xodtemplate_process_config_file(char *filename, int options) {
 
 
 #ifdef NSCORE
-	if(verify_config == TRUE)
+	if(verify_config >= 2)
 		printf("Processing object config file '%s'...\n", filename);
 #endif
 
@@ -733,10 +727,13 @@ int xodtemplate_process_config_file(char *filename, int options) {
 				}
 
 			/* check validity of object type */
-			if(strcmp(input, "timeperiod") && strcmp(input, "command") && strcmp(input, "contact") && strcmp(input, "contactgroup") && strcmp(input, "host") && strcmp(input, "hostgroup") && strcmp(input, "servicegroup") && strcmp(input, "service") && strcmp(input, "servicedependency") && strcmp(input, "serviceescalation") && strcmp(input, "hostgroupescalation") && strcmp(input, "hostdependency") && strcmp(input, "hostescalation") && strcmp(input, "hostextinfo") && strcmp(input, "serviceextinfo")) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid object definition type '%s' in file '%s' on line %d.\n", input, filename, current_line);
-				result = ERROR;
-				break;
+			if(strcmp(input, "timeperiod") && strcmp(input, "command") && strcmp(input, "contact") && strcmp(input, "contactgroup") && strcmp(input, "host") && strcmp(input, "hostgroup") && strcmp(input, "servicegroup") && strcmp(input, "service") && strcmp(input, "servicedependency") && strcmp(input, "serviceescalation") && strcmp(input, "hostgroupescalation") && strcmp(input, "hostdependency") && strcmp(input, "hostescalation")) {
+				if(strcmp(input, "hostextinfo") && strcmp(input, "serviceextinfo")) {
+					logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid object definition type '%s' in file '%s' on line %d.\n", input, filename, current_line);
+					result = ERROR;
+					break;
+					}
+					logit(NSLOG_CONFIG_WARNING, TRUE, "WARNING: Extinfo objects are deprecated and will be removed in future versions\n");
 				}
 
 			/* we're already in an object definition... */
@@ -1026,6 +1023,7 @@ int xodtemplate_begin_object_definition(char *input, int options, int config_fil
 		case XODTEMPLATE_CONTACT:
 			xod_begin_def(contact);
 
+			new_contact->minimum_value = 1;
 			new_contact->host_notifications_enabled = TRUE;
 			new_contact->service_notifications_enabled = TRUE;
 			new_contact->can_submit_commands = TRUE;
@@ -1035,21 +1033,20 @@ int xodtemplate_begin_object_definition(char *input, int options, int config_fil
 
 		case XODTEMPLATE_HOST:
 			xod_begin_def(host);
+
+			new_host->hourly_value = 1;
 			new_host->check_interval = 5.0;
 			new_host->retry_interval = 1.0;
 			new_host->active_checks_enabled = TRUE;
 			new_host->passive_checks_enabled = TRUE;
-			new_host->obsess_over_host = TRUE;
+			new_host->obsess = TRUE;
 			new_host->max_check_attempts = -2;
 			new_host->event_handler_enabled = TRUE;
 			new_host->flap_detection_enabled = TRUE;
-			new_host->flap_detection_on_up = TRUE;
-			new_host->flap_detection_on_down = TRUE;
-			new_host->flap_detection_on_unreachable = TRUE;
+			new_host->flap_detection_options = OPT_ALL;
 			new_host->notifications_enabled = TRUE;
 			new_host->notification_interval = 30.0;
 			new_host->process_perf_data = TRUE;
-			new_host->failure_prediction_enabled = TRUE;
 			new_host->x_2d = -1;
 			new_host->y_2d = -1;
 			new_host->retain_status_information = TRUE;
@@ -1059,6 +1056,7 @@ int xodtemplate_begin_object_definition(char *input, int options, int config_fil
 		case XODTEMPLATE_SERVICE:
 			xod_begin_def(service);
 
+			new_service->hourly_value = 1;
 			new_service->initial_state = STATE_OK;
 			new_service->max_check_attempts = -2;
 			new_service->check_interval = 5.0;
@@ -1066,22 +1064,18 @@ int xodtemplate_begin_object_definition(char *input, int options, int config_fil
 			new_service->active_checks_enabled = TRUE;
 			new_service->passive_checks_enabled = TRUE;
 			new_service->parallelize_check = TRUE;
-			new_service->obsess_over_service = TRUE;
+			new_service->obsess = TRUE;
 			new_service->event_handler_enabled = TRUE;
 			new_service->flap_detection_enabled = TRUE;
-			new_service->flap_detection_on_ok = TRUE;
-			new_service->flap_detection_on_warning = TRUE;
-			new_service->flap_detection_on_unknown = TRUE;
-			new_service->flap_detection_on_critical = TRUE;
+			new_service->flap_detection_options = OPT_ALL;
 			new_service->notifications_enabled = TRUE;
 			new_service->notification_interval = 30.0;
 			new_service->process_perf_data = TRUE;
-			new_service->failure_prediction_enabled = TRUE;
 			new_service->retain_status_information = TRUE;
 			new_service->retain_nonstatus_information = TRUE;
 
-			/* true service, so is not from host group, must be set AFTER have_initial_state*/
-			xodtemplate_unset_service_is_from_hostgroup(new_service);
+			/* true service, so is not from host group */
+			new_service->is_from_hostgroup = 0;
 			break;
 
 		case XODTEMPLATE_HOSTDEPENDENCY:
@@ -1114,6 +1108,24 @@ int xodtemplate_begin_object_definition(char *input, int options, int config_fil
 	}
 #undef xod_begin_def /* we don't need this anymore */
 
+static const char *xodtemplate_type_name(unsigned int id) {
+	static char *otype_name[] = {
+		"NONE", "timeperiod", "commmand", "contact", "contactgroup",
+		"host", "hostgroup", "service", "servicedependency",
+		"serviceescalation", "hostescalation", "hostdependency",
+		"hostextinfo", "serviceextinfo", "servicegroup"
+	};
+	if (id > ARRAY_SIZE(otype_name))
+		return otype_name[0];
+	return otype_name[id];
+
+	}
+
+static void xodtemplate_obsoleted(const char *var, int start_line) {
+	logit(NSLOG_CONFIG_WARNING, TRUE, "Warning: %s is obsoleted and no longer has any effect in %s type objects (config file '%s', starting at line %d)\n",
+		 var, xodtemplate_type_name(xodtemplate_current_object_type),
+		 xodtemplate_config_file_name(xodtemplate_current_config_file), start_line);
+	}
 
 /* adds a property to an object definition */
 int xodtemplate_add_object_property(char *input, int options) {
@@ -1779,20 +1791,6 @@ int xodtemplate_add_object_property(char *input, int options) {
 						result = ERROR;
 					}
 				temp_servicedependency->have_dependent_host_name = TRUE;
-
-				/* NOTE: dependencies are added to the skiplist in xodtemplate_duplicate_objects(), except if daemon is using precached config */
-				if(result == OK && force_skiplists == TRUE && temp_servicedependency->dependent_host_name != NULL && temp_servicedependency->dependent_service_description != NULL) {
-					/* add servicedependency to template skiplist for fast searches */
-					result = skiplist_insert(xobject_skiplists[SERVICEDEPENDENCY_SKIPLIST], (void *)temp_servicedependency);
-					switch(result) {
-						case SKIPLIST_OK:
-							result = OK;
-							break;
-						default:
-							result = ERROR;
-							break;
-						}
-					}
 				}
 			else if(!strcmp(variable, "dependent_description") || !strcmp(variable, "dependent_service_description")) {
 				if(strcmp(value, XODTEMPLATE_NULL)) {
@@ -1800,20 +1798,6 @@ int xodtemplate_add_object_property(char *input, int options) {
 						result = ERROR;
 					}
 				temp_servicedependency->have_dependent_service_description = TRUE;
-
-				/* NOTE: dependencies are added to the skiplist in xodtemplate_duplicate_objects(), except if daemon is using precached config */
-				if(result == OK && force_skiplists == TRUE && temp_servicedependency->dependent_host_name != NULL && temp_servicedependency->dependent_service_description != NULL) {
-					/* add servicedependency to template skiplist for fast searches */
-					result = skiplist_insert(xobject_skiplists[SERVICEDEPENDENCY_SKIPLIST], (void *)temp_servicedependency);
-					switch(result) {
-						case SKIPLIST_OK:
-							result = OK;
-							break;
-						default:
-							result = ERROR;
-							break;
-						}
-					}
 				}
 			else if(!strcmp(variable, "dependency_period")) {
 				if(strcmp(value, XODTEMPLATE_NULL)) {
@@ -1827,70 +1811,56 @@ int xodtemplate_add_object_property(char *input, int options) {
 				temp_servicedependency->have_inherits_parent = TRUE;
 				}
 			else if(!strcmp(variable, "execution_failure_options") || !strcmp(variable, "execution_failure_criteria")) {
+				temp_servicedependency->have_execution_failure_options = TRUE;
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "o") || !strcmp(temp_ptr, "ok"))
-						temp_servicedependency->fail_execute_on_ok = TRUE;
+						flag_set(temp_servicedependency->execution_failure_options, OPT_OK);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unknown"))
-						temp_servicedependency->fail_execute_on_unknown = TRUE;
+						flag_set(temp_servicedependency->execution_failure_options, OPT_UNKNOWN);
 					else if(!strcmp(temp_ptr, "w") || !strcmp(temp_ptr, "warning"))
-						temp_servicedependency->fail_execute_on_warning = TRUE;
+						flag_set(temp_servicedependency->execution_failure_options, OPT_WARNING);
 					else if(!strcmp(temp_ptr, "c") || !strcmp(temp_ptr, "critical"))
-						temp_servicedependency->fail_execute_on_critical = TRUE;
+						flag_set(temp_servicedependency->execution_failure_options, OPT_CRITICAL);
 					else if(!strcmp(temp_ptr, "p") || !strcmp(temp_ptr, "pending"))
-						temp_servicedependency->fail_execute_on_pending = TRUE;
+						flag_set(temp_servicedependency->execution_failure_options, OPT_PENDING);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_servicedependency->fail_execute_on_ok = FALSE;
-						temp_servicedependency->fail_execute_on_unknown = FALSE;
-						temp_servicedependency->fail_execute_on_warning = FALSE;
-						temp_servicedependency->fail_execute_on_critical = FALSE;
+						temp_servicedependency->execution_failure_options = OPT_NOTHING;
+						temp_servicedependency->have_execution_failure_options = FALSE;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_servicedependency->fail_execute_on_ok = TRUE;
-						temp_servicedependency->fail_execute_on_unknown = TRUE;
-						temp_servicedependency->fail_execute_on_warning = TRUE;
-						temp_servicedependency->fail_execute_on_critical = TRUE;
+						temp_servicedependency->execution_failure_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid execution dependency option '%s' in servicedependency definition.\n", temp_ptr);
 						return ERROR;
 						}
 					}
-				temp_servicedependency->have_execution_dependency_options = TRUE;
-				service_deps++;
 				}
 			else if(!strcmp(variable, "notification_failure_options") || !strcmp(variable, "notification_failure_criteria")) {
+				temp_servicedependency->have_notification_failure_options = TRUE;
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "o") || !strcmp(temp_ptr, "ok"))
-						temp_servicedependency->fail_notify_on_ok = TRUE;
+						flag_set(temp_servicedependency->notification_failure_options, OPT_OK);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unknown"))
-						temp_servicedependency->fail_notify_on_unknown = TRUE;
+						flag_set(temp_servicedependency->notification_failure_options, OPT_UNKNOWN);
 					else if(!strcmp(temp_ptr, "w") || !strcmp(temp_ptr, "warning"))
-						temp_servicedependency->fail_notify_on_warning = TRUE;
+						flag_set(temp_servicedependency->notification_failure_options, OPT_WARNING);
 					else if(!strcmp(temp_ptr, "c") || !strcmp(temp_ptr, "critical"))
-						temp_servicedependency->fail_notify_on_critical = TRUE;
+						flag_set(temp_servicedependency->notification_failure_options, OPT_CRITICAL);
 					else if(!strcmp(temp_ptr, "p") || !strcmp(temp_ptr, "pending"))
-						temp_servicedependency->fail_notify_on_pending = TRUE;
+						flag_set(temp_servicedependency->notification_failure_options, OPT_PENDING);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_servicedependency->fail_notify_on_ok = FALSE;
-						temp_servicedependency->fail_notify_on_unknown = FALSE;
-						temp_servicedependency->fail_notify_on_warning = FALSE;
-						temp_servicedependency->fail_notify_on_critical = FALSE;
-						temp_servicedependency->fail_notify_on_pending = FALSE;
+						temp_servicedependency->notification_failure_options = OPT_NOTHING;
+						temp_servicedependency->have_notification_failure_options = FALSE;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_servicedependency->fail_notify_on_ok = TRUE;
-						temp_servicedependency->fail_notify_on_unknown = TRUE;
-						temp_servicedependency->fail_notify_on_warning = TRUE;
-						temp_servicedependency->fail_notify_on_critical = TRUE;
-						temp_servicedependency->fail_notify_on_pending = TRUE;
+						temp_servicedependency->notification_failure_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid notification dependency option '%s' in servicedependency definition.\n", temp_ptr);
 						return ERROR;
 						}
 					}
-				temp_servicedependency->have_notification_dependency_options = TRUE;
-				service_deps++;
 				}
 			else if(!strcmp(variable, "register"))
 				temp_servicedependency->register_object = (atoi(value) > 0) ? TRUE : FALSE;
@@ -1939,20 +1909,6 @@ int xodtemplate_add_object_property(char *input, int options) {
 						result = ERROR;
 					}
 				temp_serviceescalation->have_host_name = TRUE;
-
-				/* NOTE: escalations are added to the skiplist in xodtemplate_duplicate_objects(), except if daemon is using precached config */
-				if(result == OK && force_skiplists == TRUE  && temp_serviceescalation->host_name != NULL && temp_serviceescalation->service_description != NULL) {
-					/* add serviceescalation to template skiplist for fast searches */
-					result = skiplist_insert(xobject_skiplists[SERVICEESCALATION_SKIPLIST], (void *)temp_serviceescalation);
-					switch(result) {
-						case SKIPLIST_OK:
-							result = OK;
-							break;
-						default:
-							result = ERROR;
-							break;
-						}
-					}
 				}
 			else if(!strcmp(variable, "description") || !strcmp(variable, "service_description")) {
 				if(strcmp(value, XODTEMPLATE_NULL)) {
@@ -1960,20 +1916,6 @@ int xodtemplate_add_object_property(char *input, int options) {
 						result = ERROR;
 					}
 				temp_serviceescalation->have_service_description = TRUE;
-
-				/* NOTE: escalations are added to the skiplist in xodtemplate_duplicate_objects(), except if daemon is using precached config */
-				if(result == OK && force_skiplists == TRUE  && temp_serviceescalation->host_name != NULL && temp_serviceescalation->service_description != NULL) {
-					/* add serviceescalation to template skiplist for fast searches */
-					result = skiplist_insert(xobject_skiplists[SERVICEESCALATION_SKIPLIST], (void *)temp_serviceescalation);
-					switch(result) {
-						case SKIPLIST_OK:
-							result = OK;
-							break;
-						default:
-							result = ERROR;
-							break;
-						}
-					}
 				}
 			else if(!strcmp(variable, "servicegroup") || !strcmp(variable, "servicegroups") || !strcmp(variable, "servicegroup_name")) {
 				if(strcmp(value, XODTEMPLATE_NULL)) {
@@ -2025,24 +1967,18 @@ int xodtemplate_add_object_property(char *input, int options) {
 			else if(!strcmp(variable, "escalation_options")) {
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "w") || !strcmp(temp_ptr, "warning"))
-						temp_serviceescalation->escalate_on_warning = TRUE;
+						flag_set(temp_serviceescalation->escalation_options, OPT_WARNING);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unknown"))
-						temp_serviceescalation->escalate_on_unknown = TRUE;
+						flag_set(temp_serviceescalation->escalation_options, OPT_UNKNOWN);
 					else if(!strcmp(temp_ptr, "c") || !strcmp(temp_ptr, "critical"))
-						temp_serviceescalation->escalate_on_critical = TRUE;
+						flag_set(temp_serviceescalation->escalation_options, OPT_CRITICAL);
 					else if(!strcmp(temp_ptr, "r") || !strcmp(temp_ptr, "recovery"))
-						temp_serviceescalation->escalate_on_recovery = TRUE;
+						flag_set(temp_serviceescalation->escalation_options, OPT_RECOVERY);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_serviceescalation->escalate_on_warning = FALSE;
-						temp_serviceescalation->escalate_on_unknown = FALSE;
-						temp_serviceescalation->escalate_on_critical = FALSE;
-						temp_serviceescalation->escalate_on_recovery = FALSE;
+						temp_serviceescalation->escalation_options = OPT_NOTHING;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_serviceescalation->escalate_on_warning = TRUE;
-						temp_serviceescalation->escalate_on_unknown = TRUE;
-						temp_serviceescalation->escalate_on_critical = TRUE;
-						temp_serviceescalation->escalate_on_recovery = TRUE;
+						temp_serviceescalation->escalation_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid escalation option '%s' in serviceescalation definition.\n", temp_ptr);
@@ -2111,6 +2047,7 @@ int xodtemplate_add_object_property(char *input, int options) {
 							break;
 						}
 					}
+				temp_contact->id = xodcount.contacts++;
 				}
 			else if(!strcmp(variable, "alias")) {
 				if((temp_contact->alias = (char *)strdup(value)) == NULL)
@@ -2179,28 +2116,20 @@ int xodtemplate_add_object_property(char *input, int options) {
 			else if(!strcmp(variable, "host_notification_options")) {
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "d") || !strcmp(temp_ptr, "down"))
-						temp_contact->notify_on_host_down = TRUE;
+						flag_set(temp_contact->host_notification_options, OPT_DOWN);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unreachable"))
-						temp_contact->notify_on_host_unreachable = TRUE;
+						flag_set(temp_contact->host_notification_options, OPT_UNREACHABLE);
 					else if(!strcmp(temp_ptr, "r") || !strcmp(temp_ptr, "recovery"))
-						temp_contact->notify_on_host_recovery = TRUE;
+						flag_set(temp_contact->host_notification_options, OPT_RECOVERY);
 					else if(!strcmp(temp_ptr, "f") || !strcmp(temp_ptr, "flapping"))
-						temp_contact->notify_on_host_flapping = TRUE;
+						flag_set(temp_contact->host_notification_options, OPT_FLAPPING);
 					else if(!strcmp(temp_ptr, "s") || !strcmp(temp_ptr, "downtime"))
-						temp_contact->notify_on_host_downtime = TRUE;
+						flag_set(temp_contact->host_notification_options, OPT_DOWNTIME);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_contact->notify_on_host_down = FALSE;
-						temp_contact->notify_on_host_unreachable = FALSE;
-						temp_contact->notify_on_host_recovery = FALSE;
-						temp_contact->notify_on_host_flapping = FALSE;
-						temp_contact->notify_on_host_downtime = FALSE;
+						temp_contact->host_notification_options = OPT_NOTHING;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_contact->notify_on_host_down = TRUE;
-						temp_contact->notify_on_host_unreachable = TRUE;
-						temp_contact->notify_on_host_recovery = TRUE;
-						temp_contact->notify_on_host_flapping = TRUE;
-						temp_contact->notify_on_host_downtime = TRUE;
+						temp_contact->host_notification_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid host notification option '%s' in contact definition.\n", temp_ptr);
@@ -2212,32 +2141,22 @@ int xodtemplate_add_object_property(char *input, int options) {
 			else if(!strcmp(variable, "service_notification_options")) {
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unknown"))
-						temp_contact->notify_on_service_unknown = TRUE;
+						flag_set(temp_contact->service_notification_options, OPT_UNKNOWN);
 					else if(!strcmp(temp_ptr, "w") || !strcmp(temp_ptr, "warning"))
-						temp_contact->notify_on_service_warning = TRUE;
+						flag_set(temp_contact->service_notification_options, OPT_WARNING);
 					else if(!strcmp(temp_ptr, "c") || !strcmp(temp_ptr, "critical"))
-						temp_contact->notify_on_service_critical = TRUE;
+						flag_set(temp_contact->service_notification_options, OPT_CRITICAL);
 					else if(!strcmp(temp_ptr, "r") || !strcmp(temp_ptr, "recovery"))
-						temp_contact->notify_on_service_recovery = TRUE;
+						flag_set(temp_contact->service_notification_options, OPT_RECOVERY);
 					else if(!strcmp(temp_ptr, "f") || !strcmp(temp_ptr, "flapping"))
-						temp_contact->notify_on_service_flapping = TRUE;
+						flag_set(temp_contact->service_notification_options, OPT_FLAPPING);
 					else if(!strcmp(temp_ptr, "s") || !strcmp(temp_ptr, "downtime"))
-						temp_contact->notify_on_service_downtime = TRUE;
+						flag_set(temp_contact->service_notification_options, OPT_DOWNTIME);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_contact->notify_on_service_unknown = FALSE;
-						temp_contact->notify_on_service_warning = FALSE;
-						temp_contact->notify_on_service_critical = FALSE;
-						temp_contact->notify_on_service_recovery = FALSE;
-						temp_contact->notify_on_service_flapping = FALSE;
-						temp_contact->notify_on_service_downtime = FALSE;
+						temp_contact->service_notification_options = OPT_NOTHING;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_contact->notify_on_service_unknown = TRUE;
-						temp_contact->notify_on_service_warning = TRUE;
-						temp_contact->notify_on_service_critical = TRUE;
-						temp_contact->notify_on_service_recovery = TRUE;
-						temp_contact->notify_on_service_flapping = TRUE;
-						temp_contact->notify_on_service_downtime = TRUE;
+						temp_contact->service_notification_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid service notification option '%s' in contact definition.\n", temp_ptr);
@@ -2265,6 +2184,10 @@ int xodtemplate_add_object_property(char *input, int options) {
 			else if(!strcmp(variable, "retain_nonstatus_information")) {
 				temp_contact->retain_nonstatus_information = (atoi(value) > 0) ? TRUE : FALSE;
 				temp_contact->have_retain_nonstatus_information = TRUE;
+				}
+			else if(!strcmp(variable, "minimum_value")) {
+				temp_contact->minimum_value = strtoul(value, NULL, 10);
+				temp_contact->have_minimum_value = TRUE;
 				}
 			else if(!strcmp(variable, "register"))
 				temp_contact->register_object = (atoi(value) > 0) ? TRUE : FALSE;
@@ -2355,6 +2278,7 @@ int xodtemplate_add_object_property(char *input, int options) {
 							break;
 						}
 					}
+				temp_host->id = xodcount.hosts++;
 				}
 			else if(!strcmp(variable, "display_name")) {
 				if(strcmp(value, XODTEMPLATE_NULL)) {
@@ -2428,11 +2352,7 @@ int xodtemplate_add_object_property(char *input, int options) {
 				temp_host->have_event_handler = TRUE;
 				}
 			else if(!strcmp(variable, "failure_prediction_options")) {
-				if(strcmp(value, XODTEMPLATE_NULL)) {
-					if((temp_host->failure_prediction_options = (char *)strdup(value)) == NULL)
-						result = ERROR;
-					}
-				temp_host->have_failure_prediction_options = TRUE;
+				xodtemplate_obsoleted(variable, temp_host->_start_line);
 				}
 			else if(!strcmp(variable, "notes")) {
 				if(strcmp(value, XODTEMPLATE_NULL)) {
@@ -2504,6 +2424,10 @@ int xodtemplate_add_object_property(char *input, int options) {
 				temp_host->retry_interval = strtod(value, NULL);
 				temp_host->have_retry_interval = TRUE;
 				}
+			else if(!strcmp(variable, "hourly_value")) {
+				temp_host->hourly_value = (unsigned int)strtoul(value, NULL, 10);
+				temp_host->have_hourly_value = 1;
+				}
 			else if(!strcmp(variable, "max_check_attempts")) {
 				temp_host->max_check_attempts = atoi(value);
 				temp_host->have_max_check_attempts = TRUE;
@@ -2543,26 +2467,20 @@ int xodtemplate_add_object_property(char *input, int options) {
 			else if(!strcmp(variable, "flap_detection_options")) {
 
 				/* user is specifying something, so discard defaults... */
-				temp_host->flap_detection_on_up = FALSE;
-				temp_host->flap_detection_on_down = FALSE;
-				temp_host->flap_detection_on_unreachable = FALSE;
+				temp_host->flap_detection_options = OPT_NOTHING;
 
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "o") || !strcmp(temp_ptr, "up"))
-						temp_host->flap_detection_on_up = TRUE;
+						flag_set(temp_host->flap_detection_options, OPT_UP);
 					else if(!strcmp(temp_ptr, "d") || !strcmp(temp_ptr, "down"))
-						temp_host->flap_detection_on_down = TRUE;
+						flag_set(temp_host->flap_detection_options, OPT_DOWN);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unreachable"))
-						temp_host->flap_detection_on_unreachable = TRUE;
+						flag_set(temp_host->flap_detection_options, OPT_UNREACHABLE);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_host->flap_detection_on_up = FALSE;
-						temp_host->flap_detection_on_down = FALSE;
-						temp_host->flap_detection_on_unreachable = FALSE;
+						temp_host->flap_detection_options = OPT_NOTHING;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_host->flap_detection_on_up = TRUE;
-						temp_host->flap_detection_on_down = TRUE;
-						temp_host->flap_detection_on_unreachable = TRUE;
+						temp_host->flap_detection_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid flap detection option '%s' in host definition.\n", temp_ptr);
@@ -2574,28 +2492,20 @@ int xodtemplate_add_object_property(char *input, int options) {
 			else if(!strcmp(variable, "notification_options")) {
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "d") || !strcmp(temp_ptr, "down"))
-						temp_host->notify_on_down = TRUE;
+						flag_set(temp_host->notification_options, OPT_DOWN);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unreachable"))
-						temp_host->notify_on_unreachable = TRUE;
+						flag_set(temp_host->notification_options, OPT_UNREACHABLE);
 					else if(!strcmp(temp_ptr, "r") || !strcmp(temp_ptr, "recovery"))
-						temp_host->notify_on_recovery = TRUE;
+						flag_set(temp_host->notification_options, OPT_RECOVERY);
 					else if(!strcmp(temp_ptr, "f") || !strcmp(temp_ptr, "flapping"))
-						temp_host->notify_on_flapping = TRUE;
+						flag_set(temp_host->notification_options, OPT_FLAPPING);
 					else if(!strcmp(temp_ptr, "s") || !strcmp(temp_ptr, "downtime"))
-						temp_host->notify_on_downtime = TRUE;
+						flag_set(temp_host->notification_options, OPT_DOWNTIME);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_host->notify_on_down = FALSE;
-						temp_host->notify_on_unreachable = FALSE;
-						temp_host->notify_on_recovery = FALSE;
-						temp_host->notify_on_flapping = FALSE;
-						temp_host->notify_on_downtime = FALSE;
+						temp_host->notification_options = OPT_NOTHING;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_host->notify_on_down = TRUE;
-						temp_host->notify_on_unreachable = TRUE;
-						temp_host->notify_on_recovery = TRUE;
-						temp_host->notify_on_flapping = TRUE;
-						temp_host->notify_on_downtime = TRUE;
+						temp_host->notification_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid notification option '%s' in host definition.\n", temp_ptr);
@@ -2619,20 +2529,16 @@ int xodtemplate_add_object_property(char *input, int options) {
 			else if(!strcmp(variable, "stalking_options")) {
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "o") || !strcmp(temp_ptr, "up"))
-						temp_host->stalk_on_up = TRUE;
+						flag_set(temp_host->stalking_options, OPT_UP);
 					else if(!strcmp(temp_ptr, "d") || !strcmp(temp_ptr, "down"))
-						temp_host->stalk_on_down = TRUE;
+						flag_set(temp_host->stalking_options, OPT_DOWN);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unreachable"))
-						temp_host->stalk_on_unreachable = TRUE;
+						flag_set(temp_host->stalking_options, OPT_UNREACHABLE);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_host->stalk_on_up = FALSE;
-						temp_host->stalk_on_down = FALSE;
-						temp_host->stalk_on_unreachable = FALSE;
+						temp_host->stalking_options = OPT_NOTHING;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_host->stalk_on_up = TRUE;
-						temp_host->stalk_on_down = TRUE;
-						temp_host->stalk_on_unreachable = TRUE;
+						temp_host->stalking_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid stalking option '%s' in host definition.\n", temp_ptr);
@@ -2646,8 +2552,7 @@ int xodtemplate_add_object_property(char *input, int options) {
 				temp_host->have_process_perf_data = TRUE;
 				}
 			else if(!strcmp(variable, "failure_prediction_enabled")) {
-				temp_host->failure_prediction_enabled = (atoi(value) > 0) ? TRUE : FALSE;
-				temp_host->have_failure_prediction_enabled = TRUE;
+				xodtemplate_obsoleted(variable, temp_host->_start_line);
 				}
 			else if(!strcmp(variable, "2d_coords")) {
 				if((temp_ptr = strtok(value, ", ")) == NULL) {
@@ -2680,9 +2585,9 @@ int xodtemplate_add_object_property(char *input, int options) {
 				temp_host->z_3d = strtod(temp_ptr, NULL);
 				temp_host->have_3d_coords = TRUE;
 				}
-			else if(!strcmp(variable, "obsess_over_host")) {
-				temp_host->obsess_over_host = (atoi(value) > 0) ? TRUE : FALSE;
-				temp_host->have_obsess_over_host = TRUE;
+			else if(!strcmp(variable, "obsess_over_host") || !strcmp(variable, "obsess")) {
+				temp_host->obsess = (atoi(value) > 0) ? TRUE : FALSE;
+				temp_host->have_obsess = TRUE;
 				}
 			else if(!strcmp(variable, "retain_status_information")) {
 				temp_host->retain_status_information = (atoi(value) > 0) ? TRUE : FALSE;
@@ -2816,6 +2721,13 @@ int xodtemplate_add_object_property(char *input, int options) {
 					}
 				temp_service->have_display_name = TRUE;
 				}
+			else if(!strcmp(variable, "parents")) {
+				if(strcmp(value, XODTEMPLATE_NULL)) {
+					if((temp_service->parents = (char *)strdup(value)) == NULL)
+						result = ERROR;
+					}
+				temp_service->have_parents = TRUE;
+				}
 			else if(!strcmp(variable, "hostgroup") || !strcmp(variable, "hostgroups") || !strcmp(variable, "hostgroup_name")) {
 				if(strcmp(value, XODTEMPLATE_NULL)) {
 					if((temp_service->hostgroup_name = (char *)strdup(value)) == NULL)
@@ -2879,11 +2791,7 @@ int xodtemplate_add_object_property(char *input, int options) {
 				temp_service->have_contacts = TRUE;
 				}
 			else if(!strcmp(variable, "failure_prediction_options")) {
-				if(strcmp(value, XODTEMPLATE_NULL)) {
-					if((temp_service->failure_prediction_options = (char *)strdup(value)) == NULL)
-						result = ERROR;
-					}
-				temp_service->have_failure_prediction_options = TRUE;
+				xodtemplate_obsoleted(variable, temp_service->_start_line);
 				}
 			else if(!strcmp(variable, "notes")) {
 				if(strcmp(value, XODTEMPLATE_NULL)) {
@@ -2935,6 +2843,10 @@ int xodtemplate_add_object_property(char *input, int options) {
 					}
 				temp_service->have_initial_state = TRUE;
 				}
+			else if(!strcmp(variable, "hourly_value")) {
+				temp_service->hourly_value = (unsigned int)strtoul(value, NULL, 10);
+				temp_service->have_hourly_value = 1;
+				}
 			else if(!strcmp(variable, "max_check_attempts")) {
 				temp_service->max_check_attempts = atoi(value);
 				temp_service->have_max_check_attempts = TRUE;
@@ -2963,9 +2875,9 @@ int xodtemplate_add_object_property(char *input, int options) {
 				temp_service->is_volatile = (atoi(value) > 0) ? TRUE : FALSE;
 				temp_service->have_is_volatile = TRUE;
 				}
-			else if(!strcmp(variable, "obsess_over_service")) {
-				temp_service->obsess_over_service = (atoi(value) > 0) ? TRUE : FALSE;
-				temp_service->have_obsess_over_service = TRUE;
+			else if(!strcmp(variable, "obsess_over_service") || !strcmp(variable, "obsess")) {
+				temp_service->obsess = (atoi(value) > 0) ? TRUE : FALSE;
+				temp_service->have_obsess = TRUE;
 				}
 			else if(!strcmp(variable, "event_handler_enabled")) {
 				temp_service->event_handler_enabled = (atoi(value) > 0) ? TRUE : FALSE;
@@ -2994,31 +2906,22 @@ int xodtemplate_add_object_property(char *input, int options) {
 			else if(!strcmp(variable, "flap_detection_options")) {
 
 				/* user is specifying something, so discard defaults... */
-				temp_service->flap_detection_on_ok = FALSE;
-				temp_service->flap_detection_on_warning = FALSE;
-				temp_service->flap_detection_on_unknown = FALSE;
-				temp_service->flap_detection_on_critical = FALSE;
+				temp_service->flap_detection_options = OPT_NOTHING;
 
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "o") || !strcmp(temp_ptr, "ok"))
-						temp_service->flap_detection_on_ok = TRUE;
+						flag_set(temp_service->flap_detection_options, OPT_OK);
 					else if(!strcmp(temp_ptr, "w") || !strcmp(temp_ptr, "warning"))
-						temp_service->flap_detection_on_warning = TRUE;
+						flag_set(temp_service->flap_detection_options, OPT_WARNING);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unknown"))
-						temp_service->flap_detection_on_unknown = TRUE;
+						flag_set(temp_service->flap_detection_options, OPT_UNKNOWN);
 					else if(!strcmp(temp_ptr, "c") || !strcmp(temp_ptr, "critical"))
-						temp_service->flap_detection_on_critical = TRUE;
+						flag_set(temp_service->flap_detection_options, OPT_CRITICAL);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_service->flap_detection_on_ok = FALSE;
-						temp_service->flap_detection_on_warning = FALSE;
-						temp_service->flap_detection_on_unknown = FALSE;
-						temp_service->flap_detection_on_critical = FALSE;
+						temp_service->flap_detection_options = OPT_NOTHING;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_service->flap_detection_on_ok = TRUE;
-						temp_service->flap_detection_on_warning = TRUE;
-						temp_service->flap_detection_on_unknown = TRUE;
-						temp_service->flap_detection_on_critical = TRUE;
+						temp_service->flap_detection_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid flap detection option '%s' in service definition.\n", temp_ptr);
@@ -3030,32 +2933,22 @@ int xodtemplate_add_object_property(char *input, int options) {
 			else if(!strcmp(variable, "notification_options")) {
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unknown"))
-						temp_service->notify_on_unknown = TRUE;
+						flag_set(temp_service->notification_options, OPT_UNKNOWN);
 					else if(!strcmp(temp_ptr, "w") || !strcmp(temp_ptr, "warning"))
-						temp_service->notify_on_warning = TRUE;
+						flag_set(temp_service->notification_options, OPT_WARNING);
 					else if(!strcmp(temp_ptr, "c") || !strcmp(temp_ptr, "critical"))
-						temp_service->notify_on_critical = TRUE;
+						flag_set(temp_service->notification_options, OPT_CRITICAL);
 					else if(!strcmp(temp_ptr, "r") || !strcmp(temp_ptr, "recovery"))
-						temp_service->notify_on_recovery = TRUE;
+						flag_set(temp_service->notification_options, OPT_RECOVERY);
 					else if(!strcmp(temp_ptr, "f") || !strcmp(temp_ptr, "flapping"))
-						temp_service->notify_on_flapping = TRUE;
+						flag_set(temp_service->notification_options, OPT_FLAPPING);
 					else if(!strcmp(temp_ptr, "s") || !strcmp(temp_ptr, "downtime"))
-						temp_service->notify_on_downtime = TRUE;
+						flag_set(temp_service->notification_options, OPT_DOWNTIME);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_service->notify_on_unknown = FALSE;
-						temp_service->notify_on_warning = FALSE;
-						temp_service->notify_on_critical = FALSE;
-						temp_service->notify_on_recovery = FALSE;
-						temp_service->notify_on_flapping = FALSE;
-						temp_service->notify_on_downtime = FALSE;
+						temp_service->notification_options = OPT_NOTHING;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_service->notify_on_unknown = TRUE;
-						temp_service->notify_on_warning = TRUE;
-						temp_service->notify_on_critical = TRUE;
-						temp_service->notify_on_recovery = TRUE;
-						temp_service->notify_on_flapping = TRUE;
-						temp_service->notify_on_downtime = TRUE;
+						temp_service->notification_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid notification option '%s' in service definition.\n", temp_ptr);
@@ -3079,24 +2972,18 @@ int xodtemplate_add_object_property(char *input, int options) {
 			else if(!strcmp(variable, "stalking_options")) {
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "o") || !strcmp(temp_ptr, "ok"))
-						temp_service->stalk_on_ok = TRUE;
+						flag_set(temp_service->stalking_options, OPT_OK);
 					else if(!strcmp(temp_ptr, "w") || !strcmp(temp_ptr, "warning"))
-						temp_service->stalk_on_warning = TRUE;
+						flag_set(temp_service->stalking_options, OPT_WARNING);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unknown"))
-						temp_service->stalk_on_unknown = TRUE;
+						flag_set(temp_service->stalking_options, OPT_UNKNOWN);
 					else if(!strcmp(temp_ptr, "c") || !strcmp(temp_ptr, "critical"))
-						temp_service->stalk_on_critical = TRUE;
+						flag_set(temp_service->stalking_options, OPT_CRITICAL);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_service->stalk_on_ok = FALSE;
-						temp_service->stalk_on_warning = FALSE;
-						temp_service->stalk_on_unknown = FALSE;
-						temp_service->stalk_on_critical = FALSE;
+						temp_service->stalking_options = OPT_NOTHING;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_service->stalk_on_ok = TRUE;
-						temp_service->stalk_on_warning = TRUE;
-						temp_service->stalk_on_unknown = TRUE;
-						temp_service->stalk_on_critical = TRUE;
+						temp_service->stalking_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid stalking option '%s' in service definition.\n", temp_ptr);
@@ -3110,8 +2997,7 @@ int xodtemplate_add_object_property(char *input, int options) {
 				temp_service->have_process_perf_data = TRUE;
 				}
 			else if(!strcmp(variable, "failure_prediction_enabled")) {
-				temp_service->failure_prediction_enabled = (atoi(value) > 0) ? TRUE : FALSE;
-				temp_service->have_failure_prediction_enabled = TRUE;
+				xodtemplate_obsoleted(variable, temp_service->_start_line);
 				}
 			else if(!strcmp(variable, "retain_status_information")) {
 				temp_service->retain_status_information = (atoi(value) > 0) ? TRUE : FALSE;
@@ -3216,20 +3102,6 @@ int xodtemplate_add_object_property(char *input, int options) {
 						result = ERROR;
 					}
 				temp_hostdependency->have_dependent_host_name = TRUE;
-
-				/* NOTE: dependencies are added to the skiplist in xodtemplate_duplicate_objects(), except if daemon is using precached config */
-				if(result == OK && force_skiplists == TRUE) {
-					/* add hostdependency to template skiplist for fast searches */
-					result = skiplist_insert(xobject_skiplists[HOSTDEPENDENCY_SKIPLIST], (void *)temp_hostdependency);
-					switch(result) {
-						case SKIPLIST_OK:
-							result = OK;
-							break;
-						default:
-							result = ERROR;
-							break;
-						}
-					}
 				}
 			else if(!strcmp(variable, "dependency_period")) {
 				if(strcmp(value, XODTEMPLATE_NULL)) {
@@ -3243,64 +3115,51 @@ int xodtemplate_add_object_property(char *input, int options) {
 				temp_hostdependency->have_inherits_parent = TRUE;
 				}
 			else if(!strcmp(variable, "notification_failure_options") || !strcmp(variable, "notification_failure_criteria")) {
+				temp_hostdependency->have_notification_failure_options = TRUE;
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "o") || !strcmp(temp_ptr, "up"))
-						temp_hostdependency->fail_notify_on_up = TRUE;
+						flag_set(temp_hostdependency->notification_failure_options, OPT_UP);
 					else if(!strcmp(temp_ptr, "d") || !strcmp(temp_ptr, "down"))
-						temp_hostdependency->fail_notify_on_down = TRUE;
+						flag_set(temp_hostdependency->notification_failure_options, OPT_DOWN);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unreachable"))
-						temp_hostdependency->fail_notify_on_unreachable = TRUE;
+						flag_set(temp_hostdependency->notification_failure_options, OPT_UNREACHABLE);
 					else if(!strcmp(temp_ptr, "p") || !strcmp(temp_ptr, "pending"))
-						temp_hostdependency->fail_notify_on_pending = TRUE;
+						flag_set(temp_hostdependency->notification_failure_options, OPT_PENDING);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_hostdependency->fail_notify_on_up = FALSE;
-						temp_hostdependency->fail_notify_on_down = FALSE;
-						temp_hostdependency->fail_notify_on_unreachable = FALSE;
-						temp_hostdependency->fail_notify_on_pending = FALSE;
+						temp_hostdependency->notification_failure_options = OPT_NOTHING;
+						temp_hostdependency->have_notification_failure_options = FALSE;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_hostdependency->fail_notify_on_up = TRUE;
-						temp_hostdependency->fail_notify_on_down = TRUE;
-						temp_hostdependency->fail_notify_on_unreachable = TRUE;
-						temp_hostdependency->fail_notify_on_pending = TRUE;
+						temp_hostdependency->notification_failure_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid notification dependency option '%s' in hostdependency definition.\n", temp_ptr);
 						return ERROR;
 						}
 					}
-				temp_hostdependency->have_notification_dependency_options = TRUE;
-				host_deps++;
 				}
 			else if(!strcmp(variable, "execution_failure_options") || !strcmp(variable, "execution_failure_criteria")) {
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "o") || !strcmp(temp_ptr, "up"))
-						temp_hostdependency->fail_execute_on_up = TRUE;
+						flag_set(temp_hostdependency->execution_failure_options, OPT_UP);
 					else if(!strcmp(temp_ptr, "d") || !strcmp(temp_ptr, "down"))
-						temp_hostdependency->fail_execute_on_down = TRUE;
+						flag_set(temp_hostdependency->execution_failure_options, OPT_DOWN);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unreachable"))
-						temp_hostdependency->fail_execute_on_unreachable = TRUE;
+						flag_set(temp_hostdependency->execution_failure_options, OPT_UNREACHABLE);
 					else if(!strcmp(temp_ptr, "p") || !strcmp(temp_ptr, "pending"))
-						temp_hostdependency->fail_execute_on_pending = TRUE;
+						flag_set(temp_hostdependency->execution_failure_options, OPT_PENDING);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_hostdependency->fail_execute_on_up = FALSE;
-						temp_hostdependency->fail_execute_on_down = FALSE;
-						temp_hostdependency->fail_execute_on_unreachable = FALSE;
-						temp_hostdependency->fail_execute_on_pending = FALSE;
+						temp_hostdependency->execution_failure_options = OPT_NOTHING;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_hostdependency->fail_execute_on_up = TRUE;
-						temp_hostdependency->fail_execute_on_down = TRUE;
-						temp_hostdependency->fail_execute_on_unreachable = TRUE;
-						temp_hostdependency->fail_execute_on_pending = TRUE;
+						temp_hostdependency->execution_failure_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid execution dependency option '%s' in hostdependency definition.\n", temp_ptr);
 						return ERROR;
 						}
 					}
-				temp_hostdependency->have_execution_dependency_options = TRUE;
-				host_deps++;
+				temp_hostdependency->have_execution_failure_options = TRUE;
 				}
 			else if(!strcmp(variable, "register"))
 				temp_hostdependency->register_object = (atoi(value) > 0) ? TRUE : FALSE;
@@ -3355,20 +3214,6 @@ int xodtemplate_add_object_property(char *input, int options) {
 						result = ERROR;
 					}
 				temp_hostescalation->have_host_name = TRUE;
-
-				/* NOTE: escalations are added to the skiplist in xodtemplate_duplicate_objects(), except if daemon is using precached config */
-				if(result == OK && force_skiplists == TRUE) {
-					/* add hostescalation to template skiplist for fast searches */
-					result = skiplist_insert(xobject_skiplists[HOSTESCALATION_SKIPLIST], (void *)temp_hostescalation);
-					switch(result) {
-						case SKIPLIST_OK:
-							result = OK;
-							break;
-						default:
-							result = ERROR;
-							break;
-						}
-					}
 				}
 			else if(!strcmp(variable, "contact_groups")) {
 				if(strcmp(value, XODTEMPLATE_NULL)) {
@@ -3406,20 +3251,16 @@ int xodtemplate_add_object_property(char *input, int options) {
 			else if(!strcmp(variable, "escalation_options")) {
 				for(temp_ptr = strtok(value, ", "); temp_ptr; temp_ptr = strtok(NULL, ", ")) {
 					if(!strcmp(temp_ptr, "d") || !strcmp(temp_ptr, "down"))
-						temp_hostescalation->escalate_on_down = TRUE;
+						flag_set(temp_hostescalation->escalation_options, OPT_DOWN);
 					else if(!strcmp(temp_ptr, "u") || !strcmp(temp_ptr, "unreachable"))
-						temp_hostescalation->escalate_on_unreachable = TRUE;
+						flag_set(temp_hostescalation->escalation_options, OPT_UNREACHABLE);
 					else if(!strcmp(temp_ptr, "r") || !strcmp(temp_ptr, "recovery"))
-						temp_hostescalation->escalate_on_recovery = TRUE;
+						flag_set(temp_hostescalation->escalation_options, OPT_RECOVERY);
 					else if(!strcmp(temp_ptr, "n") || !strcmp(temp_ptr, "none")) {
-						temp_hostescalation->escalate_on_down = FALSE;
-						temp_hostescalation->escalate_on_unreachable = FALSE;
-						temp_hostescalation->escalate_on_recovery = FALSE;
+						temp_hostescalation->escalation_options = OPT_NOTHING;
 						}
 					else if(!strcmp(temp_ptr, "a") || !strcmp(temp_ptr, "all")) {
-						temp_hostescalation->escalate_on_down = TRUE;
-						temp_hostescalation->escalate_on_unreachable = TRUE;
-						temp_hostescalation->escalate_on_recovery = TRUE;
+						temp_hostescalation->escalation_options = OPT_ALL;
 						}
 					else {
 						logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Invalid escalation option '%s' in hostescalation definition.\n", temp_ptr);
@@ -3687,7 +3528,12 @@ int xodtemplate_add_object_property(char *input, int options) {
 /* completes an object definition */
 int xodtemplate_end_object_definition(int options) {
 	int result = OK;
-
+#ifdef NSCGI
+	switch(xodtemplate_current_object_type) {
+	case XODTEMPLATE_HOSTESCALATION: xodcount.hostescalations++; break;
+	case XODTEMPLATE_SERVICEESCALATION: xodcount.serviceescalations++; break;
+	}
+#endif
 
 	xodtemplate_current_object = NULL;
 	xodtemplate_current_object_type = XODTEMPLATE_NONE;
@@ -4114,83 +3960,97 @@ int xodtemplate_get_weekday_from_string(char *str, int *weekday) {
 int xodtemplate_duplicate_services(void) {
 	int result = OK;
 	xodtemplate_service *temp_service = NULL;
-	xodtemplate_memberlist *temp_memberlist = NULL;
-	xodtemplate_memberlist *temp_rejectlist = NULL;
-	xodtemplate_memberlist *this_memberlist = NULL;
-	char *host_name = NULL;
-	int first_item = FALSE;
 
-
+	xodcount.services = 0;
 	/****** DUPLICATE SERVICE DEFINITIONS WITH ONE OR MORE HOSTGROUP AND/OR HOST NAMES ******/
 	for(temp_service = xodtemplate_service_list; temp_service != NULL; temp_service = temp_service->next) {
+		objectlist *hlist = NULL, *list = NULL, *glist = NULL, *next;
+		xodtemplate_hostgroup fake_hg;
+
+		/* clear for each round */
+		bitmap_clear(host_map);
 
 		/* skip service definitions without enough data */
 		if(temp_service->hostgroup_name == NULL && temp_service->host_name == NULL)
 			continue;
 
-		/* If hostgroup is not null and hostgroup has no members, check to see if */
-		/* allow_empty_hostgroup_assignment is set to 1 - if it is, continue without error  */
-		if(temp_service->hostgroup_name != NULL) {
-			if(xodtemplate_expand_hostgroups(&temp_memberlist, &temp_rejectlist, temp_service->hostgroup_name, temp_service->_config_file, temp_service->_start_line) == ERROR) {
-				return ERROR;
-				}
-			else {
-				xodtemplate_free_memberlist(&temp_rejectlist);
-				if(temp_memberlist != NULL) {
-					xodtemplate_free_memberlist(&temp_memberlist);
-					}
-				else {
-					/* User is ok with hostgroup -> service mappings with no hosts */
-					if(allow_empty_hostgroup_assignment == 1) {
-						continue;
-						}
-					}
-				}
-			}
-
 		/* skip services that shouldn't be registered */
 		if(temp_service->register_object == FALSE)
 			continue;
 
-		/* get list of hosts */
-		temp_memberlist = xodtemplate_expand_hostgroups_and_hosts(temp_service->hostgroup_name, temp_service->host_name, temp_service->_config_file, temp_service->_start_line);
-		if(temp_memberlist == NULL) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand hostgroups and/or hosts specified in service (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_service->_config_file), temp_service->_start_line);
-			return ERROR;
-			}
-
-		/* add a copy of the service for every host in the hostgroup/host name list */
-		first_item = TRUE;
-		for(this_memberlist = temp_memberlist; this_memberlist != NULL; this_memberlist = this_memberlist->next) {
-
-			/* if this is the first duplication, use the existing entry */
-			if(first_item == TRUE) {
-
-				my_free(temp_service->host_name);
-				temp_service->host_name = (char *)strdup(this_memberlist->name1);
-				if(temp_service->host_name == NULL) {
-					xodtemplate_free_memberlist(&temp_memberlist);
-					return ERROR;
-					}
-
-				first_item = FALSE;
-				continue;
-				}
-
-			/* duplicate service definition */
-			result = xodtemplate_duplicate_service(temp_service, this_memberlist->name1);
-
-			/* exit on error */
-			if(result == ERROR) {
-				my_free(host_name);
+		if(temp_service->hostgroup_name != NULL) {
+			if(xodtemplate_expand_hostgroups(&glist, host_map, temp_service->hostgroup_name, temp_service->_config_file, temp_service->_start_line) == ERROR) {
 				return ERROR;
 				}
+			/* empty result is only bad if allow_empty_hostgroup_assignment is off */
+			if(!glist && !bitmap_count_set_bits(host_map) && allow_empty_hostgroup_assignment == 0) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand hostgroups and/or hosts specified in service (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_service->_config_file), temp_service->_start_line);
+				return ERROR;
+				}
+			/* no longer needed */
+			my_free(temp_service->hostgroup_name);
 			}
 
-		/* free memory we used for host list */
-		xodtemplate_free_memberlist(&temp_memberlist);
+		/* now find direct hosts */
+		if(temp_service->host_name) {
+			if (xodtemplate_expand_hosts(&hlist, host_map, temp_service->host_name, temp_service->_config_file, temp_service->_start_line) != OK) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Failed to expand host list '%s' for service '%s' (%s:%d)\n",
+					  temp_service->host_name, temp_service->service_description,
+					  xodtemplate_config_file_name(temp_service->_config_file),
+					  temp_service->_start_line);
+				return ERROR;
+				}
+			/* we don't need this anymore now that we have the hlist */
+			my_free(temp_service->host_name);
 		}
 
+		/*
+		 * host_map now contains all rejected hosts
+		 * group_map contains all rejected hostgroups
+		 * hlist contains all hosts we're directly assigned to.
+		 * glist contains all hostgroups we're assigned to.
+		 * We ignore hostgroups we're assigned to that are also rejected.
+		 * We do a dirty trick here and prepend a fake hostgroup
+		 * to the hostgroup list so we can use the same loop for
+		 * the rest of the code.
+		 */
+		fake_hg.hostgroup_name = "!!FAKE HOSTGROUP";
+		fake_hg.member_list = hlist;
+		prepend_object_to_objectlist(&glist, &fake_hg);
+		for(list = glist; list; list = next) {
+			xodtemplate_hostgroup *hg = (xodtemplate_hostgroup *)list->object_ptr;
+			next = list->next;
+			free(list);
+
+			/* we don't free this list */
+			for(hlist = hg->member_list; hlist; hlist = hlist->next) {
+				xodtemplate_host *h = (xodtemplate_host *)hlist->object_ptr;
+
+				/* ignore this host if it's rejected */
+				if(bitmap_isset(host_map, h->id))
+					continue;
+
+				/*
+				 * reject more copies of this host. This happens
+				 * if the service is assigned to multiple hostgroups
+				 * where the same host is part of more than one of
+				 * them
+				 */
+				bitmap_set(host_map, h->id);
+
+				/* if this is the last duplication, use the existing entry */
+				if(!next && !hlist->next) {
+					temp_service->id = xodcount.services++;
+					temp_service->host_name = h->host_name;
+					}
+				else {
+					/* duplicate service definition */
+					result = xodtemplate_duplicate_service(temp_service, h->host_name, hg != &fake_hg);
+					}
+				}
+			free_objectlist(&fake_hg.member_list);
+			}
+		}
 
 	/***************************************/
 	/* SKIPLIST STUFF FOR FAST SORT/SEARCH */
@@ -4207,7 +4067,7 @@ int xodtemplate_duplicate_services(void) {
 		if(temp_service->host_name == NULL || temp_service->service_description == NULL)
 			continue;
 
-		if(xodtemplate_is_service_is_from_hostgroup(temp_service)) {
+		if(temp_service->is_from_hostgroup) {
 			continue;
 			}
 
@@ -4240,11 +4100,11 @@ int xodtemplate_duplicate_services(void) {
 		if(temp_service->host_name == NULL || temp_service->service_description == NULL)
 			continue;
 
-		if(!xodtemplate_is_service_is_from_hostgroup(temp_service)) {
+		if(!temp_service->is_from_hostgroup) {
 			continue;
 			}
-		/*The flag X_SERVICE_IS_FROM_HOSTGROUP is set, unset it*/
-		xodtemplate_unset_service_is_from_hostgroup(temp_service);
+
+		temp_service->is_from_hostgroup = 0;
 
 		result = skiplist_insert(xobject_skiplists[SERVICE_SKIPLIST], (void *)temp_service);
 		switch(result) {
@@ -4265,25 +4125,144 @@ int xodtemplate_duplicate_services(void) {
 	}
 
 
+/**
+ * Create an objectlist of services from whatever someone put into a
+ * servicedescription. Rules go like this:
+ * NOT servicegroup:
+ * If we have host_name and service_description, we do a simple
+ * lookup.
+ * If we have host_name and/or hostgroup_name and service_description,
+ * we do multiple lookups and concatenate the results.
+ * If we have host_name/hostgroup_name and service_description, we do multiple
+ * simple lookups and concatenate the results.
+ */
+static int xodtemplate_create_service_list(objectlist **ret, bitmap *reject_map, char *host_name, char *hostgroup_name, char *servicegroup_name, char *service_description, int _config_file, int _start_line)
+{
+	objectlist *hlist = NULL, *hglist = NULL, *slist = NULL, *sglist = NULL;
+	objectlist *glist, *gnext, *list, *next; /* iterators */
+	xodtemplate_hostgroup fake_hg;
+	xodtemplate_service *s;
+	bitmap *in;
+
+	/*
+	 * if we have a service_description, we need host_name
+	 * or host_group name
+	 */
+	if(service_description && !host_name && !hostgroup_name)
+		return ERROR;
+	/*
+	 * if we have host_name or a hostgroup_name we also need
+	 * service_description
+	 */
+	if((host_name || hostgroup_name) && !service_description)
+		return ERROR;
+
+	/* we'll need these */
+	bitmap_clear(host_map);
+	if (!(in = bitmap_create(xodcount.services)))
+		return ERROR;
+
+	/*
+	 * all services in the accepted servicegroups can be added, except
+	 * if they're also in service_map, in which case they're also
+	 * in rejected servicegroups and must NOT be added
+	 */
+	if(servicegroup_name && xodtemplate_expand_servicegroups(&sglist, reject_map, servicegroup_name, _config_file, _start_line) != OK)
+		return ERROR;
+	for(glist = sglist; glist; glist = gnext) {
+		xodtemplate_servicegroup *sg = (xodtemplate_servicegroup *)glist->object_ptr;
+		gnext = glist->next;
+		free(glist); /* free it as we go along */
+		for(list = sg->member_list; list; list = list->next) {
+			xodtemplate_service *s = (xodtemplate_service *)list->object_ptr;
+
+			/* rejected or already added */
+			if(bitmap_isset(in, s->id) || bitmap_isset(reject_map, s->id))
+				continue;
+			bitmap_set(in, s->id);
+			if(prepend_object_to_objectlist(ret, s) != OK) {
+				free_objectlist(&gnext);
+				return ERROR;
+			}
+		}
+	}
+
+	/*
+	 * get the lists we'll need, with reject markers included.
+	 * We have to get both hostlist and hostgroup list at once
+	 * to get the full reject markers.
+	 */
+	if(host_name && xodtemplate_expand_hosts(&hlist, host_map, host_name, _config_file, _start_line) != OK)
+		return ERROR;
+	if(hostgroup_name && xodtemplate_expand_hostgroups(&hglist, host_map, hostgroup_name, _config_file, _start_line) != OK) {
+		free_objectlist(&hlist);
+		return ERROR;
+	}
+
+	/*
+	 * if hlist isn't NULL, we add a fake hostgroup to the mix so we
+	 * can get away with a single loop, but we must always set its
+	 * memberlist so we can safely call free_objectlist() on it.
+	 */
+	fake_hg.member_list = hlist;
+	if(hlist) {
+		if(prepend_object_to_objectlist(&hglist, &fake_hg) != OK) {
+			free_objectlist(&hlist);
+			free_objectlist(&hglist);
+			bitmap_destroy(in);
+			return ERROR;
+		}
+	}
+
+	for(glist = hglist; glist; glist = gnext) {
+		xodtemplate_hostgroup *hg = (xodtemplate_hostgroup *)glist->object_ptr;
+		gnext = glist->next;
+		free(glist);
+
+		for(hlist = hg->member_list; hlist; hlist = hlist->next) {
+			xodtemplate_host *h = (xodtemplate_host *)hlist->object_ptr;
+			if(bitmap_isset(host_map, h->id))
+				continue;
+
+			/* expand services and add them all, unless they're rejected */
+			slist = NULL;
+			if(xodtemplate_expand_services(&slist, reject_map, h->host_name, service_description, _config_file, _start_line) != OK) {
+				free_objectlist(&gnext);
+				bitmap_destroy(in);
+				return ERROR;
+			}
+			for(list = slist; list; list = next) {
+				s = (xodtemplate_service *)list->object_ptr;
+				next = list->next;
+				free(list);
+				if(bitmap_isset(in, s->id) || bitmap_isset(reject_map, s->id))
+					continue;
+				bitmap_set(in, s->id);
+				if(prepend_object_to_objectlist(ret, s) != OK) {
+					free_objectlist(&next);
+					free_objectlist(&gnext);
+					free_objectlist(&fake_hg.member_list);
+					bitmap_destroy(in);
+					return ERROR;
+				}
+			}
+		}
+	}
+
+	bitmap_destroy(in);
+	free_objectlist(&fake_hg.member_list);
+	return OK;
+}
 
 /* duplicates object definitions */
 int xodtemplate_duplicate_objects(void) {
 	int result = OK;
 	xodtemplate_hostescalation *temp_hostescalation = NULL;
 	xodtemplate_serviceescalation *temp_serviceescalation = NULL;
-	xodtemplate_hostdependency *temp_hostdependency = NULL;
-	xodtemplate_servicedependency *temp_servicedependency = NULL;
-	xodtemplate_hostextinfo *temp_hostextinfo = NULL;
-	xodtemplate_serviceextinfo *temp_serviceextinfo = NULL;
-
-	xodtemplate_memberlist *master_hostlist = NULL, *dependent_hostlist = NULL;
-	xodtemplate_memberlist *master_servicelist = NULL, *dependent_servicelist = NULL;
-	xodtemplate_memberlist *temp_masterhost = NULL, *temp_dependenthost = NULL;
-	xodtemplate_memberlist *temp_masterservice = NULL, *temp_dependentservice = NULL;
-
-	char *service_descriptions = NULL;
-	int first_item = FALSE;
-	int same_host_servicedependency = FALSE;
+	xodtemplate_hostextinfo *next_he = NULL, *temp_hostextinfo = NULL;
+	xodtemplate_serviceextinfo *next_se = NULL, *temp_serviceextinfo = NULL;
+	objectlist *master_hostlist, *master_servicelist;
+	objectlist *list, *next;
 
 
 	/*************************************/
@@ -4291,7 +4270,7 @@ int xodtemplate_duplicate_objects(void) {
 	/*************************************/
 
 
-	/****** DUPLICATE HOST ESCALATION DEFINITIONS WITH ONE OR MORE HOSTGROUP AND/OR HOST NAMES ******/
+	/* duplicate host escalations */
 	for(temp_hostescalation = xodtemplate_hostescalation_list; temp_hostescalation != NULL; temp_hostescalation = temp_hostescalation->next) {
 
 		/* skip host escalation definitions without enough data */
@@ -4306,606 +4285,93 @@ int xodtemplate_duplicate_objects(void) {
 			}
 
 		/* add a copy of the hostescalation for every host in the hostgroup/host name list */
-		first_item = TRUE;
-		for(temp_masterhost = master_hostlist; temp_masterhost != NULL; temp_masterhost = temp_masterhost->next) {
+		for(list = master_hostlist; list; list = next) {
+			xodtemplate_host *h = (xodtemplate_host *)list->object_ptr;
+			next = list->next;
+			free(list);
 
-			/* if this is the first duplication, use the existing entry */
-			if(first_item == TRUE) {
+			xodcount.hostescalations++;
 
+			/* if this is the last duplication, use the existing entry */
+			if(!next) {
+				my_free(temp_hostescalation->name);
+				my_free(temp_hostescalation->template);
 				my_free(temp_hostescalation->host_name);
-				temp_hostescalation->host_name = (char *)strdup(temp_masterhost->name1);
-				if(temp_hostescalation->host_name == NULL) {
-					xodtemplate_free_memberlist(&master_hostlist);
-					return ERROR;
-					}
-
-				first_item = FALSE;
+				my_free(temp_hostescalation->hostgroup_name);
+				temp_hostescalation->host_name = h->host_name;
 				continue;
 				}
 
 			/* duplicate hostescalation definition */
-			result = xodtemplate_duplicate_hostescalation(temp_hostescalation, temp_masterhost->name1);
+			result = xodtemplate_duplicate_hostescalation(temp_hostescalation, h->host_name);
 
 			/* exit on error */
 			if(result == ERROR) {
-				xodtemplate_free_memberlist(&master_hostlist);
+				free_objectlist(&next);
 				return ERROR;
 				}
 			}
-
-		/* free memory we used for host list */
-		xodtemplate_free_memberlist(&master_hostlist);
 		}
+	timing_point("Created %u hostescalations (dupes possible)\n", xodcount.hostescalations);
 
 
-	/****** DUPLICATE SERVICE ESCALATION DEFINITIONS WITH ONE OR MORE HOSTGROUP AND/OR HOST NAMES ******/
-	for(temp_serviceescalation = xodtemplate_serviceescalation_list; temp_serviceescalation != NULL; temp_serviceescalation = temp_serviceescalation->next) {
-
-		/* skip service escalation definitions without enough data */
-		if(temp_serviceescalation->hostgroup_name == NULL && temp_serviceescalation->host_name == NULL)
-			continue;
-
-		/* get list of hosts */
-		master_hostlist = xodtemplate_expand_hostgroups_and_hosts(temp_serviceescalation->hostgroup_name, temp_serviceescalation->host_name, temp_serviceescalation->_config_file, temp_serviceescalation->_start_line);
-		if(master_hostlist == NULL) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand hostgroups and/or hosts specified in service escalation (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_serviceescalation->_config_file), temp_serviceescalation->_start_line);
-			return ERROR;
-			}
-
-		/* duplicate service escalation entries */
-		first_item = TRUE;
-		for(temp_masterhost = master_hostlist; temp_masterhost != NULL; temp_masterhost = temp_masterhost->next) {
-
-			/* if this is the first duplication,use the existing entry */
-			if(first_item == TRUE) {
-
-				my_free(temp_serviceescalation->host_name);
-				temp_serviceescalation->host_name = (char *)strdup(temp_masterhost->name1);
-				if(temp_serviceescalation->host_name == NULL) {
-					xodtemplate_free_memberlist(&master_hostlist);
-					return ERROR;
-					}
-
-				first_item = FALSE;
-				continue;
-				}
-
-			/* duplicate service escalation definition */
-			result = xodtemplate_duplicate_serviceescalation(temp_serviceescalation, temp_masterhost->name1, temp_serviceescalation->service_description);
-
-			/* exit on error */
-			if(result == ERROR) {
-				xodtemplate_free_memberlist(&master_hostlist);
-				return ERROR;
-				}
-			}
-
-		/* free memory we used for host list */
-		xodtemplate_free_memberlist(&master_hostlist);
-		}
-
-
-	/****** DUPLICATE SERVICE ESCALATION DEFINITIONS WITH MULTIPLE DESCRIPTIONS ******/
-	/* THIS MUST BE DONE AFTER DUPLICATING FOR MULTIPLE HOST NAMES (SEE ABOVE) */
+	/* duplicate service escalations */
 	for(temp_serviceescalation = xodtemplate_serviceescalation_list; temp_serviceescalation != NULL; temp_serviceescalation = temp_serviceescalation->next) {
 
 		/* skip serviceescalations without enough data */
-		if(temp_serviceescalation->service_description == NULL || temp_serviceescalation->host_name == NULL)
+		if(temp_serviceescalation->service_description == NULL && (temp_serviceescalation->host_name == NULL || temp_serviceescalation->hostgroup_name == NULL))
+			continue;
+		if(temp_serviceescalation->register_object == FALSE)
 			continue;
 
+		bitmap_clear(service_map);
+
+		master_servicelist = NULL;
+
 		/* get list of services */
-		master_servicelist = xodtemplate_expand_servicegroups_and_services(NULL, temp_serviceescalation->host_name, temp_serviceescalation->service_description, temp_serviceescalation->_config_file, temp_serviceescalation->_start_line);
-		if(master_servicelist == NULL) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand services specified in service escalation (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_serviceescalation->_config_file), temp_serviceescalation->_start_line);
+		if(xodtemplate_create_service_list(&master_servicelist, service_map, temp_serviceescalation->host_name, temp_serviceescalation->hostgroup_name, temp_serviceescalation->servicegroup_name, temp_serviceescalation->service_description, temp_serviceescalation->_config_file, temp_serviceescalation->_start_line) != OK)
 			return ERROR;
-			}
+
+		/* we won't need these anymore */
+		my_free(temp_serviceescalation->host_name);
+		my_free(temp_serviceescalation->hostgroup_name);
+		my_free(temp_serviceescalation->service_description);
+		my_free(temp_serviceescalation->servicegroup_name);
 
 		/* duplicate service escalation entries */
-		first_item = TRUE;
-		for(temp_masterservice = master_servicelist; temp_masterservice != NULL; temp_masterservice = temp_masterservice->next) {
+		for(list = master_servicelist; list; list = next) {
+			xodtemplate_service *s = (xodtemplate_service *)list->object_ptr;
+			next = list->next;
+			free(list);
 
-			/* if this is the first duplication, use the existing entry */
-			if(first_item == TRUE) {
+			if(bitmap_isset(service_map, s->id))
+				continue;
 
-				my_free(temp_serviceescalation->service_description);
-				temp_serviceescalation->service_description = (char *)strdup(temp_masterservice->name2);
-				if(temp_serviceescalation->service_description == NULL) {
-					xodtemplate_free_memberlist(&master_servicelist);
-					return ERROR;
-					}
+			xodcount.serviceescalations++;
 
-				first_item = FALSE;
+			/* if this is the last duplication, use the existing entry */
+			if(!next) {
+				temp_serviceescalation->host_name = s->host_name;
+				temp_serviceescalation->service_description = s->service_description;
 				continue;
 				}
 
 			/* duplicate service escalation definition */
-			result = xodtemplate_duplicate_serviceescalation(temp_serviceescalation, temp_serviceescalation->host_name, temp_masterservice->name2);
+			result = xodtemplate_duplicate_serviceescalation(temp_serviceescalation, s->host_name, s->service_description);
 
 			/* exit on error */
 			if(result == ERROR) {
-				xodtemplate_free_memberlist(&master_servicelist);
+				free_objectlist(&next);
 				return ERROR;
 				}
 			}
-
-		/* free memory we used for service list */
-		xodtemplate_free_memberlist(&master_servicelist);
 		}
-
-
-
-	/****** DUPLICATE SERVICE ESCALATION DEFINITIONS WITH SERVICEGROUPS ******/
-	/* THIS MUST BE DONE AFTER DUPLICATING FOR MULTIPLE HOST NAMES (SEE ABOVE) */
-	for(temp_serviceescalation = xodtemplate_serviceescalation_list; temp_serviceescalation != NULL; temp_serviceescalation = temp_serviceescalation->next) {
-
-		/* skip serviceescalations without enough data */
-		if(temp_serviceescalation->servicegroup_name == NULL)
-			continue;
-
-		/* get list of services */
-		master_servicelist = xodtemplate_expand_servicegroups_and_services(temp_serviceescalation->servicegroup_name, NULL, NULL, temp_serviceescalation->_config_file, temp_serviceescalation->_start_line);
-		if(master_servicelist == NULL) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand servicegroups specified in service escalation (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_serviceescalation->_config_file), temp_serviceescalation->_start_line);
-			return ERROR;
-			}
-
-		/* duplicate service escalation entries */
-		first_item = TRUE;
-		for(temp_masterservice = master_servicelist; temp_masterservice != NULL; temp_masterservice = temp_masterservice->next) {
-
-			/* if this is the first duplication, use the existing entry if possible */
-			if(first_item == TRUE && temp_serviceescalation->host_name == NULL && temp_serviceescalation->service_description == NULL) {
-
-				my_free(temp_serviceescalation->host_name);
-				temp_serviceescalation->host_name = (char *)strdup(temp_masterservice->name1);
-
-				my_free(temp_serviceescalation->service_description);
-				temp_serviceescalation->service_description = (char *)strdup(temp_masterservice->name2);
-
-				if(temp_serviceescalation->host_name == NULL || temp_serviceescalation->service_description == NULL) {
-					xodtemplate_free_memberlist(&master_servicelist);
-					return ERROR;
-					}
-
-				first_item = FALSE;
-				continue;
-				}
-
-			/* duplicate service escalation definition */
-			result = xodtemplate_duplicate_serviceescalation(temp_serviceescalation, temp_masterservice->name1, temp_masterservice->name2);
-
-			/* exit on error */
-			if(result == ERROR) {
-				xodtemplate_free_memberlist(&master_servicelist);
-				return ERROR;
-				}
-			}
-
-		/* free memory we used for service list */
-		xodtemplate_free_memberlist(&master_servicelist);
-		}
-
-
-	/****** DUPLICATE HOST DEPENDENCY DEFINITIONS WITH MULTIPLE HOSTGROUP AND/OR HOST NAMES (MASTER AND DEPENDENT) ******/
-	for(temp_hostdependency = xodtemplate_hostdependency_list; temp_hostdependency != NULL; temp_hostdependency = temp_hostdependency->next) {
-
-		/* skip host dependencies without enough data */
-		if(temp_hostdependency->hostgroup_name == NULL && temp_hostdependency->dependent_hostgroup_name == NULL && temp_hostdependency->host_name == NULL && temp_hostdependency->dependent_host_name == NULL)
-			continue;
-
-		/* get list of master host names */
-		master_hostlist = xodtemplate_expand_hostgroups_and_hosts(temp_hostdependency->hostgroup_name, temp_hostdependency->host_name, temp_hostdependency->_config_file, temp_hostdependency->_start_line);
-		if(master_hostlist == NULL && allow_empty_hostgroup_assignment==0) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand master hostgroups and/or hosts specified in host dependency (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_hostdependency->_config_file), temp_hostdependency->_start_line);
-			return ERROR;
-			}
-
-		/* get list of dependent host names */
-		dependent_hostlist = xodtemplate_expand_hostgroups_and_hosts(temp_hostdependency->dependent_hostgroup_name, temp_hostdependency->dependent_host_name, temp_hostdependency->_config_file, temp_hostdependency->_start_line);
-		if(dependent_hostlist == NULL && allow_empty_hostgroup_assignment==0) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand dependent hostgroups and/or hosts specified in host dependency (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_hostdependency->_config_file), temp_hostdependency->_start_line);
-			xodtemplate_free_memberlist(&master_hostlist);
-			return ERROR;
-			}
-
-		/* duplicate the dependency definitions */
-		first_item = TRUE;
-		for(temp_masterhost = master_hostlist; temp_masterhost != NULL; temp_masterhost = temp_masterhost->next) {
-
-			for(temp_dependenthost = dependent_hostlist; temp_dependenthost != NULL; temp_dependenthost = temp_dependenthost->next) {
-
-				/* temp=master, this=dep */
-
-				/* existing definition gets first names */
-				if(first_item == TRUE) {
-					my_free(temp_hostdependency->host_name);
-					my_free(temp_hostdependency->dependent_host_name);
-					temp_hostdependency->host_name = (char *)strdup(temp_masterhost->name1);
-					temp_hostdependency->dependent_host_name = (char *)strdup(temp_dependenthost->name1);
-					first_item = FALSE;
-					continue;
-					}
-				else
-					result = xodtemplate_duplicate_hostdependency(temp_hostdependency, temp_masterhost->name1, temp_dependenthost->name1);
-				/* exit on error */
-				if(result == ERROR) {
-					xodtemplate_free_memberlist(&master_hostlist);
-					xodtemplate_free_memberlist(&dependent_hostlist);
-					return ERROR;
-					}
-				}
-			}
-
-		/* free memory used to store host lists */
-		xodtemplate_free_memberlist(&master_hostlist);
-		xodtemplate_free_memberlist(&dependent_hostlist);
-		}
-
-
-
-	/****** PROCESS SERVICE DEPENDENCIES WITH MASTER SERVICEGROUPS *****/
-	for(temp_servicedependency = xodtemplate_servicedependency_list; temp_servicedependency != NULL; temp_servicedependency = temp_servicedependency->next) {
-
-		/* skip templates */
-		if(temp_servicedependency->register_object == 0)
-			continue;
-
-		/* expand master servicegroups into a list of services */
-		if(temp_servicedependency->servicegroup_name) {
-
-			master_servicelist = xodtemplate_expand_servicegroups_and_services(temp_servicedependency->servicegroup_name, NULL, NULL, temp_servicedependency->_config_file, temp_servicedependency->_start_line);
-			if(master_servicelist == NULL) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand master servicegroups specified in service dependency (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_servicedependency->_config_file), temp_servicedependency->_start_line);
-				return ERROR;
-				}
-
-			/* if dependency also has master host, hostgroup, and/or service, we must split that off to another definition */
-			if(temp_servicedependency->host_name != NULL || temp_servicedependency->hostgroup_name != NULL || temp_servicedependency->service_description != NULL) {
-
-				/* duplicate everything except master servicegroup */
-				xodtemplate_duplicate_servicedependency(temp_servicedependency, temp_servicedependency->host_name, temp_servicedependency->service_description, temp_servicedependency->hostgroup_name, NULL, temp_servicedependency->dependent_host_name, temp_servicedependency->dependent_service_description, temp_servicedependency->dependent_hostgroup_name, temp_servicedependency->dependent_servicegroup_name);
-
-				/* clear values in this definition */
-				temp_servicedependency->have_host_name = FALSE;
-				temp_servicedependency->have_service_description = FALSE;
-				temp_servicedependency->have_hostgroup_name = FALSE;
-				my_free(temp_servicedependency->host_name);
-				my_free(temp_servicedependency->service_description);
-				my_free(temp_servicedependency->hostgroup_name);
-				}
-
-			/* duplicate service dependency entries */
-			first_item = TRUE;
-			for(temp_masterservice = master_servicelist; temp_masterservice != NULL; temp_masterservice = temp_masterservice->next) {
-
-				/* just in case */
-				if(temp_masterservice->name1 == NULL || temp_masterservice->name2 == NULL)
-					continue;
-
-				/* if this is the first duplication, use the existing entry */
-				if(first_item == TRUE) {
-
-					my_free(temp_servicedependency->host_name);
-					temp_servicedependency->host_name = (char *)strdup(temp_masterservice->name1);
-
-					my_free(temp_servicedependency->service_description);
-					temp_servicedependency->service_description = (char *)strdup(temp_masterservice->name2);
-
-					/* clear the master servicegroup */
-					temp_servicedependency->have_servicegroup_name = FALSE;
-					my_free(temp_servicedependency->servicegroup_name);
-
-					if(temp_servicedependency->host_name == NULL || temp_servicedependency->service_description == NULL) {
-						xodtemplate_free_memberlist(&master_servicelist);
-						return ERROR;
-						}
-
-					first_item = FALSE;
-					continue;
-					}
-
-				/* duplicate service dependency definition */
-				result = xodtemplate_duplicate_servicedependency(temp_servicedependency, temp_masterservice->name1, temp_masterservice->name2, NULL, NULL, temp_servicedependency->dependent_host_name, temp_servicedependency->dependent_service_description, temp_servicedependency->dependent_hostgroup_name, temp_servicedependency->dependent_servicegroup_name);
-
-				/* exit on error */
-				if(result == ERROR) {
-					xodtemplate_free_memberlist(&master_servicelist);
-					return ERROR;
-					}
-				}
-
-			/* free memory we used for service list */
-			xodtemplate_free_memberlist(&master_servicelist);
-			}
-		}
-
-
-	/****** PROCESS SERVICE DEPENDENCY MASTER HOSTS/HOSTGROUPS/SERVICES *****/
-	for(temp_servicedependency = xodtemplate_servicedependency_list; temp_servicedependency != NULL; temp_servicedependency = temp_servicedependency->next) {
-
-		/* skip templates */
-		if(temp_servicedependency->register_object == 0)
-			continue;
-
-		/* expand master hosts/hostgroups into a list of host names */
-		if(temp_servicedependency->host_name != NULL || temp_servicedependency->hostgroup_name != NULL) {
-
-#ifdef DEBUG_SERVICE_DEPENDENCIES
-			printf("1a) H: %s  HG: %s  SD: %s\n", temp_servicedependency->host_name, temp_servicedependency->hostgroup_name, temp_servicedependency->service_description);
-#endif
-
-			master_hostlist = xodtemplate_expand_hostgroups_and_hosts(temp_servicedependency->hostgroup_name, temp_servicedependency->host_name, temp_servicedependency->_config_file, temp_servicedependency->_start_line);
-			if(master_hostlist == NULL && allow_empty_hostgroup_assignment==0) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand master hostgroups and/or hosts specified in service dependency (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_servicedependency->_config_file), temp_servicedependency->_start_line);
-				return ERROR;
-				}
-
-			/* save service descriptions for later */
-			if(temp_servicedependency->service_description)
-				service_descriptions = (char *)strdup(temp_servicedependency->service_description);
-
-			/* for each host, expand master services */
-			first_item = TRUE;
-			for(temp_masterhost = master_hostlist; temp_masterhost != NULL; temp_masterhost = temp_masterhost->next) {
-
-				master_servicelist = xodtemplate_expand_servicegroups_and_services(NULL, temp_masterhost->name1, service_descriptions, temp_servicedependency->_config_file, temp_servicedependency->_start_line);
-				if(master_servicelist == NULL) {
-					logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand master services specified in service dependency (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_servicedependency->_config_file), temp_servicedependency->_start_line);
-					return ERROR;
-					}
-
-				/* duplicate service dependency entries */
-				for(temp_masterservice = master_servicelist; temp_masterservice != NULL; temp_masterservice = temp_masterservice->next) {
-
-					/* just in case */
-					if(temp_masterservice->name1 == NULL || temp_masterservice->name2 == NULL)
-						continue;
-
-					/* if this is the first duplication, use the existing entry */
-					if(first_item == TRUE) {
-
-						my_free(temp_servicedependency->host_name);
-						temp_servicedependency->host_name = (char *)strdup(temp_masterhost->name1);
-
-						my_free(temp_servicedependency->service_description);
-						temp_servicedependency->service_description = (char *)strdup(temp_masterservice->name2);
-
-						if(temp_servicedependency->host_name == NULL || temp_servicedependency->service_description == NULL) {
-							xodtemplate_free_memberlist(&master_hostlist);
-							xodtemplate_free_memberlist(&master_servicelist);
-							return ERROR;
-							}
-
-						first_item = FALSE;
-						continue;
-						}
-
-					/* duplicate service dependency definition */
-					result = xodtemplate_duplicate_servicedependency(temp_servicedependency, temp_masterhost->name1, temp_masterservice->name2, NULL, NULL, temp_servicedependency->dependent_host_name, temp_servicedependency->dependent_service_description, temp_servicedependency->dependent_hostgroup_name, temp_servicedependency->dependent_servicegroup_name);
-
-					/* exit on error */
-					if(result == ERROR) {
-						xodtemplate_free_memberlist(&master_hostlist);
-						xodtemplate_free_memberlist(&master_servicelist);
-						return ERROR;
-						}
-					}
-
-				/* free memory we used for service list */
-				xodtemplate_free_memberlist(&master_servicelist);
-				}
-
-			/* free service descriptions */
-			my_free(service_descriptions);
-
-			/* free memory we used for host list */
-			xodtemplate_free_memberlist(&master_hostlist);
-			}
-		}
-
-
-#ifdef DEBUG_SERVICE_DEPENDENCIES
-	for(temp_servicedependency = xodtemplate_servicedependency_list; temp_servicedependency != NULL; temp_servicedependency = temp_servicedependency->next) {
-		printf("1**) H: %s  HG: %s  SG: %s  SD: %s  DH: %s  DHG: %s  DSG: %s  DSD: %s\n", temp_servicedependency->host_name, temp_servicedependency->hostgroup_name, temp_servicedependency->servicegroup_name, temp_servicedependency->service_description, temp_servicedependency->dependent_host_name, temp_servicedependency->dependent_hostgroup_name, temp_servicedependency->dependent_servicegroup_name, temp_servicedependency->dependent_service_description);
-		}
-	printf("\n");
-#endif
-
-
-	/****** PROCESS SERVICE DEPENDENCIES WITH DEPENDENT SERVICEGROUPS *****/
-	for(temp_servicedependency = xodtemplate_servicedependency_list; temp_servicedependency != NULL; temp_servicedependency = temp_servicedependency->next) {
-
-		/* skip templates */
-		if(temp_servicedependency->register_object == 0)
-			continue;
-
-		/* expand dependent servicegroups into a list of services */
-		if(temp_servicedependency->dependent_servicegroup_name) {
-
-			dependent_servicelist = xodtemplate_expand_servicegroups_and_services(temp_servicedependency->dependent_servicegroup_name, NULL, NULL, temp_servicedependency->_config_file, temp_servicedependency->_start_line);
-			if(dependent_servicelist == NULL) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand dependent servicegroups specified in service dependency (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_servicedependency->_config_file), temp_servicedependency->_start_line);
-				return ERROR;
-				}
-
-			/* if dependency also has dependent host, hostgroup, and/or service, we must split that off to another definition */
-			if(temp_servicedependency->dependent_host_name != NULL || temp_servicedependency->dependent_hostgroup_name != NULL || temp_servicedependency->dependent_service_description != NULL) {
-
-				/* duplicate everything except dependent servicegroup */
-				xodtemplate_duplicate_servicedependency(temp_servicedependency, temp_servicedependency->host_name, temp_servicedependency->service_description, temp_servicedependency->hostgroup_name, temp_servicedependency->servicegroup_name, temp_servicedependency->dependent_host_name, temp_servicedependency->dependent_service_description, temp_servicedependency->dependent_hostgroup_name, NULL);
-
-				/* clear values in this definition */
-				temp_servicedependency->have_dependent_host_name = FALSE;
-				temp_servicedependency->have_dependent_service_description = FALSE;
-				temp_servicedependency->have_dependent_hostgroup_name = FALSE;
-				my_free(temp_servicedependency->dependent_host_name);
-				my_free(temp_servicedependency->dependent_service_description);
-				my_free(temp_servicedependency->dependent_hostgroup_name);
-				}
-
-			/* Detected same host servicegroups dependencies */
-			same_host_servicedependency = FALSE;
-			if(temp_servicedependency->host_name == NULL && temp_servicedependency->hostgroup_name == NULL)
-				same_host_servicedependency = TRUE;
-
-			/* duplicate service dependency entries */
-			first_item = TRUE;
-			for(temp_dependentservice = dependent_servicelist; temp_dependentservice != NULL; temp_dependentservice = temp_dependentservice->next) {
-
-				/* just in case */
-				if(temp_dependentservice->name1 == NULL || temp_dependentservice->name2 == NULL)
-					continue;
-
-				/* if this is the first duplication, use the existing entry */
-				if(first_item == TRUE) {
-
-					my_free(temp_servicedependency->dependent_host_name);
-					temp_servicedependency->dependent_host_name = (char *)strdup(temp_dependentservice->name1);
-
-					my_free(temp_servicedependency->dependent_service_description);
-					temp_servicedependency->dependent_service_description = (char *)strdup(temp_dependentservice->name2);
-
-					/* Same host servicegroups dependencies: Use dependentservice host_name for master host_name */
-					if(same_host_servicedependency == TRUE)
-						temp_servicedependency->host_name = (char*)strdup(temp_dependentservice->name1);
-
-					/* clear the dependent servicegroup */
-					temp_servicedependency->have_dependent_servicegroup_name = FALSE;
-					my_free(temp_servicedependency->dependent_servicegroup_name);
-
-					if(temp_servicedependency->dependent_host_name == NULL || temp_servicedependency->dependent_service_description == NULL) {
-						xodtemplate_free_memberlist(&dependent_servicelist);
-						return ERROR;
-						}
-
-					first_item = FALSE;
-					continue;
-					}
-
-				/* duplicate service dependency definition */
-				/* Same host servicegroups dependencies: Use dependentservice host_name for master host_name instead of undefined (not yet) master host_name */
-				if(same_host_servicedependency == TRUE)
-					result = xodtemplate_duplicate_servicedependency(temp_servicedependency, temp_dependentservice->name1, temp_servicedependency->service_description, NULL, NULL, temp_dependentservice->name1, temp_dependentservice->name2, NULL, NULL);
-				else
-					result = xodtemplate_duplicate_servicedependency(temp_servicedependency, temp_servicedependency->host_name, temp_servicedependency->service_description, NULL, NULL, temp_dependentservice->name1, temp_dependentservice->name2, NULL, NULL);
-
-				/* exit on error */
-				if(result == ERROR) {
-					xodtemplate_free_memberlist(&dependent_servicelist);
-					return ERROR;
-					}
-				}
-
-			/* free memory we used for service list */
-			xodtemplate_free_memberlist(&dependent_servicelist);
-			}
-		}
-
-
-#ifdef DEBUG_SERVICE_DEPENDENCIES
-	printf("\n");
-	for(temp_servicedependency = xodtemplate_servicedependency_list; temp_servicedependency != NULL; temp_servicedependency = temp_servicedependency->next) {
-		printf("2**) H: %s  HG: %s  SG: %s  SD: %s  DH: %s  DHG: %s  DSG: %s  DSD: %s\n", temp_servicedependency->host_name, temp_servicedependency->hostgroup_name, temp_servicedependency->servicegroup_name, temp_servicedependency->service_description, temp_servicedependency->dependent_host_name, temp_servicedependency->dependent_hostgroup_name, temp_servicedependency->dependent_servicegroup_name, temp_servicedependency->dependent_service_description);
-		}
-#endif
-
-
-	/****** PROCESS SERVICE DEPENDENCY DEPENDENT HOSTS/HOSTGROUPS/SERVICES *****/
-	for(temp_servicedependency = xodtemplate_servicedependency_list; temp_servicedependency != NULL; temp_servicedependency = temp_servicedependency->next) {
-
-		/* skip templates */
-		if(temp_servicedependency->register_object == 0)
-			continue;
-
-		/* ADDED 02/04/2007 - special case for "same host" dependencies */
-		if(temp_servicedependency->dependent_host_name == NULL && temp_servicedependency->dependent_hostgroup_name == NULL) {
-			if(temp_servicedependency->host_name)
-				temp_servicedependency->dependent_host_name = (char *)strdup(temp_servicedependency->host_name);
-			}
-
-		/* expand dependent hosts/hostgroups into a list of host names */
-		if(temp_servicedependency->dependent_host_name != NULL || temp_servicedependency->dependent_hostgroup_name != NULL) {
-
-			dependent_hostlist = xodtemplate_expand_hostgroups_and_hosts(temp_servicedependency->dependent_hostgroup_name, temp_servicedependency->dependent_host_name, temp_servicedependency->_config_file, temp_servicedependency->_start_line);
-			if(dependent_hostlist == NULL && allow_empty_hostgroup_assignment==0) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand dependent hostgroups and/or hosts specified in service dependency (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_servicedependency->_config_file), temp_servicedependency->_start_line);
-				return ERROR;
-				}
-
-			/* save service descriptions for later */
-			if(temp_servicedependency->dependent_service_description)
-				service_descriptions = (char *)strdup(temp_servicedependency->dependent_service_description);
-
-			/* for each host, expand dependent services */
-			first_item = TRUE;
-			for(temp_dependenthost = dependent_hostlist; temp_dependenthost != NULL; temp_dependenthost = temp_dependenthost->next) {
-
-				dependent_servicelist = xodtemplate_expand_servicegroups_and_services(NULL, temp_dependenthost->name1, service_descriptions, temp_servicedependency->_config_file, temp_servicedependency->_start_line);
-				if(dependent_servicelist == NULL) {
-					logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand dependent services specified in service dependency (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_servicedependency->_config_file), temp_servicedependency->_start_line);
-					return ERROR;
-					}
-
-				/* duplicate service dependency entries */
-				for(temp_dependentservice = dependent_servicelist; temp_dependentservice != NULL; temp_dependentservice = temp_dependentservice->next) {
-
-					/* just in case */
-					if(temp_dependentservice->name1 == NULL || temp_dependentservice->name2 == NULL)
-						continue;
-
-					/* if this is the first duplication, use the existing entry */
-					if(first_item == TRUE) {
-
-						my_free(temp_servicedependency->dependent_host_name);
-						temp_servicedependency->dependent_host_name = (char *)strdup(temp_dependentservice->name1);
-
-						my_free(temp_servicedependency->dependent_service_description);
-						temp_servicedependency->dependent_service_description = (char *)strdup(temp_dependentservice->name2);
-
-						if(temp_servicedependency->dependent_host_name == NULL || temp_servicedependency->dependent_service_description == NULL) {
-							xodtemplate_free_memberlist(&dependent_servicelist);
-							xodtemplate_free_memberlist(&dependent_hostlist);
-							return ERROR;
-							}
-
-						first_item = FALSE;
-						continue;
-						}
-
-					/* duplicate service dependency definition */
-					result = xodtemplate_duplicate_servicedependency(temp_servicedependency, temp_servicedependency->host_name, temp_servicedependency->service_description, NULL, NULL, temp_dependentservice->name1, temp_dependentservice->name2, NULL, NULL);
-
-					/* exit on error */
-					if(result == ERROR) {
-						xodtemplate_free_memberlist(&dependent_servicelist);
-						xodtemplate_free_memberlist(&dependent_hostlist);
-						return ERROR;
-						}
-					}
-
-				/* free memory we used for service list */
-				xodtemplate_free_memberlist(&dependent_servicelist);
-				}
-
-			/* free service descriptions */
-			my_free(service_descriptions);
-
-			/* free memory we used for host list */
-			xodtemplate_free_memberlist(&dependent_hostlist);
-			}
-		}
-
-
-#ifdef DEBUG_SERVICE_DEPENDENCIES
-	printf("\n");
-	for(temp_servicedependency = xodtemplate_servicedependency_list; temp_servicedependency != NULL; temp_servicedependency = temp_servicedependency->next) {
-		printf("3**)  MAS: %s/%s  DEP: %s/%s\n", temp_servicedependency->host_name, temp_servicedependency->service_description, temp_servicedependency->dependent_host_name, temp_servicedependency->dependent_service_description);
-		}
-#endif
+	timing_point("Created %u serviceescalations (dupes possible)\n", xodcount.serviceescalations);
 
 
 	/****** DUPLICATE HOSTEXTINFO DEFINITIONS WITH ONE OR MORE HOSTGROUP AND/OR HOST NAMES ******/
-	for(temp_hostextinfo = xodtemplate_hostextinfo_list; temp_hostextinfo != NULL; temp_hostextinfo = temp_hostextinfo->next) {
+	for(temp_hostextinfo = xodtemplate_hostextinfo_list; temp_hostextinfo != NULL; temp_hostextinfo = next_he) {
+		next_he = temp_hostextinfo->next;
 
 		/* skip definitions without enough data */
 		if(temp_hostextinfo->hostgroup_name == NULL && temp_hostextinfo->host_name == NULL)
@@ -4918,180 +4384,68 @@ int xodtemplate_duplicate_objects(void) {
 			return ERROR;
 			}
 
-		/* add a copy of the definition for every host in the hostgroup/host name list */
-		first_item = TRUE;
-		for(temp_masterhost = master_hostlist; temp_masterhost != NULL; temp_masterhost = temp_masterhost->next) {
+		/* merge this extinfo with every host in the hostgroup/host name list */
+		for(list = master_hostlist; list; list = next) {
+			xodtemplate_host *h = (xodtemplate_host *)list->object_ptr;
+			next = list->next;
+			free(list);
 
-			/* if this is the first duplication, use the existing entry */
-			if(first_item == TRUE) {
-
-				my_free(temp_hostextinfo->host_name);
-				temp_hostextinfo->host_name = (char *)strdup(temp_masterhost->name1);
-				if(temp_hostextinfo->host_name == NULL) {
-					xodtemplate_free_memberlist(&master_hostlist);
-					return ERROR;
-					}
-				first_item = FALSE;
-				continue;
-				}
-
-			/* duplicate hostextinfo definition */
-			result = xodtemplate_duplicate_hostextinfo(temp_hostextinfo, temp_masterhost->name1);
-
-			/* exit on error */
-			if(result == ERROR) {
-				xodtemplate_free_memberlist(&master_hostlist);
-				return ERROR;
-				}
+			/* merge it. we ignore errors here */
+			xodtemplate_merge_host_extinfo_object(h, temp_hostextinfo);
 			}
-
-		/* free memory we used for host list */
-		xodtemplate_free_memberlist(&master_hostlist);
+		/* might as well kill it off early */
+		my_free(temp_hostextinfo->template);
+		my_free(temp_hostextinfo->name);
+		my_free(temp_hostextinfo->notes);
+		my_free(temp_hostextinfo->host_name);
+		my_free(temp_hostextinfo->hostgroup_name);
+		my_free(temp_hostextinfo->notes_url);
+		my_free(temp_hostextinfo->action_url);
+		my_free(temp_hostextinfo->icon_image);
+		my_free(temp_hostextinfo->vrml_image);
+		my_free(temp_hostextinfo->statusmap_image);
+		my_free(temp_hostextinfo);
 		}
+	timing_point("Done merging hostextinfo\n");
 
 
 	/****** DUPLICATE SERVICEEXTINFO DEFINITIONS WITH ONE OR MORE HOSTGROUP AND/OR HOST NAMES ******/
-	for(temp_serviceextinfo = xodtemplate_serviceextinfo_list; temp_serviceextinfo != NULL; temp_serviceextinfo = temp_serviceextinfo->next) {
+	for(temp_serviceextinfo = xodtemplate_serviceextinfo_list; temp_serviceextinfo != NULL; temp_serviceextinfo = next_se) {
+		next_se = temp_serviceextinfo->next;
 
 		/* skip definitions without enough data */
 		if(temp_serviceextinfo->hostgroup_name == NULL && temp_serviceextinfo->host_name == NULL)
 			continue;
 
 		/* get list of hosts */
-		master_hostlist = xodtemplate_expand_hostgroups_and_hosts(temp_serviceextinfo->hostgroup_name, temp_serviceextinfo->host_name, temp_serviceextinfo->_config_file, temp_serviceextinfo->_start_line);
-		if(master_hostlist == NULL) {
+		if(xodtemplate_create_service_list(&master_servicelist, service_map, temp_serviceextinfo->hostgroup_name, temp_serviceextinfo->host_name, NULL, temp_serviceextinfo->service_description, temp_serviceextinfo->_config_file, temp_serviceextinfo->_start_line) != OK) {
 			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand hostgroups and/or hosts specified in extended service info (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_serviceextinfo->_config_file), temp_serviceextinfo->_start_line);
 			return ERROR;
 			}
 
-		/* add a copy of the definition for every host in the hostgroup/host name list */
-		first_item = TRUE;
-		for(temp_masterhost = master_hostlist; temp_masterhost != NULL; temp_masterhost = temp_masterhost->next) {
-
-			/* existing definition gets first host name */
-			if(first_item == TRUE) {
-				my_free(temp_serviceextinfo->host_name);
-				temp_serviceextinfo->host_name = (char *)strdup(temp_masterhost->name1);
-				if(temp_serviceextinfo->host_name == NULL) {
-					xodtemplate_free_memberlist(&master_hostlist);
-					return ERROR;
-					}
-				first_item = FALSE;
+		/* merge this serviceextinfo with every service in the list */
+		for(list = master_servicelist; list; list = next) {
+			xodtemplate_service *s = (xodtemplate_service *)list->object_ptr;
+			next = list->next;
+			free(list);
+			if(bitmap_isset(service_map, s->id))
 				continue;
-				}
-
-			/* duplicate serviceextinfo definition */
-			result = xodtemplate_duplicate_serviceextinfo(temp_serviceextinfo, temp_masterhost->name1);
-
-			/* exit on error */
-			if(result == ERROR) {
-				xodtemplate_free_memberlist(&master_hostlist);
-				return ERROR;
-				}
+			xodtemplate_merge_service_extinfo_object(s, temp_serviceextinfo);
 			}
-
-		/* free memory we used for host list */
-		xodtemplate_free_memberlist(&master_hostlist);
+		/* now we're done, so we might as well kill it off */
+		my_free(temp_serviceextinfo->template);
+		my_free(temp_serviceextinfo->name);
+		my_free(temp_serviceextinfo->host_name);
+		my_free(temp_serviceextinfo->hostgroup_name);
+		my_free(temp_serviceextinfo->service_description);
+		my_free(temp_serviceextinfo->notes);
+		my_free(temp_serviceextinfo->notes_url);
+		my_free(temp_serviceextinfo->action_url);
+		my_free(temp_serviceextinfo->icon_image);
+		my_free(temp_serviceextinfo->icon_image_alt);
+		my_free(temp_serviceextinfo);
 		}
-
-
-	/***************************************/
-	/* SKIPLIST STUFF FOR FAST SORT/SEARCH */
-	/***************************************/
-
-	/* host escalations */
-	for(temp_hostescalation = xodtemplate_hostescalation_list; temp_hostescalation != NULL; temp_hostescalation = temp_hostescalation->next) {
-
-		/* skip escalations that shouldn't be registered */
-		if(temp_hostescalation->register_object == FALSE)
-			continue;
-
-		/* skip escalation definitions without enough data */
-		if(temp_hostescalation->host_name == NULL)
-			continue;
-
-		result = skiplist_insert(xobject_skiplists[HOSTESCALATION_SKIPLIST], (void *)temp_hostescalation);
-		switch(result) {
-			case SKIPLIST_OK:
-				result = OK;
-				break;
-			default:
-				result = ERROR;
-				break;
-			}
-		}
-
-	/* service escalations */
-	for(temp_serviceescalation = xodtemplate_serviceescalation_list; temp_serviceescalation != NULL; temp_serviceescalation = temp_serviceescalation->next) {
-
-		/* skip escalations that shouldn't be registered */
-		if(temp_serviceescalation->register_object == FALSE)
-			continue;
-
-		/* skip escalation definitions without enough data */
-		if(temp_serviceescalation->host_name == NULL || temp_serviceescalation->service_description == NULL)
-			continue;
-
-		result = skiplist_insert(xobject_skiplists[SERVICEESCALATION_SKIPLIST], (void *)temp_serviceescalation);
-		switch(result) {
-			case SKIPLIST_OK:
-				result = OK;
-				break;
-			default:
-				result = ERROR;
-				break;
-			}
-		}
-
-	/* host dependencies */
-	for(temp_hostdependency = xodtemplate_hostdependency_list; temp_hostdependency != NULL; temp_hostdependency = temp_hostdependency->next) {
-
-		/* skip dependencys that shouldn't be registered */
-		if(temp_hostdependency->register_object == FALSE)
-			continue;
-
-		/* skip dependency definitions without enough data */
-		if(temp_hostdependency->host_name == NULL)
-			continue;
-
-		result = skiplist_insert(xobject_skiplists[HOSTDEPENDENCY_SKIPLIST], (void *)temp_hostdependency);
-		switch(result) {
-			case SKIPLIST_OK:
-				result = OK;
-				break;
-			default:
-				result = ERROR;
-				break;
-			}
-		}
-
-	/* service dependencies */
-	for(temp_servicedependency = xodtemplate_servicedependency_list; temp_servicedependency != NULL; temp_servicedependency = temp_servicedependency->next) {
-
-		/* skip dependencys that shouldn't be registered */
-		if(temp_servicedependency->register_object == FALSE)
-			continue;
-
-		/* skip dependency definitions without enough data */
-		if(temp_servicedependency->dependent_host_name == NULL || temp_servicedependency->dependent_service_description == NULL)
-			continue;
-
-		result = skiplist_insert(xobject_skiplists[SERVICEDEPENDENCY_SKIPLIST], (void *)temp_servicedependency);
-		switch(result) {
-			case SKIPLIST_OK:
-				result = OK;
-				break;
-			default:
-				result = ERROR;
-				break;
-			}
-		}
-
-	/* host extinfo */
-	/* NOT NEEDED */
-
-	/* service extinfo */
-	/* NOT NEEDED */
+	timing_point("Done merging serviceextinfo\n");
 
 	return OK;
 	}
@@ -5099,9 +4453,8 @@ int xodtemplate_duplicate_objects(void) {
 
 
 /* duplicates a service definition (with a new host name) */
-int xodtemplate_duplicate_service(xodtemplate_service *temp_service, char *host_name) {
+int xodtemplate_duplicate_service(xodtemplate_service *temp_service, char *host_name, int from_hg) {
 	xodtemplate_service *new_service = NULL;
-	xodtemplate_customvariablesmember *temp_customvariablesmember = NULL;
 	int error = FALSE;
 
 	/* allocate zero'd out memory for a new service definition */
@@ -5109,159 +4462,30 @@ int xodtemplate_duplicate_service(xodtemplate_service *temp_service, char *host_
 	if(new_service == NULL)
 		return ERROR;
 
-	/* standard items */
-	new_service->has_been_resolved = temp_service->has_been_resolved;
-	new_service->register_object = temp_service->register_object;
-	new_service->_config_file = temp_service->_config_file;
-	new_service->_start_line = temp_service->_start_line;
-	/*tag service apply on host group*/
-	xodtemplate_set_service_is_from_hostgroup(new_service);
+	/* copy the entire thing and override what we have to */
+	memcpy(new_service, temp_service, sizeof(*new_service));
+	new_service->is_copy = TRUE;
+	new_service->id = xodcount.services++;
+	new_service->host_name = host_name;
 
-	/* string defaults */
-	new_service->have_hostgroup_name = temp_service->have_hostgroup_name;
-	new_service->have_host_name = temp_service->have_host_name;
-	new_service->have_service_description = temp_service->have_service_description;
-	new_service->have_display_name = temp_service->have_display_name;
-	new_service->have_service_groups = temp_service->have_service_groups;
-	new_service->have_check_command = temp_service->have_check_command;
-	new_service->have_check_period = temp_service->have_check_period;
-	new_service->have_event_handler = temp_service->have_event_handler;
-	new_service->have_notification_period = temp_service->have_notification_period;
-	new_service->have_contact_groups = temp_service->have_contact_groups;
-	new_service->have_contacts = temp_service->have_contacts;
-	new_service->have_failure_prediction_options = temp_service->have_failure_prediction_options;
-	new_service->have_notes = temp_service->have_notes;
-	new_service->have_notes_url = temp_service->have_notes_url;
-	new_service->have_action_url = temp_service->have_action_url;
-	new_service->have_icon_image = temp_service->have_icon_image;
-	new_service->have_icon_image_alt = temp_service->have_icon_image_alt;
+	/* tag service apply on host group */
+	new_service->is_from_hostgroup = from_hg;
 
 	/* allocate memory for and copy string members of service definition (host name provided, DO NOT duplicate hostgroup member!)*/
-	if(temp_service->host_name != NULL && (new_service->host_name = (char *)strdup(host_name)) == NULL)
-		error = TRUE;
-	if(temp_service->template != NULL && (new_service->template = (char *)strdup(temp_service->template)) == NULL)
-		error = TRUE;
-	if(temp_service->name != NULL && (new_service->name = (char *)strdup(temp_service->name)) == NULL)
-		error = TRUE;
-	if(temp_service->service_description != NULL && (new_service->service_description = (char *)strdup(temp_service->service_description)) == NULL)
-		error = TRUE;
-	if(temp_service->display_name != NULL && (new_service->display_name = (char *)strdup(temp_service->display_name)) == NULL)
-		error = TRUE;
 	if(temp_service->service_groups != NULL && (new_service->service_groups = (char *)strdup(temp_service->service_groups)) == NULL)
-		error = TRUE;
-	if(temp_service->check_command != NULL && (new_service->check_command = (char *)strdup(temp_service->check_command)) == NULL)
-		error = TRUE;
-	if(temp_service->check_period != NULL && (new_service->check_period = (char *)strdup(temp_service->check_period)) == NULL)
-		error = TRUE;
-	if(temp_service->event_handler != NULL && (new_service->event_handler = (char *)strdup(temp_service->event_handler)) == NULL)
-		error = TRUE;
-	if(temp_service->notification_period != NULL && (new_service->notification_period = (char *)strdup(temp_service->notification_period)) == NULL)
 		error = TRUE;
 	if(temp_service->contact_groups != NULL && (new_service->contact_groups = (char *)strdup(temp_service->contact_groups)) == NULL)
 		error = TRUE;
 	if(temp_service->contacts != NULL && (new_service->contacts = (char *)strdup(temp_service->contacts)) == NULL)
 		error = TRUE;
-	if(temp_service->failure_prediction_options != NULL && (new_service->failure_prediction_options = (char *)strdup(temp_service->failure_prediction_options)) == NULL)
-		error = TRUE;
-	if(temp_service->notes != NULL && (new_service->notes = (char *)strdup(temp_service->notes)) == NULL)
-		error = TRUE;
-	if(temp_service->notes_url != NULL && (new_service->notes_url = (char *)strdup(temp_service->notes_url)) == NULL)
-		error = TRUE;
-	if(temp_service->action_url != NULL && (new_service->action_url = (char *)strdup(temp_service->action_url)) == NULL)
-		error = TRUE;
-	if(temp_service->icon_image != NULL && (new_service->icon_image = (char *)strdup(temp_service->icon_image)) == NULL)
-		error = TRUE;
-	if(temp_service->icon_image_alt != NULL && (new_service->icon_image_alt = (char *)strdup(temp_service->icon_image_alt)) == NULL)
-		error = TRUE;
 
 	if(error == TRUE) {
-		my_free(new_service->host_name);
-		my_free(new_service->template);
-		my_free(new_service->name);
-		my_free(new_service->service_description);
-		my_free(new_service->display_name);
 		my_free(new_service->service_groups);
-		my_free(new_service->check_command);
-		my_free(new_service->check_period);
-		my_free(new_service->event_handler);
-		my_free(new_service->notification_period);
 		my_free(new_service->contact_groups);
 		my_free(new_service->contacts);
-		my_free(new_service->failure_prediction_options);
-		my_free(new_service->notes);
-		my_free(new_service->notes_url);
-		my_free(new_service->action_url);
-		my_free(new_service->icon_image);
-		my_free(new_service->icon_image_alt);
 		my_free(new_service);
 		return ERROR;
 		}
-
-	/* duplicate custom variables */
-	for(temp_customvariablesmember = temp_service->custom_variables; temp_customvariablesmember != NULL; temp_customvariablesmember = temp_customvariablesmember->next)
-		xodtemplate_add_custom_variable_to_service(new_service, temp_customvariablesmember->variable_name, temp_customvariablesmember->variable_value);
-
-	/* duplicate non-string members */
-	new_service->initial_state = temp_service->initial_state;
-	new_service->max_check_attempts = temp_service->max_check_attempts;
-	new_service->have_max_check_attempts = temp_service->have_max_check_attempts;
-	new_service->check_interval = temp_service->check_interval;
-	new_service->have_check_interval = temp_service->have_check_interval;
-	new_service->retry_interval = temp_service->retry_interval;
-	new_service->have_retry_interval = temp_service->have_retry_interval;
-	new_service->active_checks_enabled = temp_service->active_checks_enabled;
-	new_service->have_active_checks_enabled = temp_service->have_active_checks_enabled;
-	new_service->passive_checks_enabled = temp_service->passive_checks_enabled;
-	new_service->have_passive_checks_enabled = temp_service->have_passive_checks_enabled;
-	new_service->parallelize_check = temp_service->parallelize_check;
-	new_service->have_parallelize_check = temp_service->have_parallelize_check;
-	new_service->is_volatile = temp_service->is_volatile;
-	new_service->have_is_volatile = temp_service->have_is_volatile;
-	new_service->obsess_over_service = temp_service->obsess_over_service;
-	new_service->have_obsess_over_service = temp_service->have_obsess_over_service;
-	new_service->event_handler_enabled = temp_service->event_handler_enabled;
-	new_service->have_event_handler_enabled = temp_service->have_event_handler_enabled;
-	new_service->check_freshness = temp_service->check_freshness;
-	new_service->have_check_freshness = temp_service->have_check_freshness;
-	new_service->freshness_threshold = temp_service->freshness_threshold;
-	new_service->have_freshness_threshold = temp_service->have_freshness_threshold;
-	new_service->flap_detection_enabled = temp_service->flap_detection_enabled;
-	new_service->have_flap_detection_enabled = temp_service->have_flap_detection_enabled;
-	new_service->low_flap_threshold = temp_service->low_flap_threshold;
-	new_service->have_low_flap_threshold = temp_service->have_low_flap_threshold;
-	new_service->high_flap_threshold = temp_service->high_flap_threshold;
-	new_service->have_high_flap_threshold = temp_service->have_high_flap_threshold;
-	new_service->flap_detection_on_ok = temp_service->flap_detection_on_ok;
-	new_service->flap_detection_on_warning = temp_service->flap_detection_on_warning;
-	new_service->flap_detection_on_unknown = temp_service->flap_detection_on_unknown;
-	new_service->flap_detection_on_critical = temp_service->flap_detection_on_critical;
-	new_service->have_flap_detection_options = temp_service->have_flap_detection_options;
-	new_service->notify_on_unknown = temp_service->notify_on_unknown;
-	new_service->notify_on_warning = temp_service->notify_on_warning;
-	new_service->notify_on_critical = temp_service->notify_on_critical;
-	new_service->notify_on_recovery = temp_service->notify_on_recovery;
-	new_service->notify_on_flapping = temp_service->notify_on_flapping;
-	new_service->notify_on_downtime = temp_service->notify_on_downtime;
-	new_service->have_notification_options = temp_service->have_notification_options;
-	new_service->notifications_enabled = temp_service->notifications_enabled;
-	new_service->have_notifications_enabled = temp_service->have_notifications_enabled;
-	new_service->notification_interval = temp_service->notification_interval;
-	new_service->have_notification_interval = temp_service->have_notification_interval;
-	new_service->first_notification_delay = temp_service->first_notification_delay;
-	new_service->have_first_notification_delay = temp_service->have_first_notification_delay;
-	new_service->stalk_on_ok = temp_service->stalk_on_ok;
-	new_service->stalk_on_unknown = temp_service->stalk_on_unknown;
-	new_service->stalk_on_warning = temp_service->stalk_on_warning;
-	new_service->stalk_on_critical = temp_service->stalk_on_critical;
-	new_service->have_stalking_options = temp_service->have_stalking_options;
-	new_service->process_perf_data = temp_service->process_perf_data;
-	new_service->have_process_perf_data = temp_service->have_process_perf_data;
-	new_service->failure_prediction_enabled = temp_service->failure_prediction_enabled;
-	new_service->have_failure_prediction_enabled = temp_service->have_failure_prediction_enabled;
-	new_service->retain_status_information = temp_service->retain_status_information;
-	new_service->have_retain_status_information = temp_service->have_retain_status_information;
-	new_service->retain_nonstatus_information = temp_service->retain_nonstatus_information;
-	new_service->have_retain_nonstatus_information = temp_service->have_retain_nonstatus_information;
 
 	/* add new service to head of list in memory */
 	new_service->next = xodtemplate_service_list;
@@ -5284,56 +4508,22 @@ int xodtemplate_duplicate_hostescalation(xodtemplate_hostescalation *temp_hostes
 	if(new_hostescalation == NULL)
 		return ERROR;
 
-	/* standard items */
-	new_hostescalation->has_been_resolved = temp_hostescalation->has_been_resolved;
-	new_hostescalation->register_object = temp_hostescalation->register_object;
-	new_hostescalation->_config_file = temp_hostescalation->_config_file;
-	new_hostescalation->_start_line = temp_hostescalation->_start_line;
+	memcpy(new_hostescalation, temp_hostescalation, sizeof(*new_hostescalation));
+	new_hostescalation->is_copy = TRUE;
 
-	/* string defaults */
-	new_hostescalation->have_hostgroup_name = temp_hostescalation->have_hostgroup_name;
-	new_hostescalation->have_host_name = (host_name) ? TRUE : FALSE;
-	new_hostescalation->have_contact_groups = temp_hostescalation->have_contact_groups;
-	new_hostescalation->have_contacts = temp_hostescalation->have_contacts;
-	new_hostescalation->have_escalation_period = temp_hostescalation->have_escalation_period;
+	new_hostescalation->host_name = host_name;
 
-	/* allocate memory for and copy string members of hostescalation definition */
-	if(host_name != NULL && (new_hostescalation->host_name = (char *)strdup(host_name)) == NULL)
-		error = TRUE;
-
-	if(temp_hostescalation->template != NULL && (new_hostescalation->template = (char *)strdup(temp_hostescalation->template)) == NULL)
-		error = TRUE;
-	if(temp_hostescalation->name != NULL && (new_hostescalation->name = (char *)strdup(temp_hostescalation->name)) == NULL)
-		error = TRUE;
 	if(temp_hostescalation->contact_groups != NULL && (new_hostescalation->contact_groups = (char *)strdup(temp_hostescalation->contact_groups)) == NULL)
 		error = TRUE;
 	if(temp_hostescalation->contacts != NULL && (new_hostescalation->contacts = (char *)strdup(temp_hostescalation->contacts)) == NULL)
 		error = TRUE;
-	if(temp_hostescalation->escalation_period != NULL && (new_hostescalation->escalation_period = (char *)strdup(temp_hostescalation->escalation_period)) == NULL)
-		error = TRUE;
 
 	if(error == TRUE) {
-		my_free(new_hostescalation->escalation_period);
 		my_free(new_hostescalation->contact_groups);
 		my_free(new_hostescalation->contacts);
-		my_free(new_hostescalation->host_name);
-		my_free(new_hostescalation->template);
-		my_free(new_hostescalation->name);
 		my_free(new_hostescalation);
 		return ERROR;
 		}
-
-	/* duplicate non-string members */
-	new_hostescalation->first_notification = temp_hostescalation->first_notification;
-	new_hostescalation->last_notification = temp_hostescalation->last_notification;
-	new_hostescalation->have_first_notification = temp_hostescalation->have_first_notification;
-	new_hostescalation->have_last_notification = temp_hostescalation->have_last_notification;
-	new_hostescalation->notification_interval = temp_hostescalation->notification_interval;
-	new_hostescalation->have_notification_interval = temp_hostescalation->have_notification_interval;
-	new_hostescalation->escalate_on_down = temp_hostescalation->escalate_on_down;
-	new_hostescalation->escalate_on_unreachable = temp_hostescalation->escalate_on_unreachable;
-	new_hostescalation->escalate_on_recovery = temp_hostescalation->escalate_on_recovery;
-	new_hostescalation->have_escalation_options = temp_hostescalation->have_escalation_options;
 
 	/* add new hostescalation to head of list in memory */
 	new_hostescalation->next = xodtemplate_hostescalation_list;
@@ -5354,62 +4544,22 @@ int xodtemplate_duplicate_serviceescalation(xodtemplate_serviceescalation *temp_
 	if(new_serviceescalation == NULL)
 		return ERROR;
 
-	/* standard items */
-	new_serviceescalation->has_been_resolved = temp_serviceescalation->has_been_resolved;
-	new_serviceescalation->register_object = temp_serviceescalation->register_object;
-	new_serviceescalation->_config_file = temp_serviceescalation->_config_file;
-	new_serviceescalation->_start_line = temp_serviceescalation->_start_line;
+	memcpy(new_serviceescalation, temp_serviceescalation, sizeof(*new_serviceescalation));
+	new_serviceescalation->is_copy = TRUE;
+	new_serviceescalation->host_name = host_name;
+	new_serviceescalation->service_description = svc_description;
 
-	/* string defaults */
-	new_serviceescalation->have_servicegroup_name = FALSE;
-	new_serviceescalation->have_hostgroup_name = FALSE;
-	new_serviceescalation->have_host_name = (host_name) ? TRUE : FALSE;
-	new_serviceescalation->have_service_description = (svc_description) ? TRUE : FALSE;
-	new_serviceescalation->have_contact_groups = temp_serviceescalation->have_contact_groups;
-	new_serviceescalation->have_contacts = temp_serviceescalation->have_contacts;
-	new_serviceescalation->have_escalation_period = temp_serviceescalation->have_escalation_period;
-
-	/* allocate memory for and copy string members of serviceescalation definition */
-	if(host_name != NULL && (new_serviceescalation->host_name = (char *)strdup(host_name)) == NULL)
-		error = TRUE;
-	if(svc_description != NULL && (new_serviceescalation->service_description = (char *)strdup(svc_description)) == NULL)
-		error = TRUE;
-
-	if(temp_serviceescalation->template != NULL && (new_serviceescalation->template = (char *)strdup(temp_serviceescalation->template)) == NULL)
-		error = TRUE;
-	if(temp_serviceescalation->name != NULL && (new_serviceescalation->name = (char *)strdup(temp_serviceescalation->name)) == NULL)
-		error = TRUE;
 	if(temp_serviceescalation->contact_groups != NULL && (new_serviceescalation->contact_groups = (char *)strdup(temp_serviceescalation->contact_groups)) == NULL)
 		error = TRUE;
 	if(temp_serviceescalation->contacts != NULL && (new_serviceescalation->contacts = (char *)strdup(temp_serviceescalation->contacts)) == NULL)
 		error = TRUE;
-	if(temp_serviceescalation->escalation_period != NULL && (new_serviceescalation->escalation_period = (char *)strdup(temp_serviceescalation->escalation_period)) == NULL)
-		error = TRUE;
 
 	if(error == TRUE) {
-		my_free(new_serviceescalation->host_name);
-		my_free(new_serviceescalation->service_description);
 		my_free(new_serviceescalation->contact_groups);
 		my_free(new_serviceescalation->contacts);
-		my_free(new_serviceescalation->escalation_period);
-		my_free(new_serviceescalation->template);
-		my_free(new_serviceescalation->name);
 		my_free(new_serviceescalation);
 		return ERROR;
 		}
-
-	/* duplicate non-string members */
-	new_serviceescalation->first_notification = temp_serviceescalation->first_notification;
-	new_serviceescalation->last_notification = temp_serviceescalation->last_notification;
-	new_serviceescalation->have_first_notification = temp_serviceescalation->have_first_notification;
-	new_serviceescalation->have_last_notification = temp_serviceescalation->have_last_notification;
-	new_serviceescalation->notification_interval = temp_serviceescalation->notification_interval;
-	new_serviceescalation->have_notification_interval = temp_serviceescalation->have_notification_interval;
-	new_serviceescalation->escalate_on_warning = temp_serviceescalation->escalate_on_warning;
-	new_serviceescalation->escalate_on_unknown = temp_serviceescalation->escalate_on_unknown;
-	new_serviceescalation->escalate_on_critical = temp_serviceescalation->escalate_on_critical;
-	new_serviceescalation->escalate_on_recovery = temp_serviceescalation->escalate_on_recovery;
-	new_serviceescalation->have_escalation_options = temp_serviceescalation->have_escalation_options;
 
 	/* add new serviceescalation to head of list in memory */
 	new_serviceescalation->next = xodtemplate_serviceescalation_list;
@@ -5418,328 +4568,10 @@ int xodtemplate_duplicate_serviceescalation(xodtemplate_serviceescalation *temp_
 	return OK;
 	}
 
-
-
-/* duplicates a host dependency definition (with master and dependent host names) */
-int xodtemplate_duplicate_hostdependency(xodtemplate_hostdependency *temp_hostdependency, char *master_host_name, char *dependent_host_name) {
-	xodtemplate_hostdependency *new_hostdependency = NULL;
-	int error = FALSE;
-
-	/* allocate memory for a new host dependency definition */
-	new_hostdependency = (xodtemplate_hostdependency *)calloc(1, sizeof(xodtemplate_hostdependency));
-	if(new_hostdependency == NULL)
-		return ERROR;
-
-	/* standard items */
-	new_hostdependency->has_been_resolved = temp_hostdependency->has_been_resolved;
-	new_hostdependency->register_object = temp_hostdependency->register_object;
-	new_hostdependency->_config_file = temp_hostdependency->_config_file;
-	new_hostdependency->_start_line = temp_hostdependency->_start_line;
-
-	/* string defaults */
-	new_hostdependency->have_hostgroup_name = FALSE;
-	new_hostdependency->have_dependent_hostgroup_name = FALSE;
-	new_hostdependency->have_host_name = temp_hostdependency->have_host_name;
-	new_hostdependency->have_dependent_host_name = temp_hostdependency->have_dependent_host_name;
-	new_hostdependency->have_dependency_period = temp_hostdependency->have_dependency_period;
-
-	/* allocate memory for and copy string members of hostdependency definition */
-	if(master_host_name != NULL && (new_hostdependency->host_name = (char *)strdup(master_host_name)) == NULL)
-		error = TRUE;
-	if(dependent_host_name != NULL && (new_hostdependency->dependent_host_name = (char *)strdup(dependent_host_name)) == NULL)
-		error = TRUE;
-
-	if(temp_hostdependency->dependency_period != NULL && (new_hostdependency->dependency_period = (char *)strdup(temp_hostdependency->dependency_period)) == NULL)
-		error = TRUE;
-	if(temp_hostdependency->template != NULL && (new_hostdependency->template = (char *)strdup(temp_hostdependency->template)) == NULL)
-		error = TRUE;
-	if(temp_hostdependency->name != NULL && (new_hostdependency->name = (char *)strdup(temp_hostdependency->name)) == NULL)
-		error = TRUE;
-
-	if(error == TRUE) {
-		my_free(new_hostdependency->dependent_host_name);
-		my_free(new_hostdependency->host_name);
-		my_free(new_hostdependency->template);
-		my_free(new_hostdependency->name);
-		my_free(new_hostdependency);
-		return ERROR;
-		}
-
-	/* duplicate non-string members */
-	new_hostdependency->fail_notify_on_up = temp_hostdependency->fail_notify_on_up;
-	new_hostdependency->fail_notify_on_down = temp_hostdependency->fail_notify_on_down;
-	new_hostdependency->fail_notify_on_unreachable = temp_hostdependency->fail_notify_on_unreachable;
-	new_hostdependency->fail_notify_on_pending = temp_hostdependency->fail_notify_on_pending;
-	new_hostdependency->have_notification_dependency_options = temp_hostdependency->have_notification_dependency_options;
-	new_hostdependency->fail_execute_on_up = temp_hostdependency->fail_execute_on_up;
-	new_hostdependency->fail_execute_on_down = temp_hostdependency->fail_execute_on_down;
-	new_hostdependency->fail_execute_on_unreachable = temp_hostdependency->fail_execute_on_unreachable;
-	new_hostdependency->fail_execute_on_pending = temp_hostdependency->fail_execute_on_pending;
-	new_hostdependency->have_execution_dependency_options = temp_hostdependency->have_execution_dependency_options;
-	new_hostdependency->inherits_parent = temp_hostdependency->inherits_parent;
-	new_hostdependency->have_inherits_parent = temp_hostdependency->have_inherits_parent;
-
-	/* add new hostdependency to head of list in memory */
-	new_hostdependency->next = xodtemplate_hostdependency_list;
-	xodtemplate_hostdependency_list = new_hostdependency;
-
-	return OK;
-	}
-
-
-
-/* duplicates a service dependency definition */
-int xodtemplate_duplicate_servicedependency(xodtemplate_servicedependency *temp_servicedependency, char *master_host_name, char *master_service_description, char *master_hostgroup_name, char *master_servicegroup_name, char *dependent_host_name, char *dependent_service_description, char *dependent_hostgroup_name, char *dependent_servicegroup_name) {
-	xodtemplate_servicedependency *new_servicedependency = NULL;
-	int error = FALSE;
-
-	/* allocate memory for a new service dependency definition */
-	new_servicedependency = (xodtemplate_servicedependency *)calloc(1, sizeof(xodtemplate_servicedependency));
-	if(new_servicedependency == NULL)
-		return ERROR;
-
-	/* standard items */
-	new_servicedependency->has_been_resolved = temp_servicedependency->has_been_resolved;
-	new_servicedependency->register_object = temp_servicedependency->register_object;
-	new_servicedependency->_config_file = temp_servicedependency->_config_file;
-	new_servicedependency->_start_line = temp_servicedependency->_start_line;
-
-	/* string defaults */
-	new_servicedependency->have_host_name = (master_host_name) ? TRUE : FALSE;
-	new_servicedependency->have_service_description = (master_service_description) ? TRUE : FALSE;
-	new_servicedependency->have_hostgroup_name = (master_hostgroup_name) ? TRUE : FALSE;
-	new_servicedependency->have_servicegroup_name = (master_servicegroup_name) ? TRUE : FALSE;
-
-	new_servicedependency->have_dependent_host_name = (dependent_host_name) ? TRUE : FALSE;
-	new_servicedependency->have_dependent_service_description = (dependent_service_description) ? TRUE : FALSE;
-	new_servicedependency->have_dependent_hostgroup_name = (dependent_hostgroup_name) ? TRUE : FALSE;
-	new_servicedependency->have_dependent_servicegroup_name = (dependent_servicegroup_name) ? TRUE : FALSE;
-
-	new_servicedependency->have_dependency_period = temp_servicedependency->have_dependency_period;
-
-	/* duplicate strings */
-	if(master_host_name != NULL && (new_servicedependency->host_name = (char *)strdup(master_host_name)) == NULL)
-		error = TRUE;
-	if(master_service_description != NULL && (new_servicedependency->service_description = (char *)strdup(master_service_description)) == NULL)
-		error = TRUE;
-	if(master_hostgroup_name != NULL && (new_servicedependency->hostgroup_name = (char *)strdup(master_hostgroup_name)) == NULL)
-		error = TRUE;
-	if(master_servicegroup_name != NULL && (new_servicedependency->servicegroup_name = (char *)strdup(master_servicegroup_name)) == NULL)
-		error = TRUE;
-	if(dependent_host_name != NULL && (new_servicedependency->dependent_host_name = (char *)strdup(dependent_host_name)) == NULL)
-		error = TRUE;
-	if(dependent_service_description != NULL && (new_servicedependency->dependent_service_description = (char *)strdup(dependent_service_description)) == NULL)
-		error = TRUE;
-	if(dependent_hostgroup_name != NULL && (new_servicedependency->dependent_hostgroup_name = (char *)strdup(dependent_hostgroup_name)) == NULL)
-		error = TRUE;
-	if(dependent_servicegroup_name != NULL && (new_servicedependency->dependent_servicegroup_name = (char *)strdup(dependent_servicegroup_name)) == NULL)
-		error = TRUE;
-
-	if(temp_servicedependency->dependency_period != NULL && (new_servicedependency->dependency_period = (char *)strdup(temp_servicedependency->dependency_period)) == NULL)
-		error = TRUE;
-	if(temp_servicedependency->template != NULL && (new_servicedependency->template = (char *)strdup(temp_servicedependency->template)) == NULL)
-		error = TRUE;
-	if(temp_servicedependency->name != NULL && (new_servicedependency->name = (char *)strdup(temp_servicedependency->name)) == NULL)
-		error = TRUE;
-
-	if(error == TRUE) {
-		my_free(new_servicedependency->host_name);
-		my_free(new_servicedependency->service_description);
-		my_free(new_servicedependency->hostgroup_name);
-		my_free(new_servicedependency->servicegroup_name);
-		my_free(new_servicedependency->dependent_host_name);
-		my_free(new_servicedependency->dependent_service_description);
-		my_free(new_servicedependency->dependent_hostgroup_name);
-		my_free(new_servicedependency->dependent_servicegroup_name);
-		my_free(new_servicedependency->dependency_period);
-		my_free(new_servicedependency->template);
-		my_free(new_servicedependency->name);
-		my_free(new_servicedependency);
-		return ERROR;
-		}
-
-	/* duplicate non-string members */
-	new_servicedependency->fail_notify_on_ok = temp_servicedependency->fail_notify_on_ok;
-	new_servicedependency->fail_notify_on_unknown = temp_servicedependency->fail_notify_on_unknown;
-	new_servicedependency->fail_notify_on_warning = temp_servicedependency->fail_notify_on_warning;
-	new_servicedependency->fail_notify_on_critical = temp_servicedependency->fail_notify_on_critical;
-	new_servicedependency->fail_notify_on_pending = temp_servicedependency->fail_notify_on_pending;
-	new_servicedependency->have_notification_dependency_options = temp_servicedependency->have_notification_dependency_options;
-	new_servicedependency->fail_execute_on_ok = temp_servicedependency->fail_execute_on_ok;
-	new_servicedependency->fail_execute_on_unknown = temp_servicedependency->fail_execute_on_unknown;
-	new_servicedependency->fail_execute_on_warning = temp_servicedependency->fail_execute_on_warning;
-	new_servicedependency->fail_execute_on_critical = temp_servicedependency->fail_execute_on_critical;
-	new_servicedependency->fail_execute_on_pending = temp_servicedependency->fail_execute_on_pending;
-	new_servicedependency->have_execution_dependency_options = temp_servicedependency->have_execution_dependency_options;
-	new_servicedependency->inherits_parent = temp_servicedependency->inherits_parent;
-	new_servicedependency->have_inherits_parent = temp_servicedependency->have_inherits_parent;
-
-	/* add new servicedependency to head of list in memory */
-	new_servicedependency->next = xodtemplate_servicedependency_list;
-	xodtemplate_servicedependency_list = new_servicedependency;
-
-	return OK;
-	}
-
-
-
-/* duplicates a hostextinfo object definition */
-int xodtemplate_duplicate_hostextinfo(xodtemplate_hostextinfo *this_hostextinfo, char *host_name) {
-	xodtemplate_hostextinfo *new_hostextinfo = NULL;
-	int error = FALSE;
-
-	/* allocate zero'd out memory for a new hostextinfo object */
-	new_hostextinfo = (xodtemplate_hostextinfo *)calloc(1, sizeof(xodtemplate_hostextinfo));
-	if(new_hostextinfo == NULL)
-		return ERROR;
-
-	/* standard items */
-	new_hostextinfo->has_been_resolved = this_hostextinfo->has_been_resolved;
-	new_hostextinfo->register_object = this_hostextinfo->register_object;
-	new_hostextinfo->_config_file = this_hostextinfo->_config_file;
-	new_hostextinfo->_start_line = this_hostextinfo->_start_line;
-
-	/* string defaults */
-	new_hostextinfo->have_host_name = this_hostextinfo->have_host_name;
-	new_hostextinfo->have_hostgroup_name = this_hostextinfo->have_hostgroup_name;
-	new_hostextinfo->have_notes = this_hostextinfo->have_notes;
-	new_hostextinfo->have_notes_url = this_hostextinfo->have_notes_url;
-	new_hostextinfo->have_action_url = this_hostextinfo->have_action_url;
-	new_hostextinfo->have_icon_image = this_hostextinfo->have_icon_image;
-	new_hostextinfo->have_icon_image_alt = this_hostextinfo->have_icon_image_alt;
-	new_hostextinfo->have_vrml_image = this_hostextinfo->have_vrml_image;
-	new_hostextinfo->have_statusmap_image = this_hostextinfo->have_statusmap_image;
-
-	/* duplicate strings (host_name member is passed in) */
-	if(host_name != NULL && (new_hostextinfo->host_name = (char *)strdup(host_name)) == NULL)
-		error = TRUE;
-	if(this_hostextinfo->template != NULL && (new_hostextinfo->template = (char *)strdup(this_hostextinfo->template)) == NULL)
-		error = TRUE;
-	if(this_hostextinfo->name != NULL && (new_hostextinfo->name = (char *)strdup(this_hostextinfo->name)) == NULL)
-		error = TRUE;
-	if(this_hostextinfo->notes != NULL && (new_hostextinfo->notes = (char *)strdup(this_hostextinfo->notes)) == NULL)
-		error = TRUE;
-	if(this_hostextinfo->notes_url != NULL && (new_hostextinfo->notes_url = (char *)strdup(this_hostextinfo->notes_url)) == NULL)
-		error = TRUE;
-	if(this_hostextinfo->action_url != NULL && (new_hostextinfo->action_url = (char *)strdup(this_hostextinfo->action_url)) == NULL)
-		error = TRUE;
-	if(this_hostextinfo->icon_image != NULL && (new_hostextinfo->icon_image = (char *)strdup(this_hostextinfo->icon_image)) == NULL)
-		error = TRUE;
-	if(this_hostextinfo->icon_image_alt != NULL && (new_hostextinfo->icon_image_alt = (char *)strdup(this_hostextinfo->icon_image_alt)) == NULL)
-		error = TRUE;
-	if(this_hostextinfo->vrml_image != NULL && (new_hostextinfo->vrml_image = (char *)strdup(this_hostextinfo->vrml_image)) == NULL)
-		error = TRUE;
-	if(this_hostextinfo->statusmap_image != NULL && (new_hostextinfo->statusmap_image = (char *)strdup(this_hostextinfo->statusmap_image)) == NULL)
-		error = TRUE;
-
-	if(error == TRUE) {
-		my_free(new_hostextinfo->host_name);
-		my_free(new_hostextinfo->template);
-		my_free(new_hostextinfo->name);
-		my_free(new_hostextinfo->notes);
-		my_free(new_hostextinfo->notes_url);
-		my_free(new_hostextinfo->action_url);
-		my_free(new_hostextinfo->icon_image);
-		my_free(new_hostextinfo->icon_image_alt);
-		my_free(new_hostextinfo->vrml_image);
-		my_free(new_hostextinfo->statusmap_image);
-		my_free(new_hostextinfo);
-		return ERROR;
-		}
-
-	/* duplicate non-string members */
-	new_hostextinfo->x_2d = this_hostextinfo->x_2d;
-	new_hostextinfo->y_2d = this_hostextinfo->y_2d;
-	new_hostextinfo->have_2d_coords = this_hostextinfo->have_2d_coords;
-	new_hostextinfo->x_3d = this_hostextinfo->x_3d;
-	new_hostextinfo->y_3d = this_hostextinfo->y_3d;
-	new_hostextinfo->z_3d = this_hostextinfo->z_3d;
-	new_hostextinfo->have_3d_coords = this_hostextinfo->have_3d_coords;
-
-	/* add new object to head of list */
-	new_hostextinfo->next = xodtemplate_hostextinfo_list;
-	xodtemplate_hostextinfo_list = new_hostextinfo;
-
-	return OK;
-	}
-
-
-
-/* duplicates a serviceextinfo object definition */
-int xodtemplate_duplicate_serviceextinfo(xodtemplate_serviceextinfo *this_serviceextinfo, char *host_name) {
-	xodtemplate_serviceextinfo *new_serviceextinfo = NULL;
-	int error = FALSE;
-
-	/* allocate zero'd out object for a new serviceextinfo object */
-	new_serviceextinfo = (xodtemplate_serviceextinfo *)calloc(1, sizeof(xodtemplate_serviceextinfo));
-	if(new_serviceextinfo == NULL)
-		return ERROR;
-
-	/* standard items */
-	new_serviceextinfo->has_been_resolved = this_serviceextinfo->has_been_resolved;
-	new_serviceextinfo->register_object = this_serviceextinfo->register_object;
-	new_serviceextinfo->_config_file = this_serviceextinfo->_config_file;
-	new_serviceextinfo->_start_line = this_serviceextinfo->_start_line;
-
-	/* string defaults */
-	new_serviceextinfo->have_host_name = this_serviceextinfo->have_host_name;
-	new_serviceextinfo->have_service_description = this_serviceextinfo->have_service_description;
-	new_serviceextinfo->have_hostgroup_name = this_serviceextinfo->have_hostgroup_name;
-	new_serviceextinfo->have_notes = this_serviceextinfo->have_notes;
-	new_serviceextinfo->have_notes_url = this_serviceextinfo->have_notes_url;
-	new_serviceextinfo->have_action_url = this_serviceextinfo->have_action_url;
-	new_serviceextinfo->have_icon_image = this_serviceextinfo->have_icon_image;
-	new_serviceextinfo->have_icon_image_alt = this_serviceextinfo->have_icon_image_alt;
-
-	/* duplicate strings (host_name member is passed in) */
-	if(host_name != NULL && (new_serviceextinfo->host_name = (char *)strdup(host_name)) == NULL)
-		error = TRUE;
-	if(this_serviceextinfo->template != NULL && (new_serviceextinfo->template = (char *)strdup(this_serviceextinfo->template)) == NULL)
-		error = TRUE;
-	if(this_serviceextinfo->name != NULL && (new_serviceextinfo->name = (char *)strdup(this_serviceextinfo->name)) == NULL)
-		error = TRUE;
-	if(this_serviceextinfo->service_description != NULL && (new_serviceextinfo->service_description = (char *)strdup(this_serviceextinfo->service_description)) == NULL)
-		error = TRUE;
-	if(this_serviceextinfo->notes != NULL && (new_serviceextinfo->notes = (char *)strdup(this_serviceextinfo->notes)) == NULL)
-		error = TRUE;
-	if(this_serviceextinfo->notes_url != NULL && (new_serviceextinfo->notes_url = (char *)strdup(this_serviceextinfo->notes_url)) == NULL)
-		error = TRUE;
-	if(this_serviceextinfo->action_url != NULL && (new_serviceextinfo->action_url = (char *)strdup(this_serviceextinfo->action_url)) == NULL)
-		error = TRUE;
-	if(this_serviceextinfo->icon_image != NULL && (new_serviceextinfo->icon_image = (char *)strdup(this_serviceextinfo->icon_image)) == NULL)
-		error = TRUE;
-	if(this_serviceextinfo->icon_image_alt != NULL && (new_serviceextinfo->icon_image_alt = (char *)strdup(this_serviceextinfo->icon_image_alt)) == NULL)
-		error = TRUE;
-
-	if(error == TRUE) {
-		my_free(new_serviceextinfo->host_name);
-		my_free(new_serviceextinfo->template);
-		my_free(new_serviceextinfo->name);
-		my_free(new_serviceextinfo->service_description);
-		my_free(new_serviceextinfo->notes);
-		my_free(new_serviceextinfo->notes_url);
-		my_free(new_serviceextinfo->action_url);
-		my_free(new_serviceextinfo->icon_image);
-		my_free(new_serviceextinfo->icon_image_alt);
-		my_free(new_serviceextinfo);
-		return ERROR;
-		}
-
-	/* add new object to head of list */
-	new_serviceextinfo->next = xodtemplate_serviceextinfo_list;
-	xodtemplate_serviceextinfo_list = new_serviceextinfo;
-
-	return OK;
-	}
-
-#endif
-
-
 /******************************************************************/
 /***************** OBJECT RESOLUTION FUNCTIONS ********************/
 /******************************************************************/
 
-#ifdef NSCORE
 
 /* inherit object properties */
 /* some missing defaults (notification options, etc.) are also applied here */
@@ -5755,11 +4587,7 @@ int xodtemplate_inherit_object_properties(void) {
 
 		/* if notification options are missing, assume all */
 		if(temp_host->have_notification_options == FALSE) {
-			temp_host->notify_on_down = TRUE;
-			temp_host->notify_on_unreachable = TRUE;
-			temp_host->notify_on_recovery = TRUE;
-			temp_host->notify_on_flapping = TRUE;
-			temp_host->notify_on_downtime = TRUE;
+			temp_host->notification_options = OPT_ALL;
 			temp_host->have_notification_options = TRUE;
 			}
 		}
@@ -5771,38 +4599,24 @@ int xodtemplate_inherit_object_properties(void) {
 		if((temp_host = xodtemplate_find_real_host(temp_service->host_name)) == NULL)
 			continue;
 
-		/* services inherit contact groups from host if not already specified */
-		if(temp_service->have_contact_groups == FALSE && temp_host->have_contact_groups == TRUE && temp_host->contact_groups != NULL) {
-			temp_service->contact_groups = (char *)strdup(temp_host->contact_groups);
-			temp_service->have_contact_groups = TRUE;
-			}
-
-		/* services inherit contacts from host if not already specified */
-		if(temp_service->have_contacts == FALSE && temp_host->have_contacts == TRUE && temp_host->contacts != NULL) {
-			temp_service->contacts = (char *)strdup(temp_host->contacts);
-			temp_service->have_contacts = TRUE;
+		/*
+		 * if the service has no contacts specified, it will inherit
+		 * them from the host
+		 */
+		if(temp_service->have_contact_groups == FALSE && temp_service->have_contacts == FALSE) {
+			xod_inherit_str(temp_service, temp_host, contact_groups);
+			xod_inherit_str(temp_service, temp_host, contacts);
 			}
 
 		/* services inherit notification interval from host if not already specified */
-		if(temp_service->have_notification_interval == FALSE && temp_host->have_notification_interval == TRUE) {
-			temp_service->notification_interval = temp_host->notification_interval;
-			temp_service->have_notification_interval = TRUE;
-			}
+		xod_inherit(temp_service, temp_host, notification_interval);
 
 		/* services inherit notification period from host if not already specified */
-		if(temp_service->have_notification_period == FALSE && temp_host->have_notification_period == TRUE && temp_host->notification_period != NULL) {
-			temp_service->notification_period = (char *)strdup(temp_host->notification_period);
-			temp_service->have_notification_period = TRUE;
-			}
+		xod_inherit_str(temp_service, temp_host, notification_period);
 
 		/* if notification options are missing, assume all */
 		if(temp_service->have_notification_options == FALSE) {
-			temp_service->notify_on_unknown = TRUE;
-			temp_service->notify_on_warning = TRUE;
-			temp_service->notify_on_critical = TRUE;
-			temp_service->notify_on_recovery = TRUE;
-			temp_service->notify_on_flapping = TRUE;
-			temp_service->notify_on_downtime = TRUE;
+			temp_service->notification_options = OPT_ALL;
 			temp_service->have_notification_options = TRUE;
 			}
 		}
@@ -5814,31 +4628,22 @@ int xodtemplate_inherit_object_properties(void) {
 		if((temp_service = xodtemplate_find_real_service(temp_serviceescalation->host_name, temp_serviceescalation->service_description)) == NULL)
 			continue;
 
-		/* service escalations inherit contact groups from service if not already specified */
-		if(temp_serviceescalation->have_contact_groups == FALSE && temp_service->have_contact_groups == TRUE && temp_service->contact_groups != NULL) {
-			temp_serviceescalation->contact_groups = (char *)strdup(temp_service->contact_groups);
-			temp_serviceescalation->have_contact_groups = TRUE;
-			}
-
 		/* SPECIAL RULE 10/04/07 - additive inheritance from service's contactgroup(s) */
 		if(temp_serviceescalation->contact_groups != NULL && temp_serviceescalation->contact_groups[0] == '+')
 			xodtemplate_get_inherited_string(&temp_service->have_contact_groups, &temp_service->contact_groups, &temp_serviceescalation->have_contact_groups, &temp_serviceescalation->contact_groups);
-
-		/* service escalations inherit contacts from service if not already specified */
-		if(temp_serviceescalation->have_contacts == FALSE && temp_service->have_contacts == TRUE && temp_service->contacts != NULL) {
-			temp_serviceescalation->contacts = (char *)strdup(temp_service->contacts);
-			temp_serviceescalation->have_contacts = TRUE;
-			}
 
 		/* SPECIAL RULE 10/04/07 - additive inheritance from service's contact(s) */
 		if(temp_serviceescalation->contacts != NULL && temp_serviceescalation->contacts[0] == '+')
 			xodtemplate_get_inherited_string(&temp_service->have_contacts, &temp_service->contacts, &temp_serviceescalation->have_contacts, &temp_serviceescalation->contacts);
 
-		/* service escalations inherit notification interval from service if not already defined */
-		if(temp_serviceescalation->have_notification_interval == FALSE && temp_service->have_notification_interval == TRUE) {
-			temp_serviceescalation->notification_interval = temp_service->notification_interval;
-			temp_serviceescalation->have_notification_interval = TRUE;
+		/* service escalations inherit contacts from service if none are specified */
+		if(temp_serviceescalation->have_contact_groups == FALSE && temp_serviceescalation->have_contacts == FALSE) {
+			xod_inherit_str(temp_serviceescalation, temp_service, contact_groups);
+			xod_inherit_str(temp_serviceescalation, temp_service, contacts);
 			}
+
+		/* service escalations inherit notification interval from service if not already defined */
+		xod_inherit(temp_serviceescalation, temp_service, notification_interval);
 
 		/* service escalations inherit escalation period from service if not already defined */
 		if(temp_serviceescalation->have_escalation_period == FALSE && temp_service->have_notification_period == TRUE && temp_service->notification_period != NULL) {
@@ -5848,10 +4653,7 @@ int xodtemplate_inherit_object_properties(void) {
 
 		/* if escalation options are missing, assume all */
 		if(temp_serviceescalation->have_escalation_options == FALSE) {
-			temp_serviceescalation->escalate_on_unknown = TRUE;
-			temp_serviceescalation->escalate_on_warning = TRUE;
-			temp_serviceescalation->escalate_on_critical = TRUE;
-			temp_serviceescalation->escalate_on_recovery = TRUE;
+			temp_serviceescalation->escalation_options = OPT_ALL;
 			temp_serviceescalation->have_escalation_options = TRUE;
 			}
 
@@ -5867,31 +4669,22 @@ int xodtemplate_inherit_object_properties(void) {
 		if((temp_host = xodtemplate_find_real_host(temp_hostescalation->host_name)) == NULL)
 			continue;
 
-		/* host escalations inherit contact groups from service if not already specified */
-		if(temp_hostescalation->have_contact_groups == FALSE && temp_host->have_contact_groups == TRUE && temp_host->contact_groups != NULL) {
-			temp_hostescalation->contact_groups = (char *)strdup(temp_host->contact_groups);
-			temp_hostescalation->have_contact_groups = TRUE;
-			}
-
 		/* SPECIAL RULE 10/04/07 - additive inheritance from host's contactgroup(s) */
 		if(temp_hostescalation->contact_groups != NULL && temp_hostescalation->contact_groups[0] == '+')
 			xodtemplate_get_inherited_string(&temp_host->have_contact_groups, &temp_host->contact_groups, &temp_hostescalation->have_contact_groups, &temp_hostescalation->contact_groups);
-
-		/* host escalations inherit contacts from service if not already specified */
-		if(temp_hostescalation->have_contacts == FALSE && temp_host->have_contacts == TRUE && temp_host->contacts != NULL) {
-			temp_hostescalation->contacts = (char *)strdup(temp_host->contacts);
-			temp_hostescalation->have_contacts = TRUE;
-			}
 
 		/* SPECIAL RULE 10/04/07 - additive inheritance from host's contact(s) */
 		if(temp_hostescalation->contacts != NULL && temp_hostescalation->contacts[0] == '+')
 			xodtemplate_get_inherited_string(&temp_host->have_contacts, &temp_host->contacts, &temp_hostescalation->have_contacts, &temp_hostescalation->contacts);
 
-		/* host escalations inherit notification interval from host if not already defined */
-		if(temp_hostescalation->have_notification_interval == FALSE && temp_host->have_notification_interval == TRUE) {
-			temp_hostescalation->notification_interval = temp_host->notification_interval;
-			temp_hostescalation->have_notification_interval = TRUE;
+		/* host escalations inherit contacts from host if none are specified */
+		if(temp_hostescalation->have_contact_groups == FALSE && temp_hostescalation->have_contacts == FALSE) {
+			xod_inherit_str(temp_hostescalation, temp_host, contact_groups);
+			xod_inherit_str(temp_hostescalation, temp_host, contacts);
 			}
+
+		/* host escalations inherit notification interval from host if not already defined */
+		xod_inherit(temp_hostescalation, temp_host, notification_interval);
 
 		/* host escalations inherit escalation period from host if not already defined */
 		if(temp_hostescalation->have_escalation_period == FALSE && temp_host->have_notification_period == TRUE && temp_host->notification_period != NULL) {
@@ -5901,9 +4694,7 @@ int xodtemplate_inherit_object_properties(void) {
 
 		/* if escalation options are missing, assume all */
 		if(temp_hostescalation->have_escalation_options == FALSE) {
-			temp_hostescalation->escalate_on_down = TRUE;
-			temp_hostescalation->escalate_on_unreachable = TRUE;
-			temp_hostescalation->escalate_on_recovery = TRUE;
+			temp_hostescalation->escalation_options = OPT_ALL;
 			temp_hostescalation->have_escalation_options = TRUE;
 			}
 
@@ -5922,7 +4713,207 @@ int xodtemplate_inherit_object_properties(void) {
 /***************** OBJECT RESOLUTION FUNCTIONS ********************/
 /******************************************************************/
 
-#ifdef NSCORE
+static int xodtemplate_register_and_destroy_hostescalation(void *he_)
+{
+	xodtemplate_hostescalation *he = (xodtemplate_hostescalation *)he_;
+	int result;
+
+	result = xodtemplate_register_hostescalation(he);
+	if(he->is_copy == FALSE) {
+		my_free(he->escalation_period);
+		}
+	my_free(he->contact_groups);
+	my_free(he->contacts);
+	my_free(he);
+
+	return result;
+}
+
+static int xodtemplate_register_and_destroy_serviceescalation(void *se_)
+{
+	xodtemplate_serviceescalation *se = (xodtemplate_serviceescalation *)se_;
+	int result;
+	result = xodtemplate_register_serviceescalation(se);
+
+	if(se->is_copy == FALSE)
+		my_free(se->escalation_period);
+
+	my_free(se->contact_groups);
+	my_free(se->contacts);
+	my_free(se);
+
+	return result;
+}
+
+#ifndef NSCGI
+static int xodtemplate_register_and_destroy_hostdependency(void *hd_)
+{
+	xodtemplate_hostdependency *temp_hostdependency = (xodtemplate_hostdependency *)hd_;
+	objectlist *master_hostlist = NULL, *dependent_hostlist = NULL;
+	objectlist *list, *next, *l2, *n2;
+
+	/* skip host dependencies without enough data */
+	if(temp_hostdependency->hostgroup_name == NULL && temp_hostdependency->dependent_hostgroup_name == NULL && temp_hostdependency->host_name == NULL && temp_hostdependency->dependent_host_name == NULL)
+		return OK;
+
+	/* get list of master host names */
+	master_hostlist = xodtemplate_expand_hostgroups_and_hosts(temp_hostdependency->hostgroup_name, temp_hostdependency->host_name, temp_hostdependency->_config_file, temp_hostdependency->_start_line);
+	if(master_hostlist == NULL && allow_empty_hostgroup_assignment==0) {
+		logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand master hostgroups and/or hosts specified in host dependency (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_hostdependency->_config_file), temp_hostdependency->_start_line);
+		return ERROR;
+		}
+
+	/* get list of dependent host names */
+	dependent_hostlist = xodtemplate_expand_hostgroups_and_hosts(temp_hostdependency->dependent_hostgroup_name, temp_hostdependency->dependent_host_name, temp_hostdependency->_config_file, temp_hostdependency->_start_line);
+	if(dependent_hostlist == NULL && allow_empty_hostgroup_assignment==0) {
+		logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand dependent hostgroups (%s) and/or hosts (%s) specified in host dependency (config file '%s', starting on line %d)\n", temp_hostdependency->dependent_hostgroup_name, temp_hostdependency->dependent_host_name, xodtemplate_config_file_name(temp_hostdependency->_config_file), temp_hostdependency->_start_line);
+		free_objectlist(&master_hostlist);
+		return ERROR;
+		}
+
+	my_free(temp_hostdependency->name);
+	my_free(temp_hostdependency->template);
+	my_free(temp_hostdependency->host_name);
+	my_free(temp_hostdependency->hostgroup_name);
+	my_free(temp_hostdependency->dependent_host_name);
+	my_free(temp_hostdependency->dependent_hostgroup_name);
+
+	/* duplicate the dependency definitions */
+	for(list = master_hostlist; list; list = next) {
+		xodtemplate_host *master = (xodtemplate_host *)list->object_ptr;
+		next = list->next;
+		free(list);
+
+		for(l2 = dependent_hostlist; l2; l2 = n2) {
+			xodtemplate_host *child = (xodtemplate_host *)l2->object_ptr;
+			n2 = l2->next;
+			free(l2);
+
+			temp_hostdependency->host_name = master->host_name;
+			temp_hostdependency->dependent_host_name = child->host_name;
+			if(xodtemplate_register_hostdependency(temp_hostdependency) != OK) {
+				/* exit on error */
+				free_objectlist(&next);
+				free_objectlist(&n2);
+				return ERROR;
+				}
+			}
+		}
+
+	my_free(temp_hostdependency->dependency_period);
+	my_free(temp_hostdependency);
+
+	return OK;
+}
+
+static int xodtemplate_register_and_destroy_servicedependency(void *sd_)
+{
+	objectlist *parents = NULL, *plist, *pnext;
+	objectlist *children = NULL, *clist;
+	xodtemplate_servicedependency *temp_servicedependency = (xodtemplate_servicedependency *)sd_;
+	int same_host = FALSE;
+	char *hname, *sdesc, *dhname, *dsdesc;
+
+	hname = temp_servicedependency->host_name;
+	sdesc = temp_servicedependency->service_description;
+	dhname = temp_servicedependency->dependent_host_name;
+	dsdesc = temp_servicedependency->dependent_service_description;
+
+	my_free(temp_servicedependency->name);
+	my_free(temp_servicedependency->template);
+
+	/* skip templates */
+	if(temp_servicedependency->register_object == 0)
+		return OK;
+
+	/* take care of same-host dependencies */
+	if(!temp_servicedependency->dependent_host_name && !temp_servicedependency->dependent_hostgroup_name) {
+		if(!temp_servicedependency->dependent_service_description)
+			; /* do nothing. might be dependent_servicegroup_name */
+		else {
+			same_host = TRUE;
+		}
+	}
+
+	parents = children = NULL;
+	bitmap_clear(parent_map);
+
+	/* create the two object lists */
+	if(xodtemplate_create_service_list(&parents, parent_map, temp_servicedependency->host_name, temp_servicedependency->hostgroup_name, temp_servicedependency->servicegroup_name, temp_servicedependency->service_description, temp_servicedependency->_config_file, temp_servicedependency->_start_line) != OK) {
+		logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand master service(s) (config file '%s', starting at line %d)\n",
+			  xodtemplate_config_file_name(temp_servicedependency->_config_file),
+			  temp_servicedependency->_start_line);
+		return ERROR;
+		}
+
+	if(same_host == FALSE && xodtemplate_create_service_list(&children, service_map, temp_servicedependency->dependent_host_name, temp_servicedependency->dependent_hostgroup_name, temp_servicedependency->dependent_servicegroup_name, temp_servicedependency->dependent_service_description, temp_servicedependency->_config_file, temp_servicedependency->_start_line) != OK) {
+		logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand dependent service(s) (at config file '%s', starting on line %d)\n",
+			  xodtemplate_config_file_name(temp_servicedependency->_config_file),
+			  temp_servicedependency->_start_line);
+		return ERROR;
+		}
+
+	/*
+	 * every service in "children" depends on every service in
+	 * "parents", so just loop twice and create them all.
+	 */
+	for(plist = parents; plist; plist = pnext) {
+		xodtemplate_service *p = (xodtemplate_service *)plist->object_ptr;
+		pnext = plist->next;
+		free(plist); /* free it as we go along */
+
+		if(bitmap_isset(parent_map, p->id))
+			continue;
+		bitmap_set(parent_map, p->id);
+
+		/*
+		 * if this is a same-host dependency, we must expand
+		 * dependent_service_description for the host we're
+		 * currently looking at
+		 */
+		if(same_host) {
+			children = NULL;
+			if(xodtemplate_expand_services(&children, service_map, p->host_name, dsdesc, temp_servicedependency->_config_file, temp_servicedependency->_start_line) != OK)
+				return ERROR;
+		}
+		for(clist = children; clist; clist = clist->next) {
+			xodtemplate_service *c = (xodtemplate_service *)clist->object_ptr;
+			if(bitmap_isset(service_map, c->id))
+				continue;
+			bitmap_set(service_map, c->id);
+
+			/* now register */
+			temp_servicedependency->host_name = p->host_name;
+			temp_servicedependency->service_description = p->service_description;
+			temp_servicedependency->dependent_host_name = c->host_name;
+			temp_servicedependency->dependent_service_description = c->service_description;
+			if(xodtemplate_register_servicedependency(temp_servicedependency) != OK) {
+				logit(NSLOG_VERIFICATION_WARNING, TRUE, "Error: Failed to register servicedependency from '%s;%s' to '%s;%s' (config file '%s', starting at line %d)\n",
+					  p->host_name, p->service_description,
+					  c->host_name, c->service_description,
+					  xodtemplate_config_file_name(temp_servicedependency->_config_file), temp_servicedependency->_start_line);
+				return ERROR;
+			}
+		}
+		if(same_host == TRUE)
+			free_objectlist(&children);
+	}
+	if(same_host == FALSE)
+		free_objectlist(&children);
+
+	my_free(hname);
+	my_free(sdesc);
+	my_free(dhname);
+	my_free(dsdesc);
+	my_free(temp_servicedependency->hostgroup_name);
+	my_free(temp_servicedependency->servicegroup_name);
+	my_free(temp_servicedependency->dependent_hostgroup_name);
+	my_free(temp_servicedependency->dependent_servicegroup_name);
+	my_free(temp_servicedependency->dependency_period);
+	my_free(temp_servicedependency);
+	return OK;
+}
+
 
 /* resolves object definitions */
 int xodtemplate_resolve_objects(void) {
@@ -6028,8 +5019,6 @@ int xodtemplate_resolve_objects(void) {
 	return OK;
 	}
 
-
-
 /* resolves a timeperiod object */
 int xodtemplate_resolve_timeperiod(xodtemplate_timeperiod *this_timeperiod) {
 	char *temp_ptr = NULL;
@@ -6070,17 +5059,12 @@ int xodtemplate_resolve_timeperiod(xodtemplate_timeperiod *this_timeperiod) {
 		xodtemplate_resolve_timeperiod(template_timeperiod);
 
 		/* apply missing properties from template timeperiod... */
-		if(this_timeperiod->timeperiod_name == NULL && template_timeperiod->timeperiod_name != NULL)
-			this_timeperiod->timeperiod_name = (char *)strdup(template_timeperiod->timeperiod_name);
-		if(this_timeperiod->alias == NULL && template_timeperiod->alias != NULL)
-			this_timeperiod->alias = (char *)strdup(template_timeperiod->alias);
-		if(this_timeperiod->exclusions == NULL && template_timeperiod->exclusions != NULL)
-			this_timeperiod->exclusions = (char *)strdup(template_timeperiod->exclusions);
-		for(x = 0; x < 7; x++) {
-			if(this_timeperiod->timeranges[x] == NULL && template_timeperiod->timeranges[x] != NULL) {
-				this_timeperiod->timeranges[x] = (char *)strdup(template_timeperiod->timeranges[x]);
-				}
-			}
+		xod_inherit_str_nohave(this_timeperiod, template_timeperiod, timeperiod_name);
+		xod_inherit_str_nohave(this_timeperiod, template_timeperiod, alias);
+		xod_inherit_str_nohave(this_timeperiod, template_timeperiod, exclusions);
+		for(x = 0; x < 7; x++)
+			xod_inherit_str_nohave(this_timeperiod, template_timeperiod, timeranges[x]);
+
 		/* daterange exceptions require more work to apply missing ranges... */
 		for(x = 0; x < DATERANGE_TYPES; x++) {
 			for(template_daterange = template_timeperiod->exceptions[x]; template_daterange != NULL; template_daterange = template_daterange->next) {
@@ -6165,10 +5149,8 @@ int xodtemplate_resolve_command(xodtemplate_command *this_command) {
 		xodtemplate_resolve_command(template_command);
 
 		/* apply missing properties from template command... */
-		if(this_command->command_name == NULL && template_command->command_name != NULL)
-			this_command->command_name = (char *)strdup(template_command->command_name);
-		if(this_command->command_line == NULL && template_command->command_line != NULL)
-			this_command->command_line = (char *)strdup(template_command->command_line);
+		xod_inherit_str_nohave(this_command, template_command, command_name);
+		xod_inherit_str_nohave(this_command, template_command, command_line);
 		}
 
 	my_free(template_names);
@@ -6215,10 +5197,8 @@ int xodtemplate_resolve_contactgroup(xodtemplate_contactgroup *this_contactgroup
 		xodtemplate_resolve_contactgroup(template_contactgroup);
 
 		/* apply missing properties from template contactgroup... */
-		if(this_contactgroup->contactgroup_name == NULL && template_contactgroup->contactgroup_name != NULL)
-			this_contactgroup->contactgroup_name = (char *)strdup(template_contactgroup->contactgroup_name);
-		if(this_contactgroup->alias == NULL && template_contactgroup->alias != NULL)
-			this_contactgroup->alias = (char *)strdup(template_contactgroup->alias);
+		xod_inherit_str_nohave(this_contactgroup, template_contactgroup, contactgroup_name);
+		xod_inherit_str_nohave(this_contactgroup, template_contactgroup, alias);
 
 		xodtemplate_get_inherited_string(&template_contactgroup->have_members, &template_contactgroup->members, &this_contactgroup->have_members, &this_contactgroup->members);
 		xodtemplate_get_inherited_string(&template_contactgroup->have_contactgroup_members, &template_contactgroup->contactgroup_members, &this_contactgroup->have_contactgroup_members, &this_contactgroup->contactgroup_members);
@@ -6269,29 +5249,15 @@ int xodtemplate_resolve_hostgroup(xodtemplate_hostgroup *this_hostgroup) {
 		xodtemplate_resolve_hostgroup(template_hostgroup);
 
 		/* apply missing properties from template hostgroup... */
-		if(this_hostgroup->hostgroup_name == NULL && template_hostgroup->hostgroup_name != NULL)
-			this_hostgroup->hostgroup_name = (char *)strdup(template_hostgroup->hostgroup_name);
-		if(this_hostgroup->alias == NULL && template_hostgroup->alias != NULL)
-			this_hostgroup->alias = (char *)strdup(template_hostgroup->alias);
+		xod_inherit_str_nohave(this_hostgroup, template_hostgroup, hostgroup_name);
+		xod_inherit_str_nohave(this_hostgroup, template_hostgroup, alias);
 
 		xodtemplate_get_inherited_string(&template_hostgroup->have_members, &template_hostgroup->members, &this_hostgroup->have_members, &this_hostgroup->members);
 		xodtemplate_get_inherited_string(&template_hostgroup->have_hostgroup_members, &template_hostgroup->hostgroup_members, &this_hostgroup->have_hostgroup_members, &this_hostgroup->hostgroup_members);
 
-		if(this_hostgroup->have_notes == FALSE && template_hostgroup->have_notes == TRUE) {
-			if(this_hostgroup->notes == NULL && template_hostgroup->notes != NULL)
-				this_hostgroup->notes = (char *)strdup(template_hostgroup->notes);
-			this_hostgroup->have_notes = TRUE;
-			}
-		if(this_hostgroup->have_notes_url == FALSE && template_hostgroup->have_notes_url == TRUE) {
-			if(this_hostgroup->notes_url == NULL && template_hostgroup->notes_url != NULL)
-				this_hostgroup->notes_url = (char *)strdup(template_hostgroup->notes_url);
-			this_hostgroup->have_notes_url = TRUE;
-			}
-		if(this_hostgroup->have_action_url == FALSE && template_hostgroup->have_action_url == TRUE) {
-			if(this_hostgroup->action_url == NULL && template_hostgroup->action_url != NULL)
-				this_hostgroup->action_url = (char *)strdup(template_hostgroup->action_url);
-			this_hostgroup->have_action_url = TRUE;
-			}
+		xod_inherit_str(this_hostgroup, template_hostgroup, notes);
+		xod_inherit_str(this_hostgroup, template_hostgroup, notes_url);
+		xod_inherit_str(this_hostgroup, template_hostgroup, action_url);
 		}
 
 	my_free(template_names);
@@ -6338,29 +5304,15 @@ int xodtemplate_resolve_servicegroup(xodtemplate_servicegroup *this_servicegroup
 		xodtemplate_resolve_servicegroup(template_servicegroup);
 
 		/* apply missing properties from template servicegroup... */
-		if(this_servicegroup->servicegroup_name == NULL && template_servicegroup->servicegroup_name != NULL)
-			this_servicegroup->servicegroup_name = (char *)strdup(template_servicegroup->servicegroup_name);
-		if(this_servicegroup->alias == NULL && template_servicegroup->alias != NULL)
-			this_servicegroup->alias = (char *)strdup(template_servicegroup->alias);
+		xod_inherit_str_nohave(this_servicegroup, template_servicegroup, servicegroup_name);
+		xod_inherit_str_nohave(this_servicegroup, template_servicegroup, alias);
 
 		xodtemplate_get_inherited_string(&template_servicegroup->have_members, &template_servicegroup->members, &this_servicegroup->have_members, &this_servicegroup->members);
 		xodtemplate_get_inherited_string(&template_servicegroup->have_servicegroup_members, &template_servicegroup->servicegroup_members, &this_servicegroup->have_servicegroup_members, &this_servicegroup->servicegroup_members);
 
-		if(this_servicegroup->have_notes == FALSE && template_servicegroup->have_notes == TRUE) {
-			if(this_servicegroup->notes == NULL && template_servicegroup->notes != NULL)
-				this_servicegroup->notes = (char *)strdup(template_servicegroup->notes);
-			this_servicegroup->have_notes = TRUE;
-			}
-		if(this_servicegroup->have_notes_url == FALSE && template_servicegroup->have_notes_url == TRUE) {
-			if(this_servicegroup->notes_url == NULL && template_servicegroup->notes_url != NULL)
-				this_servicegroup->notes_url = (char *)strdup(template_servicegroup->notes_url);
-			this_servicegroup->have_notes_url = TRUE;
-			}
-		if(this_servicegroup->have_action_url == FALSE && template_servicegroup->have_action_url == TRUE) {
-			if(this_servicegroup->action_url == NULL && template_servicegroup->action_url != NULL)
-				this_servicegroup->action_url = (char *)strdup(template_servicegroup->action_url);
-			this_servicegroup->have_action_url = TRUE;
-			}
+		xod_inherit_str(this_servicegroup, template_servicegroup, notes);
+		xod_inherit_str(this_servicegroup, template_servicegroup, notes_url);
+		xod_inherit_str(this_servicegroup, template_servicegroup, action_url);
 		}
 
 	my_free(template_names);
@@ -6423,21 +5375,13 @@ int xodtemplate_resolve_servicedependency(xodtemplate_servicedependency *this_se
 			this_servicedependency->inherits_parent = template_servicedependency->inherits_parent;
 			this_servicedependency->have_inherits_parent = TRUE;
 			}
-		if(this_servicedependency->have_execution_dependency_options == FALSE && template_servicedependency->have_execution_dependency_options == TRUE) {
-			this_servicedependency->fail_execute_on_ok = template_servicedependency->fail_execute_on_ok;
-			this_servicedependency->fail_execute_on_unknown = template_servicedependency->fail_execute_on_unknown;
-			this_servicedependency->fail_execute_on_warning = template_servicedependency->fail_execute_on_warning;
-			this_servicedependency->fail_execute_on_critical = template_servicedependency->fail_execute_on_critical;
-			this_servicedependency->fail_execute_on_pending = template_servicedependency->fail_execute_on_pending;
-			this_servicedependency->have_execution_dependency_options = TRUE;
+		if(this_servicedependency->have_execution_failure_options == FALSE && template_servicedependency->have_execution_failure_options == TRUE) {
+			this_servicedependency->execution_failure_options = template_servicedependency->execution_failure_options;
+			this_servicedependency->have_execution_failure_options = TRUE;
 			}
-		if(this_servicedependency->have_notification_dependency_options == FALSE && template_servicedependency->have_notification_dependency_options == TRUE) {
-			this_servicedependency->fail_notify_on_ok = template_servicedependency->fail_notify_on_ok;
-			this_servicedependency->fail_notify_on_unknown = template_servicedependency->fail_notify_on_unknown;
-			this_servicedependency->fail_notify_on_warning = template_servicedependency->fail_notify_on_warning;
-			this_servicedependency->fail_notify_on_critical = template_servicedependency->fail_notify_on_critical;
-			this_servicedependency->fail_notify_on_pending = template_servicedependency->fail_notify_on_pending;
-			this_servicedependency->have_notification_dependency_options = TRUE;
+		if(this_servicedependency->have_notification_failure_options == FALSE && template_servicedependency->have_notification_failure_options == TRUE) {
+			this_servicedependency->notification_failure_options = template_servicedependency->notification_failure_options;
+			this_servicedependency->have_notification_failure_options = TRUE;
 			}
 		}
 
@@ -6508,10 +5452,7 @@ int xodtemplate_resolve_serviceescalation(xodtemplate_serviceescalation *this_se
 			this_serviceescalation->have_notification_interval = TRUE;
 			}
 		if(this_serviceescalation->have_escalation_options == FALSE && template_serviceescalation->have_escalation_options == TRUE) {
-			this_serviceescalation->escalate_on_warning = template_serviceescalation->escalate_on_warning;
-			this_serviceescalation->escalate_on_unknown = template_serviceescalation->escalate_on_unknown;
-			this_serviceescalation->escalate_on_critical = template_serviceescalation->escalate_on_critical;
-			this_serviceescalation->escalate_on_recovery = template_serviceescalation->escalate_on_recovery;
+			this_serviceescalation->escalation_options = template_serviceescalation->escalation_options;
 			this_serviceescalation->have_escalation_options = TRUE;
 			}
 		}
@@ -6562,80 +5503,28 @@ int xodtemplate_resolve_contact(xodtemplate_contact *this_contact) {
 		xodtemplate_resolve_contact(template_contact);
 
 		/* apply missing properties from template contact... */
-		if(this_contact->contact_name == NULL && template_contact->contact_name != NULL)
-			this_contact->contact_name = (char *)strdup(template_contact->contact_name);
-		if(this_contact->alias == NULL && template_contact->alias != NULL)
-			this_contact->alias = (char *)strdup(template_contact->alias);
+		xod_inherit_str_nohave(this_contact, template_contact, contact_name);
+		xod_inherit_str_nohave(this_contact, template_contact, alias);
 
-		if(this_contact->have_email == FALSE && template_contact->have_email == TRUE) {
-			if(this_contact->email == NULL && template_contact->email != NULL)
-				this_contact->email = (char *)strdup(template_contact->email);
-			this_contact->have_email = TRUE;
-			}
-		if(this_contact->have_pager == FALSE && template_contact->have_pager == TRUE) {
-			if(this_contact->pager == NULL && template_contact->pager != NULL)
-				this_contact->pager = (char *)strdup(template_contact->pager);
-			this_contact->have_pager = TRUE;
-			}
-		for(x = 0; x < MAX_XODTEMPLATE_CONTACT_ADDRESSES; x++) {
-			if(this_contact->have_address[x] == FALSE && template_contact->have_address[x] == TRUE) {
-				if(this_contact->address[x] == NULL && template_contact->address[x] != NULL)
-					this_contact->address[x] = (char *)strdup(template_contact->address[x]);
-				this_contact->have_address[x] = TRUE;
-				}
-			}
+		xod_inherit_str(this_contact, template_contact, email);
+		xod_inherit_str(this_contact, template_contact, pager);
+		for(x = 0; x < MAX_XODTEMPLATE_CONTACT_ADDRESSES; x++)
+			xod_inherit_str(this_contact, template_contact, address[x]);
 
 		xodtemplate_get_inherited_string(&template_contact->have_contact_groups, &template_contact->contact_groups, &this_contact->have_contact_groups, &this_contact->contact_groups);
 		xodtemplate_get_inherited_string(&template_contact->have_host_notification_commands, &template_contact->host_notification_commands, &this_contact->have_host_notification_commands, &this_contact->host_notification_commands);
 		xodtemplate_get_inherited_string(&template_contact->have_service_notification_commands, &template_contact->service_notification_commands, &this_contact->have_service_notification_commands, &this_contact->service_notification_commands);
 
-		if(this_contact->have_host_notification_period == FALSE && template_contact->have_host_notification_period == TRUE) {
-			if(this_contact->host_notification_period == NULL && template_contact->host_notification_period != NULL)
-				this_contact->host_notification_period = (char *)strdup(template_contact->host_notification_period);
-			this_contact->have_host_notification_period = TRUE;
-			}
-		if(this_contact->have_service_notification_period == FALSE && template_contact->have_service_notification_period == TRUE) {
-			if(this_contact->service_notification_period == NULL && template_contact->service_notification_period != NULL)
-				this_contact->service_notification_period = (char *)strdup(template_contact->service_notification_period);
-			this_contact->have_service_notification_period = TRUE;
-			}
-		if(this_contact->have_host_notification_options == FALSE && template_contact->have_host_notification_options == TRUE) {
-			this_contact->notify_on_host_down = template_contact->notify_on_host_down;
-			this_contact->notify_on_host_unreachable = template_contact->notify_on_host_unreachable;
-			this_contact->notify_on_host_recovery = template_contact->notify_on_host_recovery;
-			this_contact->notify_on_host_flapping = template_contact->notify_on_host_flapping;
-			this_contact->notify_on_host_downtime = template_contact->notify_on_host_downtime;
-			this_contact->have_host_notification_options = TRUE;
-			}
-		if(this_contact->have_service_notification_options == FALSE && template_contact->have_service_notification_options == TRUE) {
-			this_contact->notify_on_service_unknown = template_contact->notify_on_service_unknown;
-			this_contact->notify_on_service_warning = template_contact->notify_on_service_warning;
-			this_contact->notify_on_service_critical = template_contact->notify_on_service_critical;
-			this_contact->notify_on_service_recovery = template_contact->notify_on_service_recovery;
-			this_contact->notify_on_service_flapping = template_contact->notify_on_service_flapping;
-			this_contact->notify_on_service_downtime = template_contact->notify_on_service_downtime;
-			this_contact->have_service_notification_options = TRUE;
-			}
-		if(this_contact->have_host_notifications_enabled == FALSE && template_contact->have_host_notifications_enabled == TRUE) {
-			this_contact->host_notifications_enabled = template_contact->host_notifications_enabled;
-			this_contact->have_host_notifications_enabled = TRUE;
-			}
-		if(this_contact->have_service_notifications_enabled == FALSE && template_contact->have_service_notifications_enabled == TRUE) {
-			this_contact->service_notifications_enabled = template_contact->service_notifications_enabled;
-			this_contact->have_service_notifications_enabled = TRUE;
-			}
-		if(this_contact->have_can_submit_commands == FALSE && template_contact->have_can_submit_commands == TRUE) {
-			this_contact->can_submit_commands = template_contact->can_submit_commands;
-			this_contact->have_can_submit_commands = TRUE;
-			}
-		if(this_contact->have_retain_status_information == FALSE && template_contact->have_retain_status_information == TRUE) {
-			this_contact->retain_status_information = template_contact->retain_status_information;
-			this_contact->have_retain_status_information = TRUE;
-			}
-		if(this_contact->have_retain_nonstatus_information == FALSE && template_contact->have_retain_nonstatus_information == TRUE) {
-			this_contact->retain_nonstatus_information = template_contact->retain_nonstatus_information;
-			this_contact->have_retain_nonstatus_information = TRUE;
-			}
+		xod_inherit_str(this_contact, template_contact, host_notification_period);
+		xod_inherit_str(this_contact, template_contact, service_notification_period);
+		xod_inherit(this_contact, template_contact, host_notification_options);
+		xod_inherit(this_contact, template_contact, service_notification_options);
+		xod_inherit(this_contact, template_contact, host_notifications_enabled);
+		xod_inherit(this_contact, template_contact, service_notifications_enabled);
+		xod_inherit(this_contact, template_contact, can_submit_commands);
+		xod_inherit(this_contact, template_contact, retain_status_information);
+		xod_inherit(this_contact, template_contact, retain_nonstatus_information);
+		xod_inherit(this_contact, template_contact, minimum_value);
 
 		/* apply missing custom variables from template contact... */
 		for(temp_customvariablesmember = template_contact->custom_variables; temp_customvariablesmember != NULL; temp_customvariablesmember = temp_customvariablesmember->next) {
@@ -6697,175 +5586,49 @@ int xodtemplate_resolve_host(xodtemplate_host *this_host) {
 		xodtemplate_resolve_host(template_host);
 
 		/* apply missing properties from template host... */
-		if(this_host->host_name == NULL && template_host->host_name != NULL)
-			this_host->host_name = (char *)strdup(template_host->host_name);
-		if(this_host->have_display_name == FALSE && template_host->have_display_name == TRUE) {
-			if(this_host->display_name == NULL && template_host->display_name != NULL)
-				this_host->display_name = (char *)strdup(template_host->display_name);
-			this_host->have_display_name = TRUE;
-			}
-		if(this_host->alias == NULL && template_host->alias != NULL)
-			this_host->alias = (char *)strdup(template_host->alias);
-		if(this_host->address == NULL && template_host->address != NULL)
-			this_host->address = (char *)strdup(template_host->address);
+		xod_inherit_str_nohave(this_host, template_host, host_name);
+		xod_inherit_str(this_host, template_host, display_name);
+		xod_inherit_str_nohave(this_host, template_host, alias);
+		xod_inherit_str_nohave(this_host, template_host, address);
 
 		xodtemplate_get_inherited_string(&template_host->have_parents, &template_host->parents, &this_host->have_parents, &this_host->parents);
 		xodtemplate_get_inherited_string(&template_host->have_host_groups, &template_host->host_groups, &this_host->have_host_groups, &this_host->host_groups);
 		xodtemplate_get_inherited_string(&template_host->have_contact_groups, &template_host->contact_groups, &this_host->have_contact_groups, &this_host->contact_groups);
 		xodtemplate_get_inherited_string(&template_host->have_contacts, &template_host->contacts, &this_host->have_contacts, &this_host->contacts);
 
-		if(this_host->have_check_command == FALSE && template_host->have_check_command == TRUE) {
-			if(this_host->check_command == NULL && template_host->check_command != NULL)
-				this_host->check_command = (char *)strdup(template_host->check_command);
-			this_host->have_check_command = TRUE;
-			}
-		if(this_host->have_check_period == FALSE && template_host->have_check_period == TRUE) {
-			if(this_host->check_period == NULL && template_host->check_period != NULL)
-				this_host->check_period = (char *)strdup(template_host->check_period);
-			this_host->have_check_period = TRUE;
-			}
-		if(this_host->have_event_handler == FALSE && template_host->have_event_handler == TRUE) {
-			if(this_host->event_handler == NULL && template_host->event_handler != NULL)
-				this_host->event_handler = (char *)strdup(template_host->event_handler);
-			this_host->have_event_handler = TRUE;
-			}
-		if(this_host->have_notification_period == FALSE && template_host->have_notification_period == TRUE) {
-			if(this_host->notification_period == NULL && template_host->notification_period != NULL)
-				this_host->notification_period = (char *)strdup(template_host->notification_period);
-			this_host->have_notification_period = TRUE;
-			}
-		if(this_host->have_failure_prediction_options == FALSE && template_host->have_failure_prediction_options == TRUE) {
-			if(this_host->failure_prediction_options == NULL && template_host->failure_prediction_options != NULL)
-				this_host->failure_prediction_options = (char *)strdup(template_host->failure_prediction_options);
-			this_host->have_failure_prediction_options = TRUE;
-			}
-		if(this_host->have_notes == FALSE && template_host->have_notes == TRUE) {
-			if(this_host->notes == NULL && template_host->notes != NULL)
-				this_host->notes = (char *)strdup(template_host->notes);
-			this_host->have_notes = TRUE;
-			}
-		if(this_host->have_notes_url == FALSE && template_host->have_notes_url == TRUE) {
-			if(this_host->notes_url == NULL && template_host->notes_url != NULL)
-				this_host->notes_url = (char *)strdup(template_host->notes_url);
-			this_host->have_notes_url = TRUE;
-			}
-		if(this_host->have_action_url == FALSE && template_host->have_action_url == TRUE) {
-			if(this_host->action_url == NULL && template_host->action_url != NULL)
-				this_host->action_url = (char *)strdup(template_host->action_url);
-			this_host->have_action_url = TRUE;
-			}
-		if(this_host->have_icon_image == FALSE && template_host->have_icon_image == TRUE) {
-			if(this_host->icon_image == NULL && template_host->icon_image != NULL)
-				this_host->icon_image = (char *)strdup(template_host->icon_image);
-			this_host->have_icon_image = TRUE;
-			}
-		if(this_host->have_icon_image_alt == FALSE && template_host->have_icon_image_alt == TRUE) {
-			if(this_host->icon_image_alt == NULL && template_host->icon_image_alt != NULL)
-				this_host->icon_image_alt = (char *)strdup(template_host->icon_image_alt);
-			this_host->have_icon_image_alt = TRUE;
-			}
-		if(this_host->have_vrml_image == FALSE && template_host->have_vrml_image == TRUE) {
-			if(this_host->vrml_image == NULL && template_host->vrml_image != NULL)
-				this_host->vrml_image = (char *)strdup(template_host->vrml_image);
-			this_host->have_vrml_image = TRUE;
-			}
-		if(this_host->have_statusmap_image == FALSE && template_host->have_statusmap_image == TRUE) {
-			if(this_host->statusmap_image == NULL && template_host->statusmap_image != NULL)
-				this_host->statusmap_image = (char *)strdup(template_host->statusmap_image);
-			this_host->have_statusmap_image = TRUE;
-			}
-		if(this_host->have_initial_state == FALSE && template_host->have_initial_state == TRUE) {
-			this_host->initial_state = template_host->initial_state;
-			this_host->have_initial_state = TRUE;
-			}
-		if(this_host->have_check_interval == FALSE && template_host->have_check_interval == TRUE) {
-			this_host->check_interval = template_host->check_interval;
-			this_host->have_check_interval = TRUE;
-			}
-		if(this_host->have_retry_interval == FALSE && template_host->have_retry_interval == TRUE) {
-			this_host->retry_interval = template_host->retry_interval;
-			this_host->have_retry_interval = TRUE;
-			}
-		if(this_host->have_max_check_attempts == FALSE && template_host->have_max_check_attempts == TRUE) {
-			this_host->max_check_attempts = template_host->max_check_attempts;
-			this_host->have_max_check_attempts = TRUE;
-			}
-		if(this_host->have_active_checks_enabled == FALSE && template_host->have_active_checks_enabled == TRUE) {
-			this_host->active_checks_enabled = template_host->active_checks_enabled;
-			this_host->have_active_checks_enabled = TRUE;
-			}
-		if(this_host->have_passive_checks_enabled == FALSE && template_host->have_passive_checks_enabled == TRUE) {
-			this_host->passive_checks_enabled = template_host->passive_checks_enabled;
-			this_host->have_passive_checks_enabled = TRUE;
-			}
-		if(this_host->have_obsess_over_host == FALSE && template_host->have_obsess_over_host == TRUE) {
-			this_host->obsess_over_host = template_host->obsess_over_host;
-			this_host->have_obsess_over_host = TRUE;
-			}
-		if(this_host->have_event_handler_enabled == FALSE && template_host->have_event_handler_enabled == TRUE) {
-			this_host->event_handler_enabled = template_host->event_handler_enabled;
-			this_host->have_event_handler_enabled = TRUE;
-			}
-		if(this_host->have_check_freshness == FALSE && template_host->have_check_freshness == TRUE) {
-			this_host->check_freshness = template_host->check_freshness;
-			this_host->have_check_freshness = TRUE;
-			}
-		if(this_host->have_freshness_threshold == FALSE && template_host->have_freshness_threshold == TRUE) {
-			this_host->freshness_threshold = template_host->freshness_threshold;
-			this_host->have_freshness_threshold = TRUE;
-			}
-		if(this_host->have_low_flap_threshold == FALSE && template_host->have_low_flap_threshold == TRUE) {
-			this_host->low_flap_threshold = template_host->low_flap_threshold;
-			this_host->have_low_flap_threshold = TRUE;
-			}
-		if(this_host->have_high_flap_threshold == FALSE && template_host->have_high_flap_threshold == TRUE) {
-			this_host->high_flap_threshold = template_host->high_flap_threshold;
-			this_host->have_high_flap_threshold = TRUE;
-			}
-		if(this_host->have_flap_detection_enabled == FALSE && template_host->have_flap_detection_enabled == TRUE) {
-			this_host->flap_detection_enabled = template_host->flap_detection_enabled;
-			this_host->have_flap_detection_enabled = TRUE;
-			}
-		if(this_host->have_flap_detection_options == FALSE && template_host->have_flap_detection_options == TRUE) {
-			this_host->flap_detection_on_up = template_host->flap_detection_on_up;
-			this_host->flap_detection_on_down = template_host->flap_detection_on_down;
-			this_host->flap_detection_on_unreachable = template_host->flap_detection_on_unreachable;
-			this_host->have_flap_detection_options = TRUE;
-			}
-		if(this_host->have_notification_options == FALSE && template_host->have_notification_options == TRUE) {
-			this_host->notify_on_down = template_host->notify_on_down;
-			this_host->notify_on_unreachable = template_host->notify_on_unreachable;
-			this_host->notify_on_recovery = template_host->notify_on_recovery;
-			this_host->notify_on_flapping = template_host->notify_on_flapping;
-			this_host->notify_on_downtime = template_host->notify_on_downtime;
-			this_host->have_notification_options = TRUE;
-			}
-		if(this_host->have_notifications_enabled == FALSE && template_host->have_notifications_enabled == TRUE) {
-			this_host->notifications_enabled = template_host->notifications_enabled;
-			this_host->have_notifications_enabled = TRUE;
-			}
-		if(this_host->have_notification_interval == FALSE && template_host->have_notification_interval == TRUE) {
-			this_host->notification_interval = template_host->notification_interval;
-			this_host->have_notification_interval = TRUE;
-			}
-		if(this_host->have_first_notification_delay == FALSE && template_host->have_first_notification_delay == TRUE) {
-			this_host->first_notification_delay = template_host->first_notification_delay;
-			this_host->have_first_notification_delay = TRUE;
-			}
-		if(this_host->have_stalking_options == FALSE && template_host->have_stalking_options == TRUE) {
-			this_host->stalk_on_up = template_host->stalk_on_up;
-			this_host->stalk_on_down = template_host->stalk_on_down;
-			this_host->stalk_on_unreachable = template_host->stalk_on_unreachable;
-			this_host->have_stalking_options = TRUE;
-			}
-		if(this_host->have_process_perf_data == FALSE && template_host->have_process_perf_data == TRUE) {
-			this_host->process_perf_data = template_host->process_perf_data;
-			this_host->have_process_perf_data = TRUE;
-			}
-		if(this_host->have_failure_prediction_enabled == FALSE && template_host->have_failure_prediction_enabled == TRUE) {
-			this_host->failure_prediction_enabled = template_host->failure_prediction_enabled;
-			this_host->have_failure_prediction_enabled = TRUE;
-			}
+		xod_inherit_str(this_host, template_host, check_command);
+		xod_inherit_str(this_host, template_host, check_period);
+		xod_inherit_str(this_host, template_host, event_handler);
+		xod_inherit_str(this_host, template_host, notification_period);
+		xod_inherit_str(this_host, template_host, notes);
+		xod_inherit_str(this_host, template_host, notes_url);
+		xod_inherit_str(this_host, template_host, action_url);
+		xod_inherit_str(this_host, template_host, icon_image);
+		xod_inherit_str(this_host, template_host, icon_image_alt);
+		xod_inherit_str(this_host, template_host, vrml_image);
+		xod_inherit_str(this_host, template_host, statusmap_image);
+
+		xod_inherit(this_host, template_host, initial_state);
+		xod_inherit(this_host, template_host, check_interval);
+		xod_inherit(this_host, template_host, retry_interval);
+		xod_inherit(this_host, template_host, max_check_attempts);
+		xod_inherit(this_host, template_host, active_checks_enabled);
+		xod_inherit(this_host, template_host, passive_checks_enabled);
+		xod_inherit(this_host, template_host, obsess);
+		xod_inherit(this_host, template_host, event_handler_enabled);
+		xod_inherit(this_host, template_host, check_freshness);
+		xod_inherit(this_host, template_host, freshness_threshold);
+		xod_inherit(this_host, template_host, low_flap_threshold);
+		xod_inherit(this_host, template_host, high_flap_threshold);
+		xod_inherit(this_host, template_host, flap_detection_enabled);
+		xod_inherit(this_host, template_host, flap_detection_options);
+		xod_inherit(this_host, template_host, notification_options);
+		xod_inherit(this_host, template_host, notifications_enabled);
+		xod_inherit(this_host, template_host, notification_interval);
+		xod_inherit(this_host, template_host, first_notification_delay);
+		xod_inherit(this_host, template_host, stalking_options);
+		xod_inherit(this_host, template_host, process_perf_data);
+
 		if(this_host->have_2d_coords == FALSE && template_host->have_2d_coords == TRUE) {
 			this_host->x_2d = template_host->x_2d;
 			this_host->y_2d = template_host->y_2d;
@@ -6877,14 +5640,9 @@ int xodtemplate_resolve_host(xodtemplate_host *this_host) {
 			this_host->z_3d = template_host->z_3d;
 			this_host->have_3d_coords = TRUE;
 			}
-		if(this_host->have_retain_status_information == FALSE && template_host->have_retain_status_information == TRUE) {
-			this_host->retain_status_information = template_host->retain_status_information;
-			this_host->have_retain_status_information = TRUE;
-			}
-		if(this_host->have_retain_nonstatus_information == FALSE && template_host->have_retain_nonstatus_information == TRUE) {
-			this_host->retain_nonstatus_information = template_host->retain_nonstatus_information;
-			this_host->have_retain_nonstatus_information = TRUE;
-			}
+
+		xod_inherit(this_host, template_host, retain_status_information);
+		xod_inherit(this_host, template_host, retain_nonstatus_information);
 
 		/* apply missing custom variables from template host... */
 		for(temp_customvariablesmember = template_host->custom_variables; temp_customvariablesmember != NULL; temp_customvariablesmember = temp_customvariablesmember->next) {
@@ -6946,17 +5704,10 @@ int xodtemplate_resolve_service(xodtemplate_service *this_service) {
 		xodtemplate_resolve_service(template_service);
 
 		/* apply missing properties from template service... */
-		if(this_service->have_service_description == FALSE && template_service->have_service_description == TRUE) {
-			if(this_service->service_description == NULL && template_service->service_description != NULL)
-				this_service->service_description = (char *)strdup(template_service->service_description);
-			this_service->have_service_description = TRUE;
-			}
-		if(this_service->have_display_name == FALSE && template_service->have_display_name == TRUE) {
-			if(this_service->display_name == NULL && template_service->display_name != NULL)
-				this_service->display_name = (char *)strdup(template_service->display_name);
-			this_service->have_display_name = TRUE;
-			}
+		xod_inherit_str(this_service, template_service, service_description);
+		xod_inherit_str(this_service, template_service, display_name);
 
+		xodtemplate_get_inherited_string(&template_service->have_parents, &template_service->parents, &this_service->have_parents, &this_service->parents);
 		xodtemplate_get_inherited_string(&template_service->have_host_name, &template_service->host_name, &this_service->have_host_name, &this_service->host_name);
 		xodtemplate_get_inherited_string(&template_service->have_hostgroup_name, &template_service->hostgroup_name, &this_service->have_hostgroup_name, &this_service->hostgroup_name);
 		xodtemplate_get_inherited_string(&template_service->have_service_groups, &template_service->service_groups, &this_service->have_service_groups, &this_service->service_groups);
@@ -6968,168 +5719,42 @@ int xodtemplate_resolve_service(xodtemplate_service *this_service) {
 				my_free(this_service->check_command);
 				this_service->have_check_command = FALSE;
 				}
-			if(this_service->have_check_command == FALSE) {
-				if(this_service->check_command == NULL && template_service->check_command != NULL)
-					this_service->check_command = (char *)strdup(template_service->check_command);
-				this_service->have_check_command = TRUE;
-				}
 			}
-		if(this_service->have_check_period == FALSE && template_service->have_check_period == TRUE) {
-			if(this_service->check_period == NULL && template_service->check_period != NULL)
-				this_service->check_period = (char *)strdup(template_service->check_period);
-			this_service->have_check_period = TRUE;
-			}
-		if(this_service->have_event_handler == FALSE && template_service->have_event_handler == TRUE) {
-			if(this_service->event_handler == NULL && template_service->event_handler != NULL)
-				this_service->event_handler = (char *)strdup(template_service->event_handler);
-			this_service->have_event_handler = TRUE;
-			}
-		if(this_service->have_notification_period == FALSE && template_service->have_notification_period == TRUE) {
-			if(this_service->notification_period == NULL && template_service->notification_period != NULL)
-				this_service->notification_period = (char *)strdup(template_service->notification_period);
-			this_service->have_notification_period = TRUE;
-			}
-		if(this_service->have_failure_prediction_options == FALSE && template_service->have_failure_prediction_options == TRUE) {
-			if(this_service->failure_prediction_options == NULL && template_service->failure_prediction_options != NULL)
-				this_service->failure_prediction_options = (char *)strdup(template_service->failure_prediction_options);
-			this_service->have_failure_prediction_options = TRUE;
-			}
-		if(this_service->have_notes == FALSE && template_service->have_notes == TRUE) {
-			if(this_service->notes == NULL && template_service->notes != NULL)
-				this_service->notes = (char *)strdup(template_service->notes);
-			this_service->have_notes = TRUE;
-			}
-		if(this_service->have_notes_url == FALSE && template_service->have_notes_url == TRUE) {
-			if(this_service->notes_url == NULL && template_service->notes_url != NULL)
-				this_service->notes_url = (char *)strdup(template_service->notes_url);
-			this_service->have_notes_url = TRUE;
-			}
-		if(this_service->have_action_url == FALSE && template_service->have_action_url == TRUE) {
-			if(this_service->action_url == NULL && template_service->action_url != NULL)
-				this_service->action_url = (char *)strdup(template_service->action_url);
-			this_service->have_action_url = TRUE;
-			}
-		if(this_service->have_icon_image == FALSE && template_service->have_icon_image == TRUE) {
-			if(this_service->icon_image == NULL && template_service->icon_image != NULL)
-				this_service->icon_image = (char *)strdup(template_service->icon_image);
-			this_service->have_icon_image = TRUE;
-			}
-		if(this_service->have_icon_image_alt == FALSE && template_service->have_icon_image_alt == TRUE) {
-			if(this_service->icon_image_alt == NULL && template_service->icon_image_alt != NULL)
-				this_service->icon_image_alt = (char *)strdup(template_service->icon_image_alt);
-			this_service->have_icon_image_alt = TRUE;
-			}
-		if(this_service->have_initial_state == FALSE && template_service->have_initial_state == TRUE) {
-			this_service->initial_state = template_service->initial_state;
-			this_service->have_initial_state = TRUE;
-			}
-		if(this_service->have_max_check_attempts == FALSE && template_service->have_max_check_attempts == TRUE) {
-			this_service->max_check_attempts = template_service->max_check_attempts;
-			this_service->have_max_check_attempts = TRUE;
-			}
-		if(this_service->have_check_interval == FALSE && template_service->have_check_interval == TRUE) {
-			this_service->check_interval = template_service->check_interval;
-			this_service->have_check_interval = TRUE;
-			}
-		if(this_service->have_retry_interval == FALSE && template_service->have_retry_interval == TRUE) {
-			this_service->retry_interval = template_service->retry_interval;
-			this_service->have_retry_interval = TRUE;
-			}
-		if(this_service->have_active_checks_enabled == FALSE && template_service->have_active_checks_enabled == TRUE) {
-			this_service->active_checks_enabled = template_service->active_checks_enabled;
-			this_service->have_active_checks_enabled = TRUE;
-			}
-		if(this_service->have_passive_checks_enabled == FALSE && template_service->have_passive_checks_enabled == TRUE) {
-			this_service->passive_checks_enabled = template_service->passive_checks_enabled;
-			this_service->have_passive_checks_enabled = TRUE;
-			}
-		if(this_service->have_parallelize_check == FALSE && template_service->have_parallelize_check == TRUE) {
-			this_service->parallelize_check = template_service->parallelize_check;
-			this_service->have_parallelize_check = TRUE;
-			}
-		if(this_service->have_is_volatile == FALSE && template_service->have_is_volatile == TRUE) {
-			this_service->is_volatile = template_service->is_volatile;
-			this_service->have_is_volatile = TRUE;
-			}
-		if(this_service->have_obsess_over_service == FALSE && template_service->have_obsess_over_service == TRUE) {
-			this_service->obsess_over_service = template_service->obsess_over_service;
-			this_service->have_obsess_over_service = TRUE;
-			}
-		if(this_service->have_event_handler_enabled == FALSE && template_service->have_event_handler_enabled == TRUE) {
-			this_service->event_handler_enabled = template_service->event_handler_enabled;
-			this_service->have_event_handler_enabled = TRUE;
-			}
-		if(this_service->have_check_freshness == FALSE && template_service->have_check_freshness == TRUE) {
-			this_service->check_freshness = template_service->check_freshness;
-			this_service->have_check_freshness = TRUE;
-			}
-		if(this_service->have_freshness_threshold == FALSE && template_service->have_freshness_threshold == TRUE) {
-			this_service->freshness_threshold = template_service->freshness_threshold;
-			this_service->have_freshness_threshold = TRUE;
-			}
-		if(this_service->have_low_flap_threshold == FALSE && template_service->have_low_flap_threshold == TRUE) {
-			this_service->low_flap_threshold = template_service->low_flap_threshold;
-			this_service->have_low_flap_threshold = TRUE;
-			}
-		if(this_service->have_high_flap_threshold == FALSE && template_service->have_high_flap_threshold == TRUE) {
-			this_service->high_flap_threshold = template_service->high_flap_threshold;
-			this_service->have_high_flap_threshold = TRUE;
-			}
-		if(this_service->have_flap_detection_enabled == FALSE && template_service->have_flap_detection_enabled == TRUE) {
-			this_service->flap_detection_enabled = template_service->flap_detection_enabled;
-			this_service->have_flap_detection_enabled = TRUE;
-			}
-		if(this_service->have_flap_detection_options == FALSE && template_service->have_flap_detection_options == TRUE) {
-			this_service->flap_detection_on_ok = template_service->flap_detection_on_ok;
-			this_service->flap_detection_on_unknown = template_service->flap_detection_on_unknown;
-			this_service->flap_detection_on_warning = template_service->flap_detection_on_warning;
-			this_service->flap_detection_on_critical = template_service->flap_detection_on_critical;
-			this_service->have_flap_detection_options = TRUE;
-			}
-		if(this_service->have_notification_options == FALSE && template_service->have_notification_options == TRUE) {
-			this_service->notify_on_unknown = template_service->notify_on_unknown;
-			this_service->notify_on_warning = template_service->notify_on_warning;
-			this_service->notify_on_critical = template_service->notify_on_critical;
-			this_service->notify_on_recovery = template_service->notify_on_recovery;
-			this_service->notify_on_flapping = template_service->notify_on_flapping;
-			this_service->notify_on_downtime = template_service->notify_on_downtime;
-			this_service->have_notification_options = TRUE;
-			}
-		if(this_service->have_notifications_enabled == FALSE && template_service->have_notifications_enabled == TRUE) {
-			this_service->notifications_enabled = template_service->notifications_enabled;
-			this_service->have_notifications_enabled = TRUE;
-			}
-		if(this_service->have_notification_interval == FALSE && template_service->have_notification_interval == TRUE) {
-			this_service->notification_interval = template_service->notification_interval;
-			this_service->have_notification_interval = TRUE;
-			}
-		if(this_service->have_first_notification_delay == FALSE && template_service->have_first_notification_delay == TRUE) {
-			this_service->first_notification_delay = template_service->first_notification_delay;
-			this_service->have_first_notification_delay = TRUE;
-			}
-		if(this_service->have_stalking_options == FALSE && template_service->have_stalking_options == TRUE) {
-			this_service->stalk_on_ok = template_service->stalk_on_ok;
-			this_service->stalk_on_unknown = template_service->stalk_on_unknown;
-			this_service->stalk_on_warning = template_service->stalk_on_warning;
-			this_service->stalk_on_critical = template_service->stalk_on_critical;
-			this_service->have_stalking_options = TRUE;
-			}
-		if(this_service->have_process_perf_data == FALSE && template_service->have_process_perf_data == TRUE) {
-			this_service->process_perf_data = template_service->process_perf_data;
-			this_service->have_process_perf_data = TRUE;
-			}
-		if(this_service->have_failure_prediction_enabled == FALSE && template_service->have_failure_prediction_enabled == TRUE) {
-			this_service->failure_prediction_enabled = template_service->failure_prediction_enabled;
-			this_service->have_failure_prediction_enabled = TRUE;
-			}
-		if(this_service->have_retain_status_information == FALSE && template_service->have_retain_status_information == TRUE) {
-			this_service->retain_status_information = template_service->retain_status_information;
-			this_service->have_retain_status_information = TRUE;
-			}
-		if(this_service->have_retain_nonstatus_information == FALSE && template_service->have_retain_nonstatus_information == TRUE) {
-			this_service->retain_nonstatus_information = template_service->retain_nonstatus_information;
-			this_service->have_retain_nonstatus_information = TRUE;
-			}
+		xod_inherit_str(this_service, template_service, check_command);
+
+		xod_inherit_str(this_service, template_service, check_period);
+		xod_inherit_str(this_service, template_service, event_handler);
+		xod_inherit_str(this_service, template_service, notification_period);
+		xod_inherit_str(this_service, template_service, notes);
+		xod_inherit_str(this_service, template_service, notes_url);
+		xod_inherit_str(this_service, template_service, action_url);
+		xod_inherit_str(this_service, template_service, icon_image);
+		xod_inherit_str(this_service, template_service, icon_image_alt);
+
+		xod_inherit(this_service, template_service, initial_state);
+		xod_inherit(this_service, template_service, max_check_attempts);
+		xod_inherit(this_service, template_service, check_interval);
+		xod_inherit(this_service, template_service, retry_interval);
+		xod_inherit(this_service, template_service, active_checks_enabled);
+		xod_inherit(this_service, template_service, passive_checks_enabled);
+		xod_inherit(this_service, template_service, parallelize_check);
+		xod_inherit(this_service, template_service, is_volatile);
+		xod_inherit(this_service, template_service, obsess);
+		xod_inherit(this_service, template_service, event_handler_enabled);
+		xod_inherit(this_service, template_service, check_freshness);
+		xod_inherit(this_service, template_service, freshness_threshold);
+		xod_inherit(this_service, template_service, low_flap_threshold);
+		xod_inherit(this_service, template_service, high_flap_threshold);
+		xod_inherit(this_service, template_service, flap_detection_enabled);
+		xod_inherit(this_service, template_service, flap_detection_options);
+		xod_inherit(this_service, template_service, notification_options);
+		xod_inherit(this_service, template_service, notifications_enabled);
+		xod_inherit(this_service, template_service, notification_interval);
+		xod_inherit(this_service, template_service, first_notification_delay);
+		xod_inherit(this_service, template_service, stalking_options);
+		xod_inherit(this_service, template_service, process_perf_data);
+		xod_inherit(this_service, template_service, retain_status_information);
+		xod_inherit(this_service, template_service, retain_nonstatus_information);
 
 		/* apply missing custom variables from template service... */
 		for(temp_customvariablesmember = template_service->custom_variables; temp_customvariablesmember != NULL; temp_customvariablesmember = temp_customvariablesmember->next) {
@@ -7194,29 +5819,10 @@ int xodtemplate_resolve_hostdependency(xodtemplate_hostdependency *this_hostdepe
 		xodtemplate_get_inherited_string(&template_hostdependency->have_hostgroup_name, &template_hostdependency->hostgroup_name, &this_hostdependency->have_hostgroup_name, &this_hostdependency->hostgroup_name);
 		xodtemplate_get_inherited_string(&template_hostdependency->have_dependent_hostgroup_name, &template_hostdependency->dependent_hostgroup_name, &this_hostdependency->have_dependent_hostgroup_name, &this_hostdependency->dependent_hostgroup_name);
 
-		if(this_hostdependency->have_dependency_period == FALSE && template_hostdependency->have_dependency_period == TRUE) {
-			if(this_hostdependency->dependency_period == NULL && template_hostdependency->dependency_period != NULL)
-				this_hostdependency->dependency_period = (char *)strdup(template_hostdependency->dependency_period);
-			this_hostdependency->have_dependency_period = TRUE;
-			}
-		if(this_hostdependency->have_inherits_parent == FALSE && template_hostdependency->have_inherits_parent == TRUE) {
-			this_hostdependency->inherits_parent = template_hostdependency->inherits_parent;
-			this_hostdependency->have_inherits_parent = TRUE;
-			}
-		if(this_hostdependency->have_execution_dependency_options == FALSE && template_hostdependency->have_execution_dependency_options == TRUE) {
-			this_hostdependency->fail_execute_on_up = template_hostdependency->fail_execute_on_up;
-			this_hostdependency->fail_execute_on_down = template_hostdependency->fail_execute_on_down;
-			this_hostdependency->fail_execute_on_unreachable = template_hostdependency->fail_execute_on_unreachable;
-			this_hostdependency->fail_execute_on_pending = template_hostdependency->fail_execute_on_pending;
-			this_hostdependency->have_execution_dependency_options = TRUE;
-			}
-		if(this_hostdependency->have_notification_dependency_options == FALSE && template_hostdependency->have_notification_dependency_options == TRUE) {
-			this_hostdependency->fail_notify_on_up = template_hostdependency->fail_notify_on_up;
-			this_hostdependency->fail_notify_on_down = template_hostdependency->fail_notify_on_down;
-			this_hostdependency->fail_notify_on_unreachable = template_hostdependency->fail_notify_on_unreachable;
-			this_hostdependency->fail_notify_on_pending = template_hostdependency->fail_notify_on_pending;
-			this_hostdependency->have_notification_dependency_options = TRUE;
-			}
+		xod_inherit_str(this_hostdependency, template_hostdependency, dependency_period);
+		xod_inherit(this_hostdependency, template_hostdependency, inherits_parent);
+		xod_inherit(this_hostdependency, template_hostdependency, execution_failure_options);
+		xod_inherit(this_hostdependency, template_hostdependency, notification_failure_options);
 		}
 
 	my_free(template_names);
@@ -7266,29 +5872,11 @@ int xodtemplate_resolve_hostescalation(xodtemplate_hostescalation *this_hostesca
 		xodtemplate_get_inherited_string(&template_hostescalation->have_contact_groups, &template_hostescalation->contact_groups, &this_hostescalation->have_contact_groups, &this_hostescalation->contact_groups);
 		xodtemplate_get_inherited_string(&template_hostescalation->have_contacts, &template_hostescalation->contacts, &this_hostescalation->have_contacts, &this_hostescalation->contacts);
 
-		if(this_hostescalation->have_escalation_period == FALSE && template_hostescalation->have_escalation_period == TRUE) {
-			if(this_hostescalation->escalation_period == NULL && template_hostescalation->escalation_period != NULL)
-				this_hostescalation->escalation_period = (char *)strdup(template_hostescalation->escalation_period);
-			this_hostescalation->have_escalation_period = TRUE;
-			}
-		if(this_hostescalation->have_first_notification == FALSE && template_hostescalation->have_first_notification == TRUE) {
-			this_hostescalation->first_notification = template_hostescalation->first_notification;
-			this_hostescalation->have_first_notification = TRUE;
-			}
-		if(this_hostescalation->have_last_notification == FALSE && template_hostescalation->have_last_notification == TRUE) {
-			this_hostescalation->last_notification = template_hostescalation->last_notification;
-			this_hostescalation->have_last_notification = TRUE;
-			}
-		if(this_hostescalation->have_notification_interval == FALSE && template_hostescalation->have_notification_interval == TRUE) {
-			this_hostescalation->notification_interval = template_hostescalation->notification_interval;
-			this_hostescalation->have_notification_interval = TRUE;
-			}
-		if(this_hostescalation->have_escalation_options == FALSE && template_hostescalation->have_escalation_options == TRUE) {
-			this_hostescalation->escalate_on_down = template_hostescalation->escalate_on_down;
-			this_hostescalation->escalate_on_unreachable = template_hostescalation->escalate_on_unreachable;
-			this_hostescalation->escalate_on_recovery = template_hostescalation->escalate_on_recovery;
-			this_hostescalation->have_escalation_options = TRUE;
-			}
+		xod_inherit_str(this_hostescalation, template_hostescalation, escalation_period);
+		xod_inherit(this_hostescalation, template_hostescalation, first_notification);
+		xod_inherit(this_hostescalation, template_hostescalation, last_notification);
+		xod_inherit(this_hostescalation, template_hostescalation, notification_interval);
+		xod_inherit(this_hostescalation, template_hostescalation, escalation_options);
 		}
 
 	my_free(template_names);
@@ -7334,51 +5922,16 @@ int xodtemplate_resolve_hostextinfo(xodtemplate_hostextinfo *this_hostextinfo) {
 		xodtemplate_resolve_hostextinfo(template_hostextinfo);
 
 		/* apply missing properties from template hostextinfo... */
-		if(this_hostextinfo->have_host_name == FALSE && template_hostextinfo->have_host_name == TRUE) {
-			if(this_hostextinfo->host_name == NULL && template_hostextinfo->host_name != NULL)
-				this_hostextinfo->host_name = (char *)strdup(template_hostextinfo->host_name);
-			this_hostextinfo->have_host_name = TRUE;
-			}
-		if(this_hostextinfo->have_hostgroup_name == FALSE && template_hostextinfo->have_hostgroup_name == TRUE) {
-			if(this_hostextinfo->hostgroup_name == NULL && template_hostextinfo->hostgroup_name != NULL)
-				this_hostextinfo->hostgroup_name = (char *)strdup(template_hostextinfo->hostgroup_name);
-			this_hostextinfo->have_hostgroup_name = TRUE;
-			}
-		if(this_hostextinfo->have_notes == FALSE && template_hostextinfo->have_notes == TRUE) {
-			if(this_hostextinfo->notes == NULL && template_hostextinfo->notes != NULL)
-				this_hostextinfo->notes = (char *)strdup(template_hostextinfo->notes);
-			this_hostextinfo->have_notes = TRUE;
-			}
-		if(this_hostextinfo->have_notes_url == FALSE && template_hostextinfo->have_notes_url == TRUE) {
-			if(this_hostextinfo->notes_url == NULL && template_hostextinfo->notes_url != NULL)
-				this_hostextinfo->notes_url = (char *)strdup(template_hostextinfo->notes_url);
-			this_hostextinfo->have_notes_url = TRUE;
-			}
-		if(this_hostextinfo->have_action_url == FALSE && template_hostextinfo->have_action_url == TRUE) {
-			if(this_hostextinfo->action_url == NULL && template_hostextinfo->action_url != NULL)
-				this_hostextinfo->action_url = (char *)strdup(template_hostextinfo->action_url);
-			this_hostextinfo->have_action_url = TRUE;
-			}
-		if(this_hostextinfo->have_icon_image == FALSE && template_hostextinfo->have_icon_image == TRUE) {
-			if(this_hostextinfo->icon_image == NULL && template_hostextinfo->icon_image != NULL)
-				this_hostextinfo->icon_image = (char *)strdup(template_hostextinfo->icon_image);
-			this_hostextinfo->have_icon_image = TRUE;
-			}
-		if(this_hostextinfo->have_icon_image_alt == FALSE && template_hostextinfo->have_icon_image_alt == TRUE) {
-			if(this_hostextinfo->icon_image_alt == NULL && template_hostextinfo->icon_image_alt != NULL)
-				this_hostextinfo->icon_image_alt = (char *)strdup(template_hostextinfo->icon_image_alt);
-			this_hostextinfo->have_icon_image_alt = TRUE;
-			}
-		if(this_hostextinfo->have_vrml_image == FALSE && template_hostextinfo->have_vrml_image == TRUE) {
-			if(this_hostextinfo->vrml_image == NULL && template_hostextinfo->vrml_image != NULL)
-				this_hostextinfo->vrml_image = (char *)strdup(template_hostextinfo->vrml_image);
-			this_hostextinfo->have_vrml_image = TRUE;
-			}
-		if(this_hostextinfo->have_statusmap_image == FALSE && template_hostextinfo->have_statusmap_image == TRUE) {
-			if(this_hostextinfo->statusmap_image == NULL && template_hostextinfo->statusmap_image != NULL)
-				this_hostextinfo->statusmap_image = (char *)strdup(template_hostextinfo->statusmap_image);
-			this_hostextinfo->have_statusmap_image = TRUE;
-			}
+		xod_inherit_str(this_hostextinfo, template_hostextinfo, host_name);
+		xod_inherit_str(this_hostextinfo, template_hostextinfo, hostgroup_name);
+		xod_inherit_str(this_hostextinfo, template_hostextinfo, notes);
+		xod_inherit_str(this_hostextinfo, template_hostextinfo, notes_url);
+		xod_inherit_str(this_hostextinfo, template_hostextinfo, action_url);
+		xod_inherit_str(this_hostextinfo, template_hostextinfo, icon_image);
+		xod_inherit_str(this_hostextinfo, template_hostextinfo, icon_image_alt);
+		xod_inherit_str(this_hostextinfo, template_hostextinfo, vrml_image);
+		xod_inherit_str(this_hostextinfo, template_hostextinfo, statusmap_image);
+
 		if(this_hostextinfo->have_2d_coords == FALSE && template_hostextinfo->have_2d_coords == TRUE) {
 			this_hostextinfo->x_2d = template_hostextinfo->x_2d;
 			this_hostextinfo->y_2d = template_hostextinfo->y_2d;
@@ -7435,46 +5988,14 @@ int xodtemplate_resolve_serviceextinfo(xodtemplate_serviceextinfo *this_servicee
 		xodtemplate_resolve_serviceextinfo(template_serviceextinfo);
 
 		/* apply missing properties from template serviceextinfo... */
-		if(this_serviceextinfo->have_host_name == FALSE && template_serviceextinfo->have_host_name == TRUE) {
-			if(this_serviceextinfo->host_name == NULL && template_serviceextinfo->host_name != NULL)
-				this_serviceextinfo->host_name = (char *)strdup(template_serviceextinfo->host_name);
-			this_serviceextinfo->have_host_name = TRUE;
-			}
-		if(this_serviceextinfo->have_hostgroup_name == FALSE && template_serviceextinfo->have_hostgroup_name == TRUE) {
-			if(this_serviceextinfo->hostgroup_name == NULL && template_serviceextinfo->hostgroup_name != NULL)
-				this_serviceextinfo->hostgroup_name = (char *)strdup(template_serviceextinfo->hostgroup_name);
-			this_serviceextinfo->have_hostgroup_name = TRUE;
-			}
-		if(this_serviceextinfo->have_service_description == FALSE && template_serviceextinfo->have_service_description == TRUE) {
-			if(this_serviceextinfo->service_description == NULL && template_serviceextinfo->service_description != NULL)
-				this_serviceextinfo->service_description = (char *)strdup(template_serviceextinfo->service_description);
-			this_serviceextinfo->have_service_description = TRUE;
-			}
-		if(this_serviceextinfo->have_notes == FALSE && template_serviceextinfo->have_notes == TRUE) {
-			if(this_serviceextinfo->notes == NULL && template_serviceextinfo->notes != NULL)
-				this_serviceextinfo->notes = (char *)strdup(template_serviceextinfo->notes);
-			this_serviceextinfo->have_notes = TRUE;
-			}
-		if(this_serviceextinfo->have_notes_url == FALSE && template_serviceextinfo->have_notes_url == TRUE) {
-			if(this_serviceextinfo->notes_url == NULL && template_serviceextinfo->notes_url != NULL)
-				this_serviceextinfo->notes_url = (char *)strdup(template_serviceextinfo->notes_url);
-			this_serviceextinfo->have_notes_url = TRUE;
-			}
-		if(this_serviceextinfo->have_action_url == FALSE && template_serviceextinfo->have_action_url == TRUE) {
-			if(this_serviceextinfo->action_url == NULL && template_serviceextinfo->action_url != NULL)
-				this_serviceextinfo->action_url = (char *)strdup(template_serviceextinfo->action_url);
-			this_serviceextinfo->have_action_url = TRUE;
-			}
-		if(this_serviceextinfo->have_icon_image == FALSE && template_serviceextinfo->have_icon_image == TRUE) {
-			if(this_serviceextinfo->icon_image == NULL && template_serviceextinfo->icon_image != NULL)
-				this_serviceextinfo->icon_image = (char *)strdup(template_serviceextinfo->icon_image);
-			this_serviceextinfo->have_icon_image = TRUE;
-			}
-		if(this_serviceextinfo->have_icon_image_alt == FALSE && template_serviceextinfo->have_icon_image_alt == TRUE) {
-			if(this_serviceextinfo->icon_image_alt == NULL && template_serviceextinfo->icon_image_alt != NULL)
-				this_serviceextinfo->icon_image_alt = (char *)strdup(template_serviceextinfo->icon_image_alt);
-			this_serviceextinfo->have_icon_image_alt = TRUE;
-			}
+		xod_inherit_str(this_serviceextinfo, template_serviceextinfo, host_name);
+		xod_inherit_str(this_serviceextinfo, template_serviceextinfo, hostgroup_name);
+		xod_inherit_str(this_serviceextinfo, template_serviceextinfo, service_description);
+		xod_inherit_str(this_serviceextinfo, template_serviceextinfo, notes);
+		xod_inherit_str(this_serviceextinfo, template_serviceextinfo, notes_url);
+		xod_inherit_str(this_serviceextinfo, template_serviceextinfo, action_url);
+		xod_inherit_str(this_serviceextinfo, template_serviceextinfo, icon_image);
+		xod_inherit_str(this_serviceextinfo, template_serviceextinfo, icon_image_alt);
 		}
 
 	my_free(template_names);
@@ -7482,7 +6003,6 @@ int xodtemplate_resolve_serviceextinfo(xodtemplate_serviceextinfo *this_servicee
 	return OK;
 	}
 
-#endif
 
 
 
@@ -7490,21 +6010,152 @@ int xodtemplate_resolve_serviceextinfo(xodtemplate_serviceextinfo *this_servicee
 /*************** OBJECT RECOMBOBULATION FUNCTIONS *****************/
 /******************************************************************/
 
-#ifdef NSCORE
+/*
+ * note: The cast to xodtemplate_host works for all objects because 'id'
+ * is the first item of host, service and contact structs, and C
+ * guarantees that the first member is always the same as the one listed
+ * in the struct definition.
+ */
+static int _xodtemplate_add_group_member(objectlist **list, bitmap *in, bitmap *reject, void *obj) {
+	xodtemplate_host *h = (xodtemplate_host *)obj;
+
+	if(!list || !obj)
+		return ERROR;
+
+	if(bitmap_isset(in, h->id) || bitmap_isset(reject, h->id))
+		return OK;
+	bitmap_set(in, h->id);
+	return prepend_object_to_objectlist(list, obj);
+	}
+#define xodtemplate_add_group_member(g, m) \
+	_xodtemplate_add_group_member(&g->member_list, g->member_map, g->reject_map, m)
+#define xodtemplate_add_servicegroup_member xodtemplate_add_group_member
+#define xodtemplate_add_contactgroup_member xodtemplate_add_group_member
+#define xodtemplate_add_hostgroup_member xodtemplate_add_group_member
 
 
 /* recombobulates contactgroup definitions */
+static int xodtemplate_recombobulate_contactgroup_subgroups(xodtemplate_contactgroup *temp_contactgroup) {
+	objectlist *mlist, *glist;
+
+	if(temp_contactgroup == NULL)
+		return ERROR;
+
+	/* if this one's already handled somehow, we return early */
+	if(temp_contactgroup->loop_status != XOD_NEW)
+		return temp_contactgroup->loop_status;
+
+	/* mark it as seen */
+	temp_contactgroup->loop_status = XOD_SEEN;
+
+	/* resolve included groups' members and add them to ours */
+	for(glist = temp_contactgroup->group_list; glist; glist = glist->next) {
+		int result;
+		xodtemplate_contactgroup *inc = (xodtemplate_contactgroup *)glist->object_ptr;
+		result = xodtemplate_recombobulate_contactgroup_subgroups(inc);
+		if(result != XOD_OK) {
+			if(result == ERROR)
+				return ERROR;
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Contactgroups '%s' and '%s' are part of a contactgroup_members include loop\n", temp_contactgroup->contactgroup_name, inc->contactgroup_name);
+			inc->loop_status = XOD_LOOPY;
+			temp_contactgroup->loop_status = XOD_LOOPY;
+			break;
+			}
+
+		for(mlist = inc->member_list; mlist; mlist = mlist->next) {
+			xodtemplate_contact *c = (xodtemplate_contact *)mlist->object_ptr;
+			if(xodtemplate_add_contactgroup_member(temp_contactgroup, c) != OK) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Failed to add '%s' as a subgroup member contact of contactgroup '%s' from contactgroup '%s'\n",
+					  c->contact_name, temp_contactgroup->contactgroup_name, inc->contactgroup_name);
+				return ERROR;
+				}
+			}
+		}
+
+	if(temp_contactgroup->loop_status == XOD_SEEN)
+		temp_contactgroup->loop_status = XOD_OK;
+
+	return temp_contactgroup->loop_status;
+	}
+
+
+
 int xodtemplate_recombobulate_contactgroups(void) {
 	xodtemplate_contact *temp_contact = NULL;
 	xodtemplate_contactgroup *temp_contactgroup = NULL;
-	xodtemplate_memberlist *temp_memberlist = NULL;
-	xodtemplate_memberlist *this_memberlist = NULL;
 	char *contactgroup_names = NULL;
 	char *temp_ptr = NULL;
-	char *new_members = NULL;
 
-	/* This should happen before we expand contactgroup members, to avoid duplicate contact memberships 01/07/2006 EG */
-	/* process all contacts that have contactgroup directives */
+	/* expand members of all contactgroups - this could be done in xodtemplate_register_contactgroup(), but we can save the CGIs some work if we do it here */
+	for(temp_contactgroup = xodtemplate_contactgroup_list; temp_contactgroup; temp_contactgroup = temp_contactgroup->next) {
+		objectlist *next, *list, *accept = NULL;
+
+		if(temp_contactgroup->members == NULL)
+			continue;
+
+		/*
+		 * If the contactgroup has no accept or reject list and no group
+		 * members we don't need the bitmaps for it. bitmap_isset()
+		 * will return 0 when passed a NULL map, so we can safely use
+		 * that to add any items from the object list later
+		 */
+		if(temp_contactgroup->members == NULL && temp_contactgroup->contactgroup_members == NULL)
+			continue;
+
+		if(!(temp_contactgroup->member_map = bitmap_create(xodcount.contacts))) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not create contactgroup bitmap\n");
+			return ERROR;
+			}
+
+		if(temp_contactgroup->contactgroup_members) {
+			xodtemplate_contactgroup *cg;
+			char *ptr, *next_ptr;
+
+			for(next_ptr = ptr = temp_contactgroup->contactgroup_members; ptr; ptr = next_ptr + 1) {
+				next_ptr = strchr(ptr, ',');
+				if(next_ptr)
+					*next_ptr = 0;
+				while(*ptr == ' ' || *ptr == '\t')
+					ptr++;
+				strip(ptr);
+				if(!(cg = xodtemplate_find_real_contactgroup(ptr))) {
+					logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not find member group '%s' specified in contactgroup '%s' (config file '%s', starting on line %d)\n", ptr, temp_contactgroup->contactgroup_name, xodtemplate_config_file_name(temp_contactgroup->_config_file), temp_contactgroup->_start_line);
+					return ERROR;
+					}
+				add_object_to_objectlist(&temp_contactgroup->group_list, cg);
+				}
+			my_free(temp_contactgroup->contactgroup_members);
+			}
+
+		/* move on if we have no members */
+		if(temp_contactgroup->members == NULL)
+			continue;
+
+		/* we might need this */
+		if(!(temp_contactgroup->reject_map = bitmap_create(xodcount.contacts))) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not create reject map for contactgroup '%s'", temp_contactgroup->contactgroup_name);
+			return ERROR;
+			}
+
+		/* get list of contacts in the contactgroup */
+		if(xodtemplate_expand_contacts(&accept, temp_contactgroup->reject_map, temp_contactgroup->members, temp_contactgroup->_config_file, temp_contactgroup->_start_line) != OK) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Failed to expand contacts for contactgroup '%s' (config file '%s', starting at line %d)\n",
+				  temp_contactgroup->contactgroup_name,
+				  xodtemplate_config_file_name(temp_contactgroup->_config_file),
+				  temp_contactgroup->_start_line);
+			return ERROR;
+			}
+
+		my_free(temp_contactgroup->members);
+		for(list = accept; list; list = next) {
+			temp_contact = (xodtemplate_contact *)list->object_ptr;
+			next = list->next;
+			free(list);
+			xodtemplate_add_contactgroup_member(temp_contactgroup, temp_contact);
+			}
+		}
+
+	/* process all contacts with contactgroups directives */
 	for(temp_contact = xodtemplate_contact_list; temp_contact != NULL; temp_contact = temp_contact->next) {
 
 		/* skip contacts without contactgroup directives or contact names */
@@ -7512,8 +6163,11 @@ int xodtemplate_recombobulate_contactgroups(void) {
 			continue;
 
 		/* preprocess the contactgroup list, to change "grp1,grp2,grp3,!grp2" into "grp1,grp3" */
-		if((contactgroup_names = xodtemplate_process_contactgroup_names(temp_contact->contact_groups, temp_contact->_config_file, temp_contact->_start_line)) == NULL)
+		if((contactgroup_names = xodtemplate_process_contactgroup_names(temp_contact->contact_groups, temp_contact->_config_file, temp_contact->_start_line)) == NULL) {
+			logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: Failed to process contactgroups for contact '%s' (config file '%s', starting at line %d)\n",
+				  temp_contact->contact_name, xodtemplate_config_file_name(temp_contact->_config_file),	temp_contact->_start_line);
 			return ERROR;
+			}
 
 		/* process the list of contactgroups */
 		for(temp_ptr = strtok(contactgroup_names, ","); temp_ptr; temp_ptr = strtok(NULL, ",")) {
@@ -7529,164 +6183,150 @@ int xodtemplate_recombobulate_contactgroups(void) {
 				return ERROR;
 				}
 
-			/* add this contact to the contactgroup members directive */
-			if(temp_contactgroup->members == NULL)
-				temp_contactgroup->members = (char *)strdup(temp_contact->contact_name);
-			else {
-				new_members = (char *)realloc(temp_contactgroup->members, strlen(temp_contactgroup->members) + strlen(temp_contact->contact_name) + 2);
-				if(new_members != NULL) {
-					temp_contactgroup->members = new_members;
-					strcat(temp_contactgroup->members, ",");
-					strcat(temp_contactgroup->members, temp_contact->contact_name);
-					}
+			if(!temp_contactgroup->member_map && !(temp_contactgroup->member_map = bitmap_create(xodcount.contacts))) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Failed to create member map for contactgroup '%s'\n",
+					  temp_contactgroup->contactgroup_name);
+				return ERROR;
 				}
+			/* add this contact to the contactgroup members directive */
+			xodtemplate_add_contactgroup_member(temp_contactgroup, temp_contact);
 			}
 
 		/* free memory */
 		my_free(contactgroup_names);
 		}
 
-
 	/* expand subgroup membership recursively */
-	for(temp_contactgroup = xodtemplate_contactgroup_list; temp_contactgroup; temp_contactgroup = temp_contactgroup->next)
-		xodtemplate_recombobulate_contactgroup_subgroups(temp_contactgroup, NULL);
-
-
-	/* expand members of all contactgroups - this could be done in xodtemplate_register_contactgroup(), but we can save the CGIs some work if we do it here */
 	for(temp_contactgroup = xodtemplate_contactgroup_list; temp_contactgroup; temp_contactgroup = temp_contactgroup->next) {
-
-		if(temp_contactgroup->members == NULL)
-			continue;
-
-		/* get list of contacts in the contactgroup */
-		temp_memberlist = xodtemplate_expand_contactgroups_and_contacts(temp_contactgroup->contactgroup_members, temp_contactgroup->members, temp_contactgroup->_config_file, temp_contactgroup->_start_line);
-
-		/* add all members to the contact group */
-		if(temp_memberlist == NULL) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand member contacts specified in contactgroup (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_contactgroup->_config_file), temp_contactgroup->_start_line);
+		if(xodtemplate_recombobulate_contactgroup_subgroups(temp_contactgroup) != XOD_OK)
 			return ERROR;
-			}
-		my_free(temp_contactgroup->members);
-		for(this_memberlist = temp_memberlist; this_memberlist; this_memberlist = this_memberlist->next) {
-
-			/* add this contact to the contactgroup members directive */
-			if(temp_contactgroup->members == NULL)
-				temp_contactgroup->members = (char *)strdup(this_memberlist->name1);
-			else {
-				new_members = (char *)realloc(temp_contactgroup->members, strlen(temp_contactgroup->members) + strlen(this_memberlist->name1) + 2);
-				if(new_members != NULL) {
-					temp_contactgroup->members = new_members;
-					strcat(temp_contactgroup->members, ",");
-					strcat(temp_contactgroup->members, this_memberlist->name1);
-					}
-				}
-			}
-		xodtemplate_free_memberlist(&temp_memberlist);
-		}
+		/* rejects are no longer necessary */
+		bitmap_destroy(temp_contactgroup->reject_map);
+		/* make sure we don't recursively add subgroup members again */
+		free_objectlist(&temp_contactgroup->group_list);
+	}
 
 	return OK;
 	}
 
 
 
-int xodtemplate_recombobulate_contactgroup_subgroups(xodtemplate_contactgroup *temp_contactgroup, char **members) {
-	xodtemplate_contactgroup *sub_group = NULL;
-	char *orig_cgmembers = NULL;
-	char *cgmembers = NULL;
-	char *newmembers = NULL;
-	char *buf = NULL;
-	char *ptr = NULL;
+static int xodtemplate_recombobulate_hostgroup_subgroups(xodtemplate_hostgroup *temp_hostgroup) {
+	objectlist *mlist, *glist;
 
-	if(temp_contactgroup == NULL)
+	if(temp_hostgroup == NULL)
 		return ERROR;
 
-	/* resolve subgroup memberships first */
-	if(temp_contactgroup->contactgroup_members != NULL) {
+	/* if this one's already handled somehow, we return early */
+	if(temp_hostgroup->loop_status != XOD_NEW)
+		return temp_hostgroup->loop_status;
 
-		/* save members, null pointer so we don't recurse into infinite hell */
-		orig_cgmembers = temp_contactgroup->contactgroup_members;
-		temp_contactgroup->contactgroup_members = NULL;
+	/* mark this one as seen */
+	temp_hostgroup->loop_status = XOD_SEEN;
 
-		/* make new working copy of members */
-		cgmembers = (char *)strdup(orig_cgmembers);
-
-		ptr = cgmembers;
-		while((buf = ptr) != NULL) {
-
-			/* get next member for next run*/
-			ptr = strchr(ptr, ',');
-			if(ptr) {
-				ptr[0] = '\x0';
-				ptr++;
-				}
-
-			strip(buf);
-
-			/* find subgroup and recurse */
-			if((sub_group = xodtemplate_find_real_contactgroup(buf)) == NULL) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not find member group '%s' specified in contactgroup (config file '%s', starting on line %d)\n", buf, xodtemplate_config_file_name(temp_contactgroup->_config_file), temp_contactgroup->_start_line);
+	/* resolve included groups' members and add them to ours */
+	for(glist = temp_hostgroup->group_list; glist; glist = glist->next) {
+		int result;
+		xodtemplate_hostgroup *inc = (xodtemplate_hostgroup *)glist->object_ptr;
+		result = xodtemplate_recombobulate_hostgroup_subgroups(inc);
+		if(result != XOD_OK) {
+			if(result == ERROR)
+				return ERROR;
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Hostgroups '%s' and '%s' part of a hostgroup_members include loop\n", temp_hostgroup->hostgroup_name, inc->hostgroup_name);
+			inc->loop_status = XOD_LOOPY;
+			temp_hostgroup->loop_status = XOD_LOOPY;
+			break;
+			}
+		for(mlist = inc->member_list; mlist; mlist = mlist->next) {
+			xodtemplate_host *h = (xodtemplate_host *)mlist->object_ptr;
+			if (xodtemplate_add_hostgroup_member(temp_hostgroup, mlist->object_ptr) != OK) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Failed to add '%s' as a subgroup member host of hostgroup '%s' from hostgroup '%s'\n",
+					  h->host_name, temp_hostgroup->hostgroup_name, inc->hostgroup_name);
 				return ERROR;
 				}
-			xodtemplate_recombobulate_contactgroup_subgroups(sub_group, &newmembers);
-
-			/* add new (sub) members */
-			if(newmembers != NULL) {
-				if(temp_contactgroup->members == NULL)
-					temp_contactgroup->members = (char *)strdup(newmembers);
-				else if((temp_contactgroup->members = realloc(temp_contactgroup->members, strlen(temp_contactgroup->members) + strlen(newmembers) + 2))) {
-					strcat(temp_contactgroup->members, ",");
-					strcat(temp_contactgroup->members, newmembers);
-					}
-				}
 			}
-
-		/* free memory */
-		my_free(cgmembers);
-
-		/* restore group members */
-		temp_contactgroup->contactgroup_members = orig_cgmembers;
 		}
 
-	/* return contact members */
-	if(members != NULL)
-		*members = temp_contactgroup->members;
+	if(temp_hostgroup->loop_status == XOD_SEEN)
+		temp_hostgroup->loop_status = XOD_OK;
 
-	return OK;
+	return temp_hostgroup->loop_status;
 	}
 
-
-
-/* NOTE: this was originally implemented in the late alpha cycle of
- * 3.0 development, but was removed in 3.0b2, as flattening
- * contactgroups into a list of contacts makes it impossible for
- * NDOUtils to create a reverse mapping */
-/* recombobulates contacts in various object definitions */
-int xodtemplate_recombobulate_object_contacts(void) {
-	return OK;
-	}
 
 
 /* recombobulates hostgroup definitions */
 int xodtemplate_recombobulate_hostgroups(void) {
 	xodtemplate_host *temp_host = NULL;
 	xodtemplate_hostgroup *temp_hostgroup = NULL;
-	xodtemplate_memberlist *temp_memberlist = NULL;
-	xodtemplate_memberlist *this_memberlist = NULL;
 	char *hostgroup_names = NULL;
-	char *temp_ptr = NULL;
-	char *new_members = NULL;
+	char *ptr, *next_ptr, *temp_ptr = NULL;
 
-#ifdef DEBUG
-	printf("** PRE-EXPANSION 1\n");
+	/* expand members of all hostgroups - this could be done in xodtemplate_register_hostgroup(), but we can save the CGIs some work if we do it here */
 	for(temp_hostgroup = xodtemplate_hostgroup_list; temp_hostgroup; temp_hostgroup = temp_hostgroup->next) {
-		printf("HOSTGROUP [%s]\n", temp_hostgroup->hostgroup_name);
-		printf("H MEMBERS: %s\n", temp_hostgroup->members);
-		printf("G MEMBERS: %s\n", temp_hostgroup->hostgroup_members);
-		printf("\n");
-		}
-#endif
+		objectlist *next, *list, *accept = NULL;
 
-	/* This should happen before we expand hostgroup members, to avoid duplicate host memberships 01/07/2006 EG */
+		/*
+		 * if the hostgroup has no accept or reject list and no group
+		 * members we don't need the bitmaps for it. bitmap_isset()
+		 * will return 0 when passed a NULL map, so we can safely use
+		 * that to add any items from the object list later.
+		 */
+		if(temp_hostgroup->members == NULL && temp_hostgroup->hostgroup_members == NULL)
+			continue;
+
+		/* we'll need the member_map */
+		if (!(temp_hostgroup->member_map = bitmap_create(xodcount.hosts))) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not create member map for hostgroup '%s'\n", temp_hostgroup->hostgroup_name);
+			return ERROR;
+			}
+
+		/* resolve groups into a group-list */
+		for(next_ptr = ptr = temp_hostgroup->hostgroup_members; next_ptr; ptr = next_ptr + 1) {
+			xodtemplate_hostgroup *hg;
+			next_ptr = strchr(ptr, ',');
+			if(next_ptr)
+				*next_ptr = 0;
+			while(*ptr == ' ' || *ptr == '\t')
+				ptr++;
+
+			strip(ptr);
+
+			if (!(hg = xodtemplate_find_real_hostgroup(ptr))) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not find member group '%s' specified in hostgroup '%s' (config file '%s', starting on line %d)\n", ptr, temp_hostgroup->hostgroup_name, xodtemplate_config_file_name(temp_hostgroup->_config_file), temp_hostgroup->_start_line);
+				return ERROR;
+				}
+			add_object_to_objectlist(&temp_hostgroup->group_list, hg);
+			}
+
+		/* move on if we have no members */
+		if(temp_hostgroup->members == NULL)
+			continue;
+
+		/* we might need this */
+		if(!(temp_hostgroup->reject_map = bitmap_create(xodcount.hosts))) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not create reject map for hostgroup '%s'\n", temp_hostgroup->hostgroup_name);
+			return ERROR;
+			}
+
+		/* get list of hosts in the hostgroup */
+		xodtemplate_expand_hosts(&accept, temp_hostgroup->reject_map, temp_hostgroup->members, temp_hostgroup->_config_file, temp_hostgroup->_start_line);
+
+		if (!accept && !bitmap_count_set_bits(temp_hostgroup->reject_map)) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand members specified in hostgroup (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_hostgroup->_config_file), temp_hostgroup->_start_line);
+			return ERROR;
+			}
+
+		my_free(temp_hostgroup->members);
+
+		for (list = accept; list; list = next) {
+			temp_host = (xodtemplate_host *)list->object_ptr;
+			next = list->next;
+			free(list);
+			xodtemplate_add_hostgroup_member(temp_hostgroup, temp_host);
+			}
+		}
+
 	/* process all hosts that have hostgroup directives */
 	for(temp_host = xodtemplate_host_list; temp_host != NULL; temp_host = temp_host->next) {
 
@@ -7700,8 +6340,11 @@ int xodtemplate_recombobulate_hostgroups(void) {
 
 		/* preprocess the hostgroup list, to change "grp1,grp2,grp3,!grp2" into "grp1,grp3" */
 		/* 10/18/07 EG an empty return value means an error occured */
-		if((hostgroup_names = xodtemplate_process_hostgroup_names(temp_host->host_groups, temp_host->_config_file, temp_host->_start_line)) == NULL)
+		if((hostgroup_names = xodtemplate_process_hostgroup_names(temp_host->host_groups, temp_host->_config_file, temp_host->_start_line)) == NULL) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Failed to process hostgroup names for host '%s' (config file '%s', starting at line %d)\n",
+				  temp_host->host_name, xodtemplate_config_file_name(temp_host->_config_file), temp_host->_start_line);
 			return ERROR;
+			}
 
 		/* process the list of hostgroups */
 		for(temp_ptr = strtok(hostgroup_names, ","); temp_ptr; temp_ptr = strtok(NULL, ",")) {
@@ -7716,174 +6359,152 @@ int xodtemplate_recombobulate_hostgroups(void) {
 				my_free(hostgroup_names);
 				return ERROR;
 				}
-
-			/* add this list to the hostgroup members directive */
-			if(temp_hostgroup->members == NULL)
-				temp_hostgroup->members = (char *)strdup(temp_host->host_name);
-			else {
-				new_members = (char *)realloc(temp_hostgroup->members, strlen(temp_hostgroup->members) + strlen(temp_host->host_name) + 2);
-				if(new_members != NULL) {
-					temp_hostgroup->members = new_members;
-					strcat(temp_hostgroup->members, ",");
-					strcat(temp_hostgroup->members, temp_host->host_name);
-					}
+			if(!temp_hostgroup->member_map && !(temp_hostgroup->member_map = bitmap_create(xodcount.hosts))) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Failed to create bitmap to join host '%s' to group '%s'\n",
+					  temp_host->host_name, temp_hostgroup->hostgroup_name);
+				return ERROR;
 				}
+
+			/* add ourselves to the hostgroup member list */
+			xodtemplate_add_hostgroup_member(temp_hostgroup, temp_host);
 			}
 
 		/* free memory */
 		my_free(hostgroup_names);
 		}
 
-#ifdef DEBUG
-	printf("** POST-EXPANSION 1\n");
-	for(temp_hostgroup = xodtemplate_hostgroup_list; temp_hostgroup; temp_hostgroup = temp_hostgroup->next) {
-		printf("HOSTGROUP [%s]\n", temp_hostgroup->hostgroup_name);
-		printf("H MEMBERS: %s\n", temp_hostgroup->members);
-		printf("G MEMBERS: %s\n", temp_hostgroup->hostgroup_members);
-		printf("\n");
-		}
-#endif
-
 	/* expand subgroup membership recursively */
-	for(temp_hostgroup = xodtemplate_hostgroup_list; temp_hostgroup; temp_hostgroup = temp_hostgroup->next)
-		xodtemplate_recombobulate_hostgroup_subgroups(temp_hostgroup, NULL);
-
-	/* expand members of all hostgroups - this could be done in xodtemplate_register_hostgroup(), but we can save the CGIs some work if we do it here */
 	for(temp_hostgroup = xodtemplate_hostgroup_list; temp_hostgroup; temp_hostgroup = temp_hostgroup->next) {
-
-		if(temp_hostgroup->members == NULL && temp_hostgroup->hostgroup_members == NULL)
-			continue;
-
-		/* skip hostgroups that shouldn't be registered */
-		if(temp_hostgroup->register_object == FALSE)
-			continue;
-
-		/* get list of hosts in the hostgroup */
-		temp_memberlist = xodtemplate_expand_hostgroups_and_hosts(NULL, temp_hostgroup->members, temp_hostgroup->_config_file, temp_hostgroup->_start_line);
-
-		/* add all members to the host group */
-		if(temp_memberlist == NULL) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand members specified in hostgroup (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_hostgroup->_config_file), temp_hostgroup->_start_line);
+		if(xodtemplate_recombobulate_hostgroup_subgroups(temp_hostgroup) != XOD_OK) {
 			return ERROR;
 			}
-		my_free(temp_hostgroup->members);
-		for(this_memberlist = temp_memberlist; this_memberlist; this_memberlist = this_memberlist->next) {
-
-			/* add this host to the hostgroup members directive */
-			if(temp_hostgroup->members == NULL)
-				temp_hostgroup->members = (char *)strdup(this_memberlist->name1);
-			else {
-				new_members = (char *)realloc(temp_hostgroup->members, strlen(temp_hostgroup->members) + strlen(this_memberlist->name1) + 2);
-				if(new_members != NULL) {
-					temp_hostgroup->members = new_members;
-					strcat(temp_hostgroup->members, ",");
-					strcat(temp_hostgroup->members, this_memberlist->name1);
-					}
-				}
-			}
-		xodtemplate_free_memberlist(&temp_memberlist);
+		/* rejects are no longer necessary */
+		bitmap_destroy(temp_hostgroup->reject_map);
+		/* make sure we don't recursively add subgroup members again */
+		free_objectlist(&temp_hostgroup->group_list);
 		}
-
-#ifdef DEBUG
-	printf("** POST-EXPANSION 2\n");
-	for(temp_hostgroup = xodtemplate_hostgroup_list; temp_hostgroup; temp_hostgroup = temp_hostgroup->next) {
-		printf("HOSTGROUP [%s]\n", temp_hostgroup->hostgroup_name);
-		printf("H MEMBERS: %s\n", temp_hostgroup->members);
-		printf("G MEMBERS: %s\n", temp_hostgroup->hostgroup_members);
-		printf("\n");
-		}
-#endif
 
 	return OK;
 	}
 
 
 
+static int xodtemplate_recombobulate_servicegroup_subgroups(xodtemplate_servicegroup *temp_servicegroup) {
+	objectlist *mlist, *glist;
 
-int xodtemplate_recombobulate_hostgroup_subgroups(xodtemplate_hostgroup *temp_hostgroup, char **members) {
-	xodtemplate_hostgroup *sub_group = NULL;
-	char *orig_hgmembers = NULL;
-	char *hgmembers = NULL;
-	char *newmembers = NULL;
-	char *buf = NULL;
-	char *ptr = NULL;
-
-	if(temp_hostgroup == NULL)
+	if(temp_servicegroup == NULL)
 		return ERROR;
 
-	/* resolve subgroup memberships first */
-	if(temp_hostgroup->hostgroup_members != NULL) {
+	if(temp_servicegroup->loop_status != XOD_NEW)
+		return temp_servicegroup->loop_status;
 
-		/* save members, null pointer so we don't recurse into infinite hell */
-		orig_hgmembers = temp_hostgroup->hostgroup_members;
-		temp_hostgroup->hostgroup_members = NULL;
+	/* mark this as seen */
+	temp_servicegroup->loop_status = XOD_SEEN;
 
-		/* make new working copy of members */
-		hgmembers = (char *)strdup(orig_hgmembers);
+	for(glist = temp_servicegroup->group_list; glist; glist = glist->next) {
+		int result;
+		xodtemplate_servicegroup *inc = (xodtemplate_servicegroup *)glist->object_ptr;
 
-		ptr = hgmembers;
-		while((buf = ptr) != NULL) {
-
-			/* get next member for next run*/
-			ptr = strchr(ptr, ',');
-			if(ptr) {
-				ptr[0] = '\x0';
-				ptr++;
-				}
-
-			strip(buf);
-
-			/* find subgroup and recurse */
-			if((sub_group = xodtemplate_find_real_hostgroup(buf)) == NULL) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not find member group '%s' specified in hostgroup (config file '%s', starting on line %d)\n", buf, xodtemplate_config_file_name(temp_hostgroup->_config_file), temp_hostgroup->_start_line);
+		result = xodtemplate_recombobulate_servicegroup_subgroups(inc);
+		if(result != XOD_OK) {
+			if(result == ERROR)
+				return ERROR;
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Servicegroups '%s' and '%s' are part of a servicegroup_members include loop\n",
+				  temp_servicegroup->servicegroup_name, inc->servicegroup_name);
+			inc->loop_status = XOD_LOOPY;
+			temp_servicegroup->loop_status = XOD_LOOPY;
+			break;
+			}
+		for(mlist = inc->member_list; mlist; mlist = mlist->next) {
+			xodtemplate_service *s = (xodtemplate_service *)mlist->object_ptr;
+			if(xodtemplate_add_servicegroup_member(temp_servicegroup, s) != OK) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Failed to add service '%s' on host '%s' as a subgroup member of servicegroup '%s' from servicegroup '%s'\n",
+					  s->host_name, s->service_description, temp_servicegroup->servicegroup_name, inc->servicegroup_name);
 				return ERROR;
 				}
-			xodtemplate_recombobulate_hostgroup_subgroups(sub_group, &newmembers);
-
-			/* add new (sub) members */
-			if(newmembers != NULL) {
-				if(temp_hostgroup->members == NULL)
-					temp_hostgroup->members = (char *)strdup(newmembers);
-				else if((temp_hostgroup->members = realloc(temp_hostgroup->members, strlen(temp_hostgroup->members) + strlen(newmembers) + 2))) {
-					strcat(temp_hostgroup->members, ",");
-					strcat(temp_hostgroup->members, newmembers);
-					}
-				}
 			}
-
-		/* free memory */
-		my_free(hgmembers);
-
-		/* restore group members */
-		temp_hostgroup->hostgroup_members = orig_hgmembers;
 		}
 
-	/* return host members */
-	if(members != NULL)
-		*members = temp_hostgroup->members;
+	if(temp_servicegroup->loop_status == XOD_SEEN)
+		temp_servicegroup->loop_status = XOD_OK;
 
-	return OK;
+	return temp_servicegroup->loop_status;
 	}
-
-
 
 /* recombobulates servicegroup definitions */
 /***** THIS NEEDS TO BE CALLED AFTER OBJECTS (SERVICES) ARE RESOLVED AND DUPLICATED *****/
 int xodtemplate_recombobulate_servicegroups(void) {
 	xodtemplate_service *temp_service = NULL;
 	xodtemplate_servicegroup *temp_servicegroup = NULL;
-	xodtemplate_memberlist *temp_memberlist = NULL;
-	xodtemplate_memberlist *this_memberlist = NULL;
 	char *servicegroup_names = NULL;
-	char *member_names = NULL;
-	char *host_name = NULL;
-	char *service_description = NULL;
-	char *temp_ptr = NULL;
-	char *temp_ptr2 = NULL;
-	char *new_members = NULL;
+	char *temp_ptr;
 
-	/* This should happen before we expand servicegroup members, to avoid duplicate service memberships 01/07/2006 EG */
-	/* process all services that have servicegroup directives */
+	/*
+	 * expand servicegroup members. We need this to get the rejected ones
+	 * before we add members from the servicelist.
+	 */
+	for(temp_servicegroup = xodtemplate_servicegroup_list; temp_servicegroup; temp_servicegroup = temp_servicegroup->next) {
+		objectlist *list, *next, *accept = NULL;
+
+		if(temp_servicegroup->members == NULL && temp_servicegroup->servicegroup_members == NULL)
+			continue;
+
+		/* we'll need the member map */
+		if(!(temp_servicegroup->member_map = bitmap_create(xodcount.services))) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not create member map for servicegroup '%s'\n", temp_servicegroup->servicegroup_name);
+			return ERROR;
+			}
+
+		/* resolve groups into a group-list */
+		if(temp_servicegroup->servicegroup_members) {
+			xodtemplate_servicegroup *sg;
+			char *ptr, *next_ptr = NULL;
+			for(ptr = temp_servicegroup->servicegroup_members; ptr; ptr = next_ptr + 1) {
+				next_ptr = strchr(ptr, ',');
+				if(next_ptr)
+					*next_ptr = 0;
+				strip(ptr);
+				if(!(sg = xodtemplate_find_real_servicegroup(ptr))) {
+					logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not find member group '%s' specified in servicegroup '%s' (config file '%s', starting on line %d)\n", ptr, temp_servicegroup->servicegroup_name, xodtemplate_config_file_name(temp_servicegroup->_config_file), temp_servicegroup->_start_line);
+					return ERROR;
+					
+				}
+				add_object_to_objectlist(&temp_servicegroup->group_list, sg);
+				if(!next_ptr)
+					break;
+				}
+			my_free(temp_servicegroup->servicegroup_members);
+			}
+
+		/* move on if we have no members */
+		if(temp_servicegroup->members == NULL)
+			continue;
+
+		/* we might need this */
+		if(!(temp_servicegroup->reject_map = bitmap_create(xodcount.services))) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not create reject map for hostgroup '%s'\n", temp_servicegroup->servicegroup_name);
+			return ERROR;
+			}
+
+		/* get list of service members in the servicegroup */
+		xodtemplate_expand_services(&accept, temp_servicegroup->reject_map, NULL, temp_servicegroup->members, temp_servicegroup->_config_file, temp_servicegroup->_start_line);
+		if(!accept && !bitmap_count_set_bits(temp_servicegroup->reject_map)) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand members specified in servicegroup '%s' (config file '%s', starting at line %d)\n", temp_servicegroup->servicegroup_name, xodtemplate_config_file_name(temp_servicegroup->_config_file), temp_servicegroup->_start_line);
+			return ERROR;
+			}
+
+		/* we don't need this anymore */
+		my_free(temp_servicegroup->members);
+
+		for(list = accept; list; list = next) {
+			xodtemplate_service *s = (xodtemplate_service *)list->object_ptr;
+			next = list->next;
+			free(list);
+			xodtemplate_add_servicegroup_member(temp_servicegroup, s);
+			}
+		}
+
+	/* Add services from 'servicegroups' directive */
 	for(temp_service = xodtemplate_service_list; temp_service != NULL; temp_service = temp_service->next) {
 
 		/* skip services without servicegroup directives or service names */
@@ -7896,8 +6517,11 @@ int xodtemplate_recombobulate_servicegroups(void) {
 
 		/* preprocess the servicegroup list, to change "grp1,grp2,grp3,!grp2" into "grp1,grp3" */
 		/* 10/19/07 EG an empry return value means an error occured */
-		if((servicegroup_names = xodtemplate_process_servicegroup_names(temp_service->service_groups, temp_service->_config_file, temp_service->_start_line)) == NULL)
+		if((servicegroup_names = xodtemplate_process_servicegroup_names(temp_service->service_groups, temp_service->_config_file, temp_service->_start_line)) == NULL) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Failed to process servicegroup names for service '%s' on host '%s' (config file '%s', starting at line %d)\n",
+				  temp_service->service_description, temp_service->host_name, xodtemplate_config_file_name(temp_servicegroup->_config_file), temp_servicegroup->_start_line);
 			return ERROR;
+			}
 
 		/* process the list of servicegroups */
 		for(temp_ptr = strtok(servicegroup_names, ","); temp_ptr; temp_ptr = strtok(NULL, ",")) {
@@ -7913,189 +6537,28 @@ int xodtemplate_recombobulate_servicegroups(void) {
 				return ERROR;
 				}
 
-			/* add this list to the servicegroup members directive */
-			if(temp_servicegroup->members == NULL) {
-				temp_servicegroup->members = (char *)malloc(strlen(temp_service->host_name) + strlen(temp_service->service_description) + 2);
-				if(temp_servicegroup->members != NULL) {
-					strcpy(temp_servicegroup->members, temp_service->host_name);
-					strcat(temp_servicegroup->members, ",");
-					strcat(temp_servicegroup->members, temp_service->service_description);
-					}
+			if(!temp_servicegroup->member_map && !(temp_servicegroup->member_map = bitmap_create(xodcount.services))) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Failed to create member map for service group %s\n", temp_servicegroup->servicegroup_name);
+				return ERROR;
 				}
-			else {
-				new_members = (char *)realloc(temp_servicegroup->members, strlen(temp_servicegroup->members) + strlen(temp_service->host_name) + strlen(temp_service->service_description) + 3);
-				if(new_members != NULL) {
-					temp_servicegroup->members = new_members;
-					strcat(temp_servicegroup->members, ",");
-					strcat(temp_servicegroup->members, temp_service->host_name);
-					strcat(temp_servicegroup->members, ",");
-					strcat(temp_servicegroup->members, temp_service->service_description);
-					}
-				}
-			}
+			/* add ourselves as members to the group */
+			xodtemplate_add_servicegroup_member(temp_servicegroup, temp_service);
+		}
 
 		/* free servicegroup names */
 		my_free(servicegroup_names);
 		}
 
-
 	/* expand subgroup membership recursively */
-	for(temp_servicegroup = xodtemplate_servicegroup_list; temp_servicegroup; temp_servicegroup = temp_servicegroup->next)
-		xodtemplate_recombobulate_servicegroup_subgroups(temp_servicegroup, NULL);
-
-	/* expand members of all servicegroups - this could be done in xodtemplate_register_servicegroup(), but we can save the CGIs some work if we do it here */
 	for(temp_servicegroup = xodtemplate_servicegroup_list; temp_servicegroup; temp_servicegroup = temp_servicegroup->next) {
-
-		if(temp_servicegroup->members == NULL)
-			continue;
-
-		/* skip servicegroups that shouldn't be registered */
-		if(temp_servicegroup->register_object == FALSE)
-			continue;
-
-		member_names = temp_servicegroup->members;
-		temp_servicegroup->members = NULL;
-
-		for(temp_ptr = member_names; temp_ptr; temp_ptr = strchr(temp_ptr + 1, ',')) {
-
-			/* this is the host name */
-			if(host_name == NULL)
-				host_name = (char *)strdup((temp_ptr[0] == ',') ? temp_ptr + 1 : temp_ptr);
-
-			/* this is the service description */
-			else {
-				service_description = (char *)strdup(temp_ptr + 1);
-
-				/* strsep and strtok cannot be used, as they're used in expand_servicegroups...() */
-				temp_ptr2 = strchr(host_name, ',');
-				if(temp_ptr2)
-					temp_ptr2[0] = '\x0';
-				temp_ptr2 = strchr(service_description, ',');
-				if(temp_ptr2)
-					temp_ptr2[0] = '\x0';
-
-				/* strip trailing spaces */
-				strip(host_name);
-				strip(service_description);
-
-				/* get list of services in the servicegroup */
-				temp_memberlist = xodtemplate_expand_servicegroups_and_services(NULL, host_name, service_description, temp_servicegroup->_config_file, temp_servicegroup->_start_line);
-
-				/* add all members to the service group */
-				if(temp_memberlist == NULL) {
-					logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not expand member services specified in servicegroup (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_servicegroup->_config_file), temp_servicegroup->_start_line);
-					my_free(member_names);
-					my_free(host_name);
-					my_free(service_description);
-					return ERROR;
-					}
-
-				for(this_memberlist = temp_memberlist; this_memberlist; this_memberlist = this_memberlist->next) {
-
-					/* add this service to the servicegroup members directive */
-					if(temp_servicegroup->members == NULL) {
-						temp_servicegroup->members = (char *)malloc(strlen(this_memberlist->name1) + strlen(this_memberlist->name2) + 2);
-						if(temp_servicegroup != NULL) {
-							strcpy(temp_servicegroup->members, this_memberlist->name1);
-							strcat(temp_servicegroup->members, ",");
-							strcat(temp_servicegroup->members, this_memberlist->name2);
-							}
-						}
-					else {
-						new_members = (char *)realloc(temp_servicegroup->members, strlen(temp_servicegroup->members) + strlen(this_memberlist->name1) + strlen(this_memberlist->name2) + 3);
-						if(new_members != NULL) {
-							temp_servicegroup->members = new_members;
-							strcat(temp_servicegroup->members, ",");
-							strcat(temp_servicegroup->members, this_memberlist->name1);
-							strcat(temp_servicegroup->members, ",");
-							strcat(temp_servicegroup->members, this_memberlist->name2);
-							}
-						}
-					}
-				xodtemplate_free_memberlist(&temp_memberlist);
-
-				my_free(host_name);
-				my_free(service_description);
-				}
-			}
-
-		my_free(member_names);
-
-		/* error if there were an odd number of items specified (unmatched host/service pair) */
-		if(host_name != NULL) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Servicegroup members must be specified in <host_name>,<service_description> pairs (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(temp_servicegroup->_config_file), temp_servicegroup->_start_line);
-			my_free(host_name);
+		if(xodtemplate_recombobulate_servicegroup_subgroups(temp_servicegroup) != XOD_OK) {
 			return ERROR;
 			}
+		/* rejects are no longer necessary */
+		bitmap_destroy(temp_servicegroup->reject_map);
+		/* make sure we don't recursively add subgroup members again */
+		free_objectlist(&temp_servicegroup->group_list);
 		}
-
-	return OK;
-	}
-
-
-
-
-int xodtemplate_recombobulate_servicegroup_subgroups(xodtemplate_servicegroup *temp_servicegroup, char **members) {
-	xodtemplate_servicegroup *sub_group = NULL;
-	char *orig_sgmembers = NULL;
-	char *sgmembers = NULL;
-	char *newmembers = NULL;
-	char *buf = NULL;
-	char *ptr = NULL;
-
-	if(temp_servicegroup == NULL)
-		return ERROR;
-
-	/* resolve subgroup memberships first */
-	if(temp_servicegroup->servicegroup_members != NULL) {
-
-		/* save members, null pointer so we don't recurse into infinite hell */
-		orig_sgmembers = temp_servicegroup->servicegroup_members;
-		temp_servicegroup->servicegroup_members = NULL;
-
-		/* make new working copy of members */
-		sgmembers = (char *)strdup(orig_sgmembers);
-
-		ptr = sgmembers;
-		while((buf = ptr) != NULL) {
-
-			/* get next member for next run*/
-			ptr = strchr(ptr, ',');
-			if(ptr) {
-				ptr[0] = '\x0';
-				ptr++;
-				}
-
-			strip(buf);
-
-			/* find subgroup and recurse */
-			if((sub_group = xodtemplate_find_real_servicegroup(buf)) == NULL) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not find member group '%s' specified in servicegroup (config file '%s', starting on line %d)\n", buf, xodtemplate_config_file_name(temp_servicegroup->_config_file), temp_servicegroup->_start_line);
-				return ERROR;
-				}
-			xodtemplate_recombobulate_servicegroup_subgroups(sub_group, &newmembers);
-
-			/* add new (sub) members */
-			if(newmembers != NULL) {
-				if(temp_servicegroup->members == NULL)
-					temp_servicegroup->members = (char *)strdup(newmembers);
-				else if((temp_servicegroup->members = realloc(temp_servicegroup->members, strlen(temp_servicegroup->members) + strlen(newmembers) + 2))) {
-					strcat(temp_servicegroup->members, ",");
-					strcat(temp_servicegroup->members, newmembers);
-					}
-				}
-			}
-
-		/* free memory */
-		my_free(sgmembers);
-
-		/* restore group members */
-		temp_servicegroup->servicegroup_members = orig_sgmembers;
-		}
-
-	/* return service members */
-	if(members != NULL)
-		*members = temp_servicegroup->members;
 
 	return OK;
 	}
@@ -8356,7 +6819,7 @@ xodtemplate_service *xodtemplate_find_service(char *name) {
 	return skiplist_find_first(xobject_template_skiplists[SERVICE_SKIPLIST], &temp_service, NULL);
 	}
 
-
+#endif
 /* finds a specific service object by its REAL name, not its TEMPLATE name */
 xodtemplate_service *xodtemplate_find_real_service(char *host_name, char *service_description) {
 	xodtemplate_service temp_service;
@@ -8370,7 +6833,6 @@ xodtemplate_service *xodtemplate_find_real_service(char *host_name, char *servic
 	return skiplist_find_first(xobject_skiplists[SERVICE_SKIPLIST], &temp_service, NULL);
 	}
 
-#endif
 
 
 
@@ -8409,11 +6871,11 @@ int xodtemplate_register_objects(void) {
 	xodtemplate_contact *temp_contact = NULL;
 	xodtemplate_host *temp_host = NULL;
 	xodtemplate_service *temp_service = NULL;
-	xodtemplate_servicedependency *temp_servicedependency = NULL;
-	xodtemplate_serviceescalation *temp_serviceescalation = NULL;
-	xodtemplate_hostdependency *temp_hostdependency = NULL;
-	xodtemplate_hostescalation *temp_hostescalation = NULL;
 	void *ptr = NULL;
+	xodtemplate_hostdependency *hd, *next_hd;
+	xodtemplate_hostescalation *he, *next_he;
+	xodtemplate_servicedependency *sd, *next_sd;
+	xodtemplate_serviceescalation *se, *next_se;
 	unsigned int ocount[NUM_OBJECT_SKIPLISTS];
 
 
@@ -8421,12 +6883,11 @@ int xodtemplate_register_objects(void) {
 		ocount[i] = (unsigned int)skiplist_num_items(xobject_skiplists[i]);
 	}
 
-	/*
-	 * dependencies may be duplicated still, so it's good we counted
-	 * earlier and know exactly how much space we'll need
-	 */
-	ocount[SERVICEDEPENDENCY_SKIPLIST] = service_deps;
-	ocount[HOSTDEPENDENCY_SKIPLIST] = host_deps;
+	/* dependencies are handled specially */
+	ocount[SERVICEDEPENDENCY_SKIPLIST] = 0;
+	ocount[HOSTDEPENDENCY_SKIPLIST] = 0;
+	ocount[HOSTESCALATION_SKIPLIST] = xodcount.hostescalations;
+	ocount[SERVICEESCALATION_SKIPLIST] = xodcount.serviceescalations;
 
 	if (create_object_tables(ocount) != OK) {
 		logit(NSLOG_CONFIG_ERROR, TRUE, "Failed to create object tables\n");
@@ -8439,6 +6900,7 @@ int xodtemplate_register_objects(void) {
 		if((result = xodtemplate_register_timeperiod(temp_timeperiod)) == ERROR)
 			return ERROR;
 		}
+	timing_point("%u timeperiods registered\n", num_objects.timeperiods);
 
 	/* register commands */
 	ptr = NULL;
@@ -8446,6 +6908,7 @@ int xodtemplate_register_objects(void) {
 		if((result = xodtemplate_register_command(temp_command)) == ERROR)
 			return ERROR;
 		}
+	timing_point("%u commands registered\n", num_objects.commands);
 
 	/* register contactgroups */
 	ptr = NULL;
@@ -8453,6 +6916,7 @@ int xodtemplate_register_objects(void) {
 		if((result = xodtemplate_register_contactgroup(temp_contactgroup)) == ERROR)
 			return ERROR;
 		}
+	timing_point("%u contactgroups registered\n", num_objects.contactgroups);
 
 	/* register hostgroups */
 	ptr = NULL;
@@ -8460,6 +6924,7 @@ int xodtemplate_register_objects(void) {
 		if((result = xodtemplate_register_hostgroup(temp_hostgroup)) == ERROR)
 			return ERROR;
 		}
+	timing_point("%u hostgroups registered\n", num_objects.hostgroups);
 
 	/* register servicegroups */
 	ptr = NULL;
@@ -8467,6 +6932,7 @@ int xodtemplate_register_objects(void) {
 		if((result = xodtemplate_register_servicegroup(temp_servicegroup)) == ERROR)
 			return ERROR;
 		}
+	timing_point("%u servicegroups registered\n", num_objects.servicegroups);
 
 	/* register contacts */
 	ptr = NULL;
@@ -8474,6 +6940,7 @@ int xodtemplate_register_objects(void) {
 		if((result = xodtemplate_register_contact(temp_contact)) == ERROR)
 			return ERROR;
 		}
+	timing_point("%u contacts registered\n", num_objects.contacts);
 
 	/* register hosts */
 	ptr = NULL;
@@ -8481,42 +6948,67 @@ int xodtemplate_register_objects(void) {
 		if((result = xodtemplate_register_host(temp_host)) == ERROR)
 			return ERROR;
 		}
+	timing_point("%u hosts registered\n", num_objects.hosts);
 
 	/* register services */
 	ptr = NULL;
 	for(temp_service = (xodtemplate_service *)skiplist_get_first(xobject_skiplists[SERVICE_SKIPLIST], &ptr); temp_service != NULL; temp_service = (xodtemplate_service *)skiplist_get_next(&ptr)) {
-
 		if((result = xodtemplate_register_service(temp_service)) == ERROR)
 			return ERROR;
 		}
+	timing_point("%u services registered\n", num_objects.services);
 
-	/* register service dependencies */
-	ptr = NULL;
-	for(temp_servicedependency = (xodtemplate_servicedependency *)skiplist_get_first(xobject_skiplists[SERVICEDEPENDENCY_SKIPLIST], &ptr); temp_servicedependency != NULL; temp_servicedependency = (xodtemplate_servicedependency *)skiplist_get_next(&ptr)) {
-		if((result = xodtemplate_register_servicedependency(temp_servicedependency)) == ERROR)
+	/*
+	 * These aren't in skiplists at all, but it's safe to destroy
+	 * them as we go along, since all dupes are at the head of the list
+	 */
+	if(xodtemplate_servicedependency_list) {
+		parent_map = bitmap_create(xodcount.services);
+		if(!parent_map) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Failed to create parent bitmap for service dependencies\n");
+			return ERROR;
+			}
+		}
+	for(sd = xodtemplate_servicedependency_list; sd; sd = next_sd) {
+		next_sd = sd->next;
+#ifdef NSCGI
+		if(xodtemplate_register_servicedependency(sd) == ERROR)
+			return ERROR;
+#else
+		if(xodtemplate_register_and_destroy_servicedependency(sd) == ERROR)
+			return ERROR;
+#endif
+		}
+	bitmap_destroy(parent_map);
+	timing_point("%u unique / %u total servicedependencies registered\n",
+				 num_objects.servicedependencies, xodcount.servicedependencies);
+
+	for(se = xodtemplate_serviceescalation_list; se; se = next_se) {
+		next_se = se->next;
+		if(xodtemplate_register_and_destroy_serviceescalation(se) == ERROR)
 			return ERROR;
 		}
+	timing_point("%u serviceescalations registered\n", num_objects.serviceescalations);
 
-	/* register service escalations */
-	ptr = NULL;
-	for(temp_serviceescalation = (xodtemplate_serviceescalation *)skiplist_get_first(xobject_skiplists[SERVICEESCALATION_SKIPLIST], &ptr); temp_serviceescalation != NULL; temp_serviceescalation = (xodtemplate_serviceescalation *)skiplist_get_next(&ptr)) {
-		if((result = xodtemplate_register_serviceescalation(temp_serviceescalation)) == ERROR)
+	for(hd = xodtemplate_hostdependency_list; hd; hd = next_hd) {
+		next_hd = hd->next;
+#ifdef NSCGI
+		if(xodtemplate_register_hostdependency(hd) == ERROR)
+			return ERROR;
+#else
+		if(xodtemplate_register_and_destroy_hostdependency(hd) == ERROR)
+			return ERROR;
+#endif
+		}
+	timing_point("%u unique / %u total hostdependencies registered\n",
+				 num_objects.hostdependencies, xodcount.hostdependencies);
+
+	for(he = xodtemplate_hostescalation_list; he; he = next_he) {
+		next_he = he->next;
+		if(xodtemplate_register_and_destroy_hostescalation(he) == ERROR)
 			return ERROR;
 		}
-
-	/* register host dependencies */
-	ptr = NULL;
-	for(temp_hostdependency = (xodtemplate_hostdependency *)skiplist_get_first(xobject_skiplists[HOSTDEPENDENCY_SKIPLIST], &ptr); temp_hostdependency != NULL; temp_hostdependency = (xodtemplate_hostdependency *)skiplist_get_next(&ptr)) {
-		if((result = xodtemplate_register_hostdependency(temp_hostdependency)) == ERROR)
-			return ERROR;
-		}
-
-	/* register host escalations */
-	ptr = NULL;
-	for(temp_hostescalation = (xodtemplate_hostescalation *)skiplist_get_first(xobject_skiplists[HOSTESCALATION_SKIPLIST], &ptr); temp_hostescalation != NULL; temp_hostescalation = (xodtemplate_hostescalation *)skiplist_get_next(&ptr)) {
-		if((result = xodtemplate_register_hostescalation(temp_hostescalation)) == ERROR)
-			return ERROR;
-		}
+	timing_point("%u hostescalations registered\n", num_objects.hostescalations);
 
 	return OK;
 	}
@@ -8716,8 +7208,7 @@ int xodtemplate_register_command(xodtemplate_command *this_command) {
 /* registers a contactgroup definition */
 int xodtemplate_register_contactgroup(xodtemplate_contactgroup *this_contactgroup) {
 	contactgroup *new_contactgroup = NULL;
-	contactsmember *new_contactsmember = NULL;
-	char *contact_name = NULL;
+	objectlist *list;
 
 	/* bail out if we shouldn't register this object */
 	if(this_contactgroup->register_object == FALSE)
@@ -8732,16 +7223,9 @@ int xodtemplate_register_contactgroup(xodtemplate_contactgroup *this_contactgrou
 		return ERROR;
 		}
 
-	/* Need to check for NULL because strtok could use a NULL value to check the previous string's token value */
-	if(this_contactgroup->members != NULL) {
-		for(contact_name = strtok(this_contactgroup->members, ","); contact_name != NULL; contact_name = strtok(NULL, ",")) {
-			strip(contact_name);
-			new_contactsmember = add_contact_to_contactgroup(new_contactgroup, contact_name);
-			if(new_contactsmember == NULL) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not add contact '%s' to contactgroup (config file '%s', starting on line %d)\n", contact_name, xodtemplate_config_file_name(this_contactgroup->_config_file), this_contactgroup->_start_line);
-				return ERROR;
-				}
-			}
+	for(list = this_contactgroup->member_list; list; list = list->next) {
+		xodtemplate_contact *c = (xodtemplate_contact *)list->object_ptr;
+		add_contact_to_contactgroup(new_contactgroup, c->contact_name);
 		}
 
 	return OK;
@@ -8752,8 +7236,7 @@ int xodtemplate_register_contactgroup(xodtemplate_contactgroup *this_contactgrou
 /* registers a hostgroup definition */
 int xodtemplate_register_hostgroup(xodtemplate_hostgroup *this_hostgroup) {
 	hostgroup *new_hostgroup = NULL;
-	hostsmember *new_hostsmember = NULL;
-	char *host_name = NULL;
+	objectlist *list;
 
 	/* bail out if we shouldn't register this object */
 	if(this_hostgroup->register_object == FALSE)
@@ -8767,17 +7250,10 @@ int xodtemplate_register_hostgroup(xodtemplate_hostgroup *this_hostgroup) {
 		logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not register hostgroup (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(this_hostgroup->_config_file), this_hostgroup->_start_line);
 		return ERROR;
 		}
-
-	if(this_hostgroup->members != NULL) {
-		for(host_name = strtok(this_hostgroup->members, ","); host_name != NULL; host_name = strtok(NULL, ",")) {
-			strip(host_name);
-			new_hostsmember = add_host_to_hostgroup(new_hostgroup, host_name);
-			if(new_hostsmember == NULL) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not add host '%s' to hostgroup (config file '%s', starting on line %d)\n", host_name, xodtemplate_config_file_name(this_hostgroup->_config_file), this_hostgroup->_start_line);
-				return ERROR;
-				}
-			}
-		}
+	for(list = this_hostgroup->member_list; list; list = list->next) {
+		xodtemplate_host *h = (xodtemplate_host *)list->object_ptr;
+		add_host_to_hostgroup(new_hostgroup, h->host_name);
+	}
 
 	return OK;
 	}
@@ -8787,9 +7263,7 @@ int xodtemplate_register_hostgroup(xodtemplate_hostgroup *this_hostgroup) {
 /* registers a servicegroup definition */
 int xodtemplate_register_servicegroup(xodtemplate_servicegroup *this_servicegroup) {
 	servicegroup *new_servicegroup = NULL;
-	servicesmember *new_servicesmember = NULL;
-	char *host_name = NULL;
-	char *svc_description = NULL;
+	objectlist *list, *next;
 
 	/* bail out if we shouldn't register this object */
 	if(this_servicegroup->register_object == FALSE)
@@ -8804,22 +7278,10 @@ int xodtemplate_register_servicegroup(xodtemplate_servicegroup *this_servicegrou
 		return ERROR;
 		}
 
-	if(this_servicegroup->members != NULL) {
-		for(host_name = strtok(this_servicegroup->members, ","); host_name != NULL; host_name = strtok(NULL, ",")) {
-			strip(host_name);
-			svc_description = strtok(NULL, ",");
-			if(svc_description == NULL) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Missing service name in servicegroup definition (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(this_servicegroup->_config_file), this_servicegroup->_start_line);
-				return ERROR;
-				}
-			strip(svc_description);
-
-			new_servicesmember = add_service_to_servicegroup(new_servicegroup, host_name, svc_description);
-			if(new_servicesmember == NULL) {
-				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not add service '%s' on host '%s' to servicegroup (config file '%s', starting on line %d)\n", svc_description, host_name, xodtemplate_config_file_name(this_servicegroup->_config_file), this_servicegroup->_start_line);
-				return ERROR;
-				}
-			}
+	for(list = this_servicegroup->member_list; list; list = next) {
+		xodtemplate_service *s = (xodtemplate_service *)list->object_ptr;
+		next = list->next;
+		add_service_to_servicegroup(new_servicegroup, s->host_name, s->service_description);
 		}
 
 	return OK;
@@ -8836,15 +7298,16 @@ int xodtemplate_register_servicedependency(xodtemplate_servicedependency *this_s
 		return OK;
 
 	/* throw a warning on servicedeps that have no options */
-	if(this_servicedependency->have_notification_dependency_options == FALSE && this_servicedependency->have_execution_dependency_options == FALSE) {
+	if(this_servicedependency->have_notification_failure_options == FALSE && this_servicedependency->have_execution_failure_options == FALSE) {
 		logit(NSLOG_CONFIG_WARNING, TRUE, "Warning: Ignoring lame service dependency (config file '%s', line %d)\n", xodtemplate_config_file_name(this_servicedependency->_config_file), this_servicedependency->_start_line);
 		return OK;
 		}
 
 	/* add the servicedependency */
-	if(this_servicedependency->have_execution_dependency_options == TRUE) {
+	if(this_servicedependency->have_execution_failure_options == TRUE) {
+		xodcount.servicedependencies++;
 
-		new_servicedependency = add_service_dependency(this_servicedependency->dependent_host_name, this_servicedependency->dependent_service_description, this_servicedependency->host_name, this_servicedependency->service_description, EXECUTION_DEPENDENCY, this_servicedependency->inherits_parent, this_servicedependency->fail_execute_on_ok, this_servicedependency->fail_execute_on_warning, this_servicedependency->fail_execute_on_unknown, this_servicedependency->fail_execute_on_critical, this_servicedependency->fail_execute_on_pending, this_servicedependency->dependency_period);
+		new_servicedependency = add_service_dependency(this_servicedependency->dependent_host_name, this_servicedependency->dependent_service_description, this_servicedependency->host_name, this_servicedependency->service_description, EXECUTION_DEPENDENCY, this_servicedependency->inherits_parent, this_servicedependency->execution_failure_options, this_servicedependency->dependency_period);
 
 		/* return with an error if we couldn't add the servicedependency */
 		if(new_servicedependency == NULL) {
@@ -8852,9 +7315,10 @@ int xodtemplate_register_servicedependency(xodtemplate_servicedependency *this_s
 			return ERROR;
 			}
 		}
-	if(this_servicedependency->have_notification_dependency_options == TRUE) {
+	if(this_servicedependency->have_notification_failure_options == TRUE) {
+		xodcount.servicedependencies++;
 
-		new_servicedependency = add_service_dependency(this_servicedependency->dependent_host_name, this_servicedependency->dependent_service_description, this_servicedependency->host_name, this_servicedependency->service_description, NOTIFICATION_DEPENDENCY, this_servicedependency->inherits_parent, this_servicedependency->fail_notify_on_ok, this_servicedependency->fail_notify_on_warning, this_servicedependency->fail_notify_on_unknown, this_servicedependency->fail_notify_on_critical, this_servicedependency->fail_notify_on_pending, this_servicedependency->dependency_period);
+		new_servicedependency = add_service_dependency(this_servicedependency->dependent_host_name, this_servicedependency->dependent_service_description, this_servicedependency->host_name, this_servicedependency->service_description, NOTIFICATION_DEPENDENCY, this_servicedependency->inherits_parent, this_servicedependency->notification_failure_options, this_servicedependency->dependency_period);
 
 		/* return with an error if we couldn't add the servicedependency */
 		if(new_servicedependency == NULL) {
@@ -8882,14 +7346,11 @@ int xodtemplate_register_serviceescalation(xodtemplate_serviceescalation *this_s
 
 	/* default options if none specified */
 	if(this_serviceescalation->have_escalation_options == FALSE) {
-		this_serviceescalation->escalate_on_warning = TRUE;
-		this_serviceescalation->escalate_on_unknown = TRUE;
-		this_serviceescalation->escalate_on_critical = TRUE;
-		this_serviceescalation->escalate_on_recovery = TRUE;
+		this_serviceescalation->escalation_options = OPT_ALL;
 		}
 
 	/* add the serviceescalation */
-	new_serviceescalation = add_serviceescalation(this_serviceescalation->host_name, this_serviceescalation->service_description, this_serviceescalation->first_notification, this_serviceescalation->last_notification, this_serviceescalation->notification_interval, this_serviceescalation->escalation_period, this_serviceescalation->escalate_on_warning, this_serviceescalation->escalate_on_unknown, this_serviceescalation->escalate_on_critical, this_serviceescalation->escalate_on_recovery);
+	new_serviceescalation = add_serviceescalation(this_serviceescalation->host_name, this_serviceescalation->service_description, this_serviceescalation->first_notification, this_serviceescalation->last_notification, this_serviceescalation->notification_interval, this_serviceescalation->escalation_period, this_serviceescalation->escalation_options);
 
 	/* return with an error if we couldn't add the serviceescalation */
 	if(new_serviceescalation == NULL) {
@@ -8942,7 +7403,7 @@ int xodtemplate_register_contact(xodtemplate_contact *this_contact) {
 		return OK;
 
 	/* add the contact */
-	new_contact = add_contact(this_contact->contact_name, this_contact->alias, this_contact->email, this_contact->pager, this_contact->address, this_contact->service_notification_period, this_contact->host_notification_period, this_contact->notify_on_service_recovery, this_contact->notify_on_service_critical, this_contact->notify_on_service_warning, this_contact->notify_on_service_unknown, this_contact->notify_on_service_flapping, this_contact->notify_on_service_downtime, this_contact->notify_on_host_recovery, this_contact->notify_on_host_down, this_contact->notify_on_host_unreachable, this_contact->notify_on_host_flapping, this_contact->notify_on_host_downtime, this_contact->host_notifications_enabled, this_contact->service_notifications_enabled, this_contact->can_submit_commands, this_contact->retain_status_information, this_contact->retain_nonstatus_information);
+	new_contact = add_contact(this_contact->contact_name, this_contact->alias, this_contact->email, this_contact->pager, this_contact->address, this_contact->service_notification_period, this_contact->host_notification_period, this_contact->service_notification_options, this_contact->host_notification_options, this_contact->host_notifications_enabled, this_contact->service_notifications_enabled, this_contact->can_submit_commands, this_contact->retain_status_information, this_contact->retain_nonstatus_information, this_contact->minimum_value);
 
 	/* return with an error if we couldn't add the contact */
 	if(new_contact == NULL) {
@@ -9002,14 +7463,8 @@ int xodtemplate_register_host(xodtemplate_host *this_host) {
 	if(this_host->register_object == FALSE)
 		return OK;
 
-	/* if host has no alias or address, use host name - added 3/11/05 */
-	if(this_host->alias == NULL && this_host->host_name != NULL)
-		this_host->alias = (char *)strdup(this_host->host_name);
-	if(this_host->address == NULL && this_host->host_name != NULL)
-		this_host->address = (char *)strdup(this_host->host_name);
-
 	/* add the host definition */
-	new_host = add_host(this_host->host_name, this_host->display_name, this_host->alias, (this_host->address == NULL) ? this_host->host_name : this_host->address, this_host->check_period, this_host->initial_state, this_host->check_interval, this_host->retry_interval, this_host->max_check_attempts, this_host->notify_on_recovery, this_host->notify_on_down, this_host->notify_on_unreachable, this_host->notify_on_flapping, this_host->notify_on_downtime, this_host->notification_interval, this_host->first_notification_delay, this_host->notification_period, this_host->notifications_enabled, this_host->check_command, this_host->active_checks_enabled, this_host->passive_checks_enabled, this_host->event_handler, this_host->event_handler_enabled, this_host->flap_detection_enabled, this_host->low_flap_threshold, this_host->high_flap_threshold, this_host->flap_detection_on_up, this_host->flap_detection_on_down, this_host->flap_detection_on_unreachable, this_host->stalk_on_up, this_host->stalk_on_down, this_host->stalk_on_unreachable, this_host->process_perf_data, this_host->failure_prediction_enabled, this_host->failure_prediction_options, this_host->check_freshness, this_host->freshness_threshold, this_host->notes, this_host->notes_url, this_host->action_url, this_host->icon_image, this_host->icon_image_alt, this_host->vrml_image, this_host->statusmap_image, this_host->x_2d, this_host->y_2d, this_host->have_2d_coords, this_host->x_3d, this_host->y_3d, this_host->z_3d, this_host->have_3d_coords, TRUE, this_host->retain_status_information, this_host->retain_nonstatus_information, this_host->obsess_over_host);
+	new_host = add_host(this_host->host_name, this_host->display_name, this_host->alias, this_host->address, this_host->check_period, this_host->initial_state, this_host->check_interval, this_host->retry_interval, this_host->max_check_attempts, this_host->notification_options, this_host->notification_interval, this_host->first_notification_delay, this_host->notification_period, this_host->notifications_enabled, this_host->check_command, this_host->active_checks_enabled, this_host->passive_checks_enabled, this_host->event_handler, this_host->event_handler_enabled, this_host->flap_detection_enabled, this_host->low_flap_threshold, this_host->high_flap_threshold, this_host->flap_detection_options, this_host->stalking_options, this_host->process_perf_data, this_host->check_freshness, this_host->freshness_threshold, this_host->notes, this_host->notes_url, this_host->action_url, this_host->icon_image, this_host->icon_image_alt, this_host->vrml_image, this_host->statusmap_image, this_host->x_2d, this_host->y_2d, this_host->have_2d_coords, this_host->x_3d, this_host->y_3d, this_host->z_3d, this_host->have_3d_coords, TRUE, this_host->retain_status_information, this_host->retain_nonstatus_information, this_host->obsess, this_host->hourly_value);
 
 
 	/* return with an error if we couldn't add the host */
@@ -9086,12 +7541,55 @@ int xodtemplate_register_service(xodtemplate_service *this_service) {
 		return OK;
 
 	/* add the service */
-	new_service = add_service(this_service->host_name, this_service->service_description, this_service->display_name, this_service->check_period, this_service->initial_state, this_service->max_check_attempts, this_service->parallelize_check, this_service->passive_checks_enabled, this_service->check_interval, this_service->retry_interval, this_service->notification_interval, this_service->first_notification_delay, this_service->notification_period, this_service->notify_on_recovery, this_service->notify_on_unknown, this_service->notify_on_warning, this_service->notify_on_critical, this_service->notify_on_flapping, this_service->notify_on_downtime, this_service->notifications_enabled, this_service->is_volatile, this_service->event_handler, this_service->event_handler_enabled, this_service->check_command, this_service->active_checks_enabled, this_service->flap_detection_enabled, this_service->low_flap_threshold, this_service->high_flap_threshold, this_service->flap_detection_on_ok, this_service->flap_detection_on_warning, this_service->flap_detection_on_unknown, this_service->flap_detection_on_critical, this_service->stalk_on_ok, this_service->stalk_on_warning, this_service->stalk_on_unknown, this_service->stalk_on_critical, this_service->process_perf_data, this_service->failure_prediction_enabled, this_service->failure_prediction_options, this_service->check_freshness, this_service->freshness_threshold, this_service->notes, this_service->notes_url, this_service->action_url, this_service->icon_image, this_service->icon_image_alt, this_service->retain_status_information, this_service->retain_nonstatus_information, this_service->obsess_over_service);
+	new_service = add_service(this_service->host_name, this_service->service_description, this_service->display_name, this_service->check_period, this_service->initial_state, this_service->max_check_attempts, this_service->parallelize_check, this_service->passive_checks_enabled, this_service->check_interval, this_service->retry_interval, this_service->notification_interval, this_service->first_notification_delay, this_service->notification_period, this_service->notification_options, this_service->notifications_enabled, this_service->is_volatile, this_service->event_handler, this_service->event_handler_enabled, this_service->check_command, this_service->active_checks_enabled, this_service->flap_detection_enabled, this_service->low_flap_threshold, this_service->high_flap_threshold, this_service->flap_detection_options, this_service->stalking_options, this_service->process_perf_data, this_service->check_freshness, this_service->freshness_threshold, this_service->notes, this_service->notes_url, this_service->action_url, this_service->icon_image, this_service->icon_image_alt, this_service->retain_status_information, this_service->retain_nonstatus_information, this_service->obsess, this_service->hourly_value);
 
 	/* return with an error if we couldn't add the service */
 	if(new_service == NULL) {
 		logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not register service (config file '%s', starting on line %d)\n", xodtemplate_config_file_name(this_service->_config_file), this_service->_start_line);
 		return ERROR;
+		}
+
+	/* add all service parents */
+	if(this_service->parents != NULL) {
+		servicesmember *new_servicesmember;
+		char *comma = strchr(this_service->parents, ',');
+
+		if(!comma) { /* same-host single-service parent */
+			new_servicesmember = add_parent_service_to_service(new_service, new_service->host_name, this_service->parents);
+			if(new_servicesmember == NULL) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not add same-host service parent '%s' to service (config file '%s', starting on line %d)\n",
+					  this_service->parents,
+					  xodtemplate_config_file_name(this_service->_config_file),
+					  this_service->_start_line);
+				return ERROR;
+				}
+			}
+		else {
+			/* Multiple parents, so let's do this the hard way */
+			objectlist *list = NULL, *next;
+			bitmap_clear(service_map);
+			if(xodtemplate_expand_services(&list, service_map, NULL, this_service->parents, this_service->_config_file, this_service->_start_line) != OK) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Failed to expand service parents (config file '%s', starting at line %d)\n",
+					  xodtemplate_config_file_name(this_service->_config_file),
+					  this_service->_start_line);
+				return ERROR;
+				}
+			for(; list; list = next) {
+				xodtemplate_service *parent = (xodtemplate_service *)list->object_ptr;
+				next = list->next;
+				free(list);
+				new_servicesmember = add_parent_service_to_service(new_service, parent->host_name, parent->service_description);
+				if(new_servicesmember == NULL) {
+					logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not add service '%s' on host '%s' as parent to service '%s' on host '%s' (config file '%s', starting on line %d)\n",
+						  parent->host_name, parent->service_description,
+						  new_service->host_name, new_service->description,
+						  xodtemplate_config_file_name(this_service->_config_file),
+						  this_service->_start_line);
+					free_objectlist(&next);
+					return ERROR;
+					}
+				}
+			}
 		}
 
 	/* add all contact groups to the service */
@@ -9147,9 +7645,10 @@ int xodtemplate_register_hostdependency(xodtemplate_hostdependency *this_hostdep
 		return OK;
 
 	/* add the host execution dependency */
-	if(this_hostdependency->have_execution_dependency_options == TRUE) {
+	if(this_hostdependency->have_execution_failure_options == TRUE) {
+		xodcount.hostdependencies++;
 
-		new_hostdependency = add_host_dependency(this_hostdependency->dependent_host_name, this_hostdependency->host_name, EXECUTION_DEPENDENCY, this_hostdependency->inherits_parent, this_hostdependency->fail_execute_on_up, this_hostdependency->fail_execute_on_down, this_hostdependency->fail_execute_on_unreachable, this_hostdependency->fail_execute_on_pending, this_hostdependency->dependency_period);
+		new_hostdependency = add_host_dependency(this_hostdependency->dependent_host_name, this_hostdependency->host_name, EXECUTION_DEPENDENCY, this_hostdependency->inherits_parent, this_hostdependency->execution_failure_options, this_hostdependency->dependency_period);
 
 		/* return with an error if we couldn't add the hostdependency */
 		if(new_hostdependency == NULL) {
@@ -9159,9 +7658,10 @@ int xodtemplate_register_hostdependency(xodtemplate_hostdependency *this_hostdep
 		}
 
 	/* add the host notification dependency */
-	if(this_hostdependency->have_notification_dependency_options == TRUE) {
+	if(this_hostdependency->have_notification_failure_options == TRUE) {
+		xodcount.hostdependencies++;
 
-		new_hostdependency = add_host_dependency(this_hostdependency->dependent_host_name, this_hostdependency->host_name, NOTIFICATION_DEPENDENCY, this_hostdependency->inherits_parent, this_hostdependency->fail_notify_on_up, this_hostdependency->fail_notify_on_down, this_hostdependency->fail_notify_on_unreachable, this_hostdependency->fail_notify_on_pending, this_hostdependency->dependency_period);
+		new_hostdependency = add_host_dependency(this_hostdependency->dependent_host_name, this_hostdependency->host_name, NOTIFICATION_DEPENDENCY, this_hostdependency->inherits_parent, this_hostdependency->notification_failure_options, this_hostdependency->dependency_period);
 
 		/* return with an error if we couldn't add the hostdependency */
 		if(new_hostdependency == NULL) {
@@ -9189,13 +7689,11 @@ int xodtemplate_register_hostescalation(xodtemplate_hostescalation *this_hostesc
 
 	/* default options if none specified */
 	if(this_hostescalation->have_escalation_options == FALSE) {
-		this_hostescalation->escalate_on_down = TRUE;
-		this_hostescalation->escalate_on_unreachable = TRUE;
-		this_hostescalation->escalate_on_recovery = TRUE;
+		this_hostescalation->escalation_options = OPT_ALL;
 		}
 
 	/* add the hostescalation */
-	new_hostescalation = add_hostescalation(this_hostescalation->host_name, this_hostescalation->first_notification, this_hostescalation->last_notification, this_hostescalation->notification_interval, this_hostescalation->escalation_period, this_hostescalation->escalate_on_down, this_hostescalation->escalate_on_unreachable, this_hostescalation->escalate_on_recovery);
+	new_hostescalation = add_hostescalation(this_hostescalation->host_name, this_hostescalation->first_notification, this_hostescalation->last_notification, this_hostescalation->notification_interval, this_hostescalation->escalation_period, this_hostescalation->escalation_options);
 
 	/* return with an error if we couldn't add the hostescalation */
 	if(new_hostescalation == NULL) {
@@ -9238,815 +7736,10 @@ int xodtemplate_register_hostescalation(xodtemplate_hostescalation *this_hostesc
 
 
 /******************************************************************/
-/********************** SORTING FUNCTIONS *************************/
-/******************************************************************/
-
-#ifdef NSCORE
-
-/* sorts all objects by name */
-int xodtemplate_sort_objects(void) {
-
-	/* NOTE: with skiplists, we no longer need to sort things manually... */
-	return OK;
-
-	/* sort timeperiods */
-	if(xodtemplate_sort_timeperiods() == ERROR)
-		return ERROR;
-
-	/* sort commands */
-	if(xodtemplate_sort_commands() == ERROR)
-		return ERROR;
-
-	/* sort contactgroups */
-	if(xodtemplate_sort_contactgroups() == ERROR)
-		return ERROR;
-
-	/* sort hostgroups */
-	if(xodtemplate_sort_hostgroups() == ERROR)
-		return ERROR;
-
-	/* sort servicegroups */
-	if(xodtemplate_sort_servicegroups() == ERROR)
-		return ERROR;
-
-	/* sort contacts */
-	if(xodtemplate_sort_contacts() == ERROR)
-		return ERROR;
-
-	/* sort hosts */
-	if(xodtemplate_sort_hosts() == ERROR)
-		return ERROR;
-
-	/* sort services */
-	if(xodtemplate_sort_services() == ERROR)
-		return ERROR;
-
-	/* sort service dependencies */
-	if(xodtemplate_sort_servicedependencies() == ERROR)
-		return ERROR;
-
-	/* sort service escalations */
-	if(xodtemplate_sort_serviceescalations() == ERROR)
-		return ERROR;
-
-	/* sort host dependencies */
-	if(xodtemplate_sort_hostdependencies() == ERROR)
-		return ERROR;
-
-	/* sort hostescalations */
-	if(xodtemplate_sort_hostescalations() == ERROR)
-		return ERROR;
-
-	/* sort host extended info */
-	/* NOT NEEDED */
-
-	/* sort service extended info */
-	/* NOT NEEDED */
-
-	return OK;
-	}
-
-
-/* used to compare two strings (object names) */
-int xodtemplate_compare_strings1(char *string1, char *string2) {
-
-	if(string1 == NULL && string2 == NULL)
-		return 0;
-	else if(string1 == NULL)
-		return -1;
-	else if(string2 == NULL)
-		return 1;
-	else
-		return strcmp(string1, string2);
-	}
-
-
-/* used to compare two sets of strings (dually-named objects, i.e. services) */
-int xodtemplate_compare_strings2(char *string1a, char *string1b, char *string2a, char *string2b) {
-	int result;
-
-	if((result = xodtemplate_compare_strings1(string1a, string2a)) == 0)
-		result = xodtemplate_compare_strings1(string1b, string2b);
-
-	return result;
-	}
-
-
-/* sort timeperiods by name */
-int xodtemplate_sort_timeperiods() {
-	xodtemplate_timeperiod *new_timeperiod_list = NULL;
-	xodtemplate_timeperiod *temp_timeperiod = NULL;
-	xodtemplate_timeperiod *last_timeperiod = NULL;
-	xodtemplate_timeperiod *temp_timeperiod_orig = NULL;
-	xodtemplate_timeperiod *next_timeperiod_orig = NULL;
-
-	/* sort all existing timeperiods */
-	for(temp_timeperiod_orig = xodtemplate_timeperiod_list; temp_timeperiod_orig != NULL; temp_timeperiod_orig = next_timeperiod_orig) {
-
-		next_timeperiod_orig = temp_timeperiod_orig->next;
-
-		/* add timeperiod to new list, sorted by timeperiod name */
-		last_timeperiod = new_timeperiod_list;
-		for(temp_timeperiod = new_timeperiod_list; temp_timeperiod != NULL; temp_timeperiod = temp_timeperiod->next) {
-
-			if(xodtemplate_compare_strings1(temp_timeperiod_orig->timeperiod_name, temp_timeperiod->timeperiod_name) <= 0)
-				break;
-			else
-				last_timeperiod = temp_timeperiod;
-			}
-
-		/* first item added to new sorted list */
-		if(new_timeperiod_list == NULL) {
-			temp_timeperiod_orig->next = NULL;
-			new_timeperiod_list = temp_timeperiod_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_timeperiod == new_timeperiod_list) {
-			temp_timeperiod_orig->next = new_timeperiod_list;
-			new_timeperiod_list = temp_timeperiod_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_timeperiod_orig->next = temp_timeperiod;
-			last_timeperiod->next = temp_timeperiod_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_timeperiod_list = new_timeperiod_list;
-
-	return OK;
-	}
-
-
-/* sort commands by name */
-int xodtemplate_sort_commands() {
-	xodtemplate_command *new_command_list = NULL;
-	xodtemplate_command *temp_command = NULL;
-	xodtemplate_command *last_command = NULL;
-	xodtemplate_command *temp_command_orig = NULL;
-	xodtemplate_command *next_command_orig = NULL;
-
-	/* sort all existing commands */
-	for(temp_command_orig = xodtemplate_command_list; temp_command_orig != NULL; temp_command_orig = next_command_orig) {
-
-		next_command_orig = temp_command_orig->next;
-
-		/* add command to new list, sorted by command name */
-		last_command = new_command_list;
-		for(temp_command = new_command_list; temp_command != NULL; temp_command = temp_command->next) {
-
-			if(xodtemplate_compare_strings1(temp_command_orig->command_name, temp_command->command_name) <= 0)
-				break;
-			else
-				last_command = temp_command;
-			}
-
-		/* first item added to new sorted list */
-		if(new_command_list == NULL) {
-			temp_command_orig->next = NULL;
-			new_command_list = temp_command_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_command == new_command_list) {
-			temp_command_orig->next = new_command_list;
-			new_command_list = temp_command_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_command_orig->next = temp_command;
-			last_command->next = temp_command_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_command_list = new_command_list;
-
-	return OK;
-	}
-
-
-/* sort contactgroups by name */
-int xodtemplate_sort_contactgroups() {
-	xodtemplate_contactgroup *new_contactgroup_list = NULL;
-	xodtemplate_contactgroup *temp_contactgroup = NULL;
-	xodtemplate_contactgroup *last_contactgroup = NULL;
-	xodtemplate_contactgroup *temp_contactgroup_orig = NULL;
-	xodtemplate_contactgroup *next_contactgroup_orig = NULL;
-
-	/* sort all existing contactgroups */
-	for(temp_contactgroup_orig = xodtemplate_contactgroup_list; temp_contactgroup_orig != NULL; temp_contactgroup_orig = next_contactgroup_orig) {
-
-		next_contactgroup_orig = temp_contactgroup_orig->next;
-
-		/* add contactgroup to new list, sorted by contactgroup name */
-		last_contactgroup = new_contactgroup_list;
-		for(temp_contactgroup = new_contactgroup_list; temp_contactgroup != NULL; temp_contactgroup = temp_contactgroup->next) {
-
-			if(xodtemplate_compare_strings1(temp_contactgroup_orig->contactgroup_name, temp_contactgroup->contactgroup_name) <= 0)
-				break;
-			else
-				last_contactgroup = temp_contactgroup;
-			}
-
-		/* first item added to new sorted list */
-		if(new_contactgroup_list == NULL) {
-			temp_contactgroup_orig->next = NULL;
-			new_contactgroup_list = temp_contactgroup_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_contactgroup == new_contactgroup_list) {
-			temp_contactgroup_orig->next = new_contactgroup_list;
-			new_contactgroup_list = temp_contactgroup_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_contactgroup_orig->next = temp_contactgroup;
-			last_contactgroup->next = temp_contactgroup_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_contactgroup_list = new_contactgroup_list;
-
-	return OK;
-	}
-
-
-/* sort hostgroups by name */
-int xodtemplate_sort_hostgroups() {
-	xodtemplate_hostgroup *new_hostgroup_list = NULL;
-	xodtemplate_hostgroup *temp_hostgroup = NULL;
-	xodtemplate_hostgroup *last_hostgroup = NULL;
-	xodtemplate_hostgroup *temp_hostgroup_orig = NULL;
-	xodtemplate_hostgroup *next_hostgroup_orig = NULL;
-
-	/* sort all existing hostgroups */
-	for(temp_hostgroup_orig = xodtemplate_hostgroup_list; temp_hostgroup_orig != NULL; temp_hostgroup_orig = next_hostgroup_orig) {
-
-		next_hostgroup_orig = temp_hostgroup_orig->next;
-
-		/* add hostgroup to new list, sorted by hostgroup name */
-		last_hostgroup = new_hostgroup_list;
-		for(temp_hostgroup = new_hostgroup_list; temp_hostgroup != NULL; temp_hostgroup = temp_hostgroup->next) {
-
-			if(xodtemplate_compare_strings1(temp_hostgroup_orig->hostgroup_name, temp_hostgroup->hostgroup_name) <= 0)
-				break;
-			else
-				last_hostgroup = temp_hostgroup;
-			}
-
-		/* first item added to new sorted list */
-		if(new_hostgroup_list == NULL) {
-			temp_hostgroup_orig->next = NULL;
-			new_hostgroup_list = temp_hostgroup_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_hostgroup == new_hostgroup_list) {
-			temp_hostgroup_orig->next = new_hostgroup_list;
-			new_hostgroup_list = temp_hostgroup_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_hostgroup_orig->next = temp_hostgroup;
-			last_hostgroup->next = temp_hostgroup_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_hostgroup_list = new_hostgroup_list;
-
-	return OK;
-	}
-
-
-/* sort servicegroups by name */
-int xodtemplate_sort_servicegroups() {
-	xodtemplate_servicegroup *new_servicegroup_list = NULL;
-	xodtemplate_servicegroup *temp_servicegroup = NULL;
-	xodtemplate_servicegroup *last_servicegroup = NULL;
-	xodtemplate_servicegroup *temp_servicegroup_orig = NULL;
-	xodtemplate_servicegroup *next_servicegroup_orig = NULL;
-
-	/* sort all existing servicegroups */
-	for(temp_servicegroup_orig = xodtemplate_servicegroup_list; temp_servicegroup_orig != NULL; temp_servicegroup_orig = next_servicegroup_orig) {
-
-		next_servicegroup_orig = temp_servicegroup_orig->next;
-
-		/* add servicegroup to new list, sorted by servicegroup name */
-		last_servicegroup = new_servicegroup_list;
-		for(temp_servicegroup = new_servicegroup_list; temp_servicegroup != NULL; temp_servicegroup = temp_servicegroup->next) {
-
-			if(xodtemplate_compare_strings1(temp_servicegroup_orig->servicegroup_name, temp_servicegroup->servicegroup_name) <= 0)
-				break;
-			else
-				last_servicegroup = temp_servicegroup;
-			}
-
-		/* first item added to new sorted list */
-		if(new_servicegroup_list == NULL) {
-			temp_servicegroup_orig->next = NULL;
-			new_servicegroup_list = temp_servicegroup_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_servicegroup == new_servicegroup_list) {
-			temp_servicegroup_orig->next = new_servicegroup_list;
-			new_servicegroup_list = temp_servicegroup_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_servicegroup_orig->next = temp_servicegroup;
-			last_servicegroup->next = temp_servicegroup_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_servicegroup_list = new_servicegroup_list;
-
-	return OK;
-	}
-
-
-/* sort contacts by name */
-int xodtemplate_sort_contacts() {
-	xodtemplate_contact *new_contact_list = NULL;
-	xodtemplate_contact *temp_contact = NULL;
-	xodtemplate_contact *last_contact = NULL;
-	xodtemplate_contact *temp_contact_orig = NULL;
-	xodtemplate_contact *next_contact_orig = NULL;
-
-	/* sort all existing contacts */
-	for(temp_contact_orig = xodtemplate_contact_list; temp_contact_orig != NULL; temp_contact_orig = next_contact_orig) {
-
-		next_contact_orig = temp_contact_orig->next;
-
-		/* add contact to new list, sorted by contact name */
-		last_contact = new_contact_list;
-		for(temp_contact = new_contact_list; temp_contact != NULL; temp_contact = temp_contact->next) {
-
-			if(xodtemplate_compare_strings1(temp_contact_orig->contact_name, temp_contact->contact_name) <= 0)
-				break;
-			else
-				last_contact = temp_contact;
-			}
-
-		/* first item added to new sorted list */
-		if(new_contact_list == NULL) {
-			temp_contact_orig->next = NULL;
-			new_contact_list = temp_contact_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_contact == new_contact_list) {
-			temp_contact_orig->next = new_contact_list;
-			new_contact_list = temp_contact_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_contact_orig->next = temp_contact;
-			last_contact->next = temp_contact_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_contact_list = new_contact_list;
-
-	return OK;
-	}
-
-
-int xodtemplate_compare_host(void *arg1, void *arg2) {
-	xodtemplate_host *h1 = NULL;
-	xodtemplate_host *h2 = NULL;
-	int x = 0;
-
-	h1 = (xodtemplate_host *)arg1;
-	h2 = (xodtemplate_host *)arg2;
-
-	if(h1 == NULL && h2 == NULL)
-		return 0;
-	if(h1 == NULL)
-		return 1;
-	if(h2 == NULL)
-		return -1;
-
-	x = strcmp((h1->host_name == NULL) ? "" : h1->host_name, (h2->host_name == NULL) ? "" : h2->host_name);
-
-	return x;
-	}
-
-
-
-/* sort hosts by name */
-int xodtemplate_sort_hosts() {
-#ifdef NEWSTUFF
-	xodtemplate_host *temp_host = NULL;
-
-	/* initialize a new skip list */
-	if((xodtemplate_host_skiplist = skiplist_new(15, 0.5, FALSE, xodtemplate_compare_host)) == NULL)
-		return ERROR;
-
-	/* add all hosts to skip list */
-	for(temp_host = xodtemplate_host_list; temp_host != NULL; temp_host = temp_host->next)
-		skiplist_insert(xodtemplate_host_skiplist, temp_host);
-	/*printf("SKIPLIST ITEMS: %lu\n",xodtemplate_host_skiplist->items);*/
-
-	/* now move items from skiplist to linked list... */
-	/* TODO */
-#endif
-
-	xodtemplate_host *new_host_list = NULL;
-	xodtemplate_host *temp_host = NULL;
-	xodtemplate_host *last_host = NULL;
-	xodtemplate_host *temp_host_orig = NULL;
-	xodtemplate_host *next_host_orig = NULL;
-
-	/* sort all existing hosts */
-	for(temp_host_orig = xodtemplate_host_list; temp_host_orig != NULL; temp_host_orig = next_host_orig) {
-
-		next_host_orig = temp_host_orig->next;
-
-		/* add host to new list, sorted by host name */
-		last_host = new_host_list;
-		for(temp_host = new_host_list; temp_host != NULL; temp_host = temp_host->next) {
-
-			if(xodtemplate_compare_strings1(temp_host_orig->host_name, temp_host->host_name) <= 0)
-				break;
-			else
-				last_host = temp_host;
-			}
-
-		/* first item added to new sorted list */
-		if(new_host_list == NULL) {
-			temp_host_orig->next = NULL;
-			new_host_list = temp_host_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_host == new_host_list) {
-			temp_host_orig->next = new_host_list;
-			new_host_list = temp_host_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_host_orig->next = temp_host;
-			last_host->next = temp_host_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_host_list = new_host_list;
-
-	return OK;
-	}
-
-
-int xodtemplate_compare_service(void *arg1, void *arg2) {
-	xodtemplate_service *s1 = NULL;
-	xodtemplate_service *s2 = NULL;
-	int x = 0;
-
-	s1 = (xodtemplate_service *)arg1;
-	s2 = (xodtemplate_service *)arg2;
-
-	if(s1 == NULL && s2 == NULL)
-		return 0;
-	if(s1 == NULL)
-		return 1;
-	if(s2 == NULL)
-		return -1;
-
-	x = strcmp((s1->host_name == NULL) ? "" : s1->host_name, (s2->host_name == NULL) ? "" : s2->host_name);
-	if(x == 0)
-		x = strcmp((s1->service_description == NULL) ? "" : s1->service_description, (s2->service_description == NULL) ? "" : s2->service_description);
-
-	return x;
-	}
-
-
-/* sort services by name */
-int xodtemplate_sort_services() {
-#ifdef NEWSTUFF
-	xodtemplate_service *temp_service = NULL;
-
-	/* initialize a new skip list */
-	if((xodtemplate_service_skiplist = skiplist_new(15, 0.5, FALSE, xodtemplate_compare_service)) == NULL)
-		return ERROR;
-
-	/* add all services to skip list */
-	for(temp_service = xodtemplate_service_list; temp_service != NULL; temp_service = temp_service->next)
-		skiplist_insert(xodtemplate_service_skiplist, temp_service);
-	/*printf("SKIPLIST ITEMS: %lu\n",xodtemplate_service_skiplist->items);*/
-
-	/* now move items to linked list... */
-	/* TODO */
-#endif
-
-	xodtemplate_service *new_service_list = NULL;
-	xodtemplate_service *temp_service = NULL;
-	xodtemplate_service *last_service = NULL;
-	xodtemplate_service *temp_service_orig = NULL;
-	xodtemplate_service *next_service_orig = NULL;
-
-	/* sort all existing services */
-	for(temp_service_orig = xodtemplate_service_list; temp_service_orig != NULL; temp_service_orig = next_service_orig) {
-
-		next_service_orig = temp_service_orig->next;
-
-		/* add service to new list, sorted by host name then service description */
-		last_service = new_service_list;
-		for(temp_service = new_service_list; temp_service != NULL; temp_service = temp_service->next) {
-
-			if(xodtemplate_compare_strings2(temp_service_orig->host_name, temp_service_orig->service_description, temp_service->host_name, temp_service->service_description) <= 0)
-				break;
-			else
-				last_service = temp_service;
-			}
-
-		/* first item added to new sorted list */
-		if(new_service_list == NULL) {
-			temp_service_orig->next = NULL;
-			new_service_list = temp_service_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_service == new_service_list) {
-			temp_service_orig->next = new_service_list;
-			new_service_list = temp_service_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_service_orig->next = temp_service;
-			last_service->next = temp_service_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_service_list = new_service_list;
-
-	return OK;
-	}
-
-
-/* sort servicedependencies by name */
-int xodtemplate_sort_servicedependencies() {
-	xodtemplate_servicedependency *new_servicedependency_list = NULL;
-	xodtemplate_servicedependency *temp_servicedependency = NULL;
-	xodtemplate_servicedependency *last_servicedependency = NULL;
-	xodtemplate_servicedependency *temp_servicedependency_orig = NULL;
-	xodtemplate_servicedependency *next_servicedependency_orig = NULL;
-
-	/* sort all existing servicedependencies */
-	for(temp_servicedependency_orig = xodtemplate_servicedependency_list; temp_servicedependency_orig != NULL; temp_servicedependency_orig = next_servicedependency_orig) {
-
-		next_servicedependency_orig = temp_servicedependency_orig->next;
-
-		/* add servicedependency to new list, sorted by host name then service description */
-		last_servicedependency = new_servicedependency_list;
-		for(temp_servicedependency = new_servicedependency_list; temp_servicedependency != NULL; temp_servicedependency = temp_servicedependency->next) {
-
-			if(xodtemplate_compare_strings2(temp_servicedependency_orig->host_name, temp_servicedependency_orig->service_description, temp_servicedependency->host_name, temp_servicedependency->service_description) <= 0)
-				break;
-			else
-				last_servicedependency = temp_servicedependency;
-			}
-
-		/* first item added to new sorted list */
-		if(new_servicedependency_list == NULL) {
-			temp_servicedependency_orig->next = NULL;
-			new_servicedependency_list = temp_servicedependency_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_servicedependency == new_servicedependency_list) {
-			temp_servicedependency_orig->next = new_servicedependency_list;
-			new_servicedependency_list = temp_servicedependency_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_servicedependency_orig->next = temp_servicedependency;
-			last_servicedependency->next = temp_servicedependency_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_servicedependency_list = new_servicedependency_list;
-
-	return OK;
-	}
-
-
-/* sort serviceescalations by name */
-int xodtemplate_sort_serviceescalations() {
-	xodtemplate_serviceescalation *new_serviceescalation_list = NULL;
-	xodtemplate_serviceescalation *temp_serviceescalation = NULL;
-	xodtemplate_serviceescalation *last_serviceescalation = NULL;
-	xodtemplate_serviceescalation *temp_serviceescalation_orig = NULL;
-	xodtemplate_serviceescalation *next_serviceescalation_orig = NULL;
-
-	/* sort all existing serviceescalations */
-	for(temp_serviceescalation_orig = xodtemplate_serviceescalation_list; temp_serviceescalation_orig != NULL; temp_serviceescalation_orig = next_serviceescalation_orig) {
-
-		next_serviceescalation_orig = temp_serviceescalation_orig->next;
-
-		/* add serviceescalation to new list, sorted by host name then service description */
-		last_serviceescalation = new_serviceescalation_list;
-		for(temp_serviceescalation = new_serviceescalation_list; temp_serviceescalation != NULL; temp_serviceescalation = temp_serviceescalation->next) {
-
-			if(xodtemplate_compare_strings2(temp_serviceescalation_orig->host_name, temp_serviceescalation_orig->service_description, temp_serviceescalation->host_name, temp_serviceescalation->service_description) <= 0)
-				break;
-			else
-				last_serviceescalation = temp_serviceescalation;
-			}
-
-		/* first item added to new sorted list */
-		if(new_serviceescalation_list == NULL) {
-			temp_serviceescalation_orig->next = NULL;
-			new_serviceescalation_list = temp_serviceescalation_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_serviceescalation == new_serviceescalation_list) {
-			temp_serviceescalation_orig->next = new_serviceescalation_list;
-			new_serviceescalation_list = temp_serviceescalation_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_serviceescalation_orig->next = temp_serviceescalation;
-			last_serviceescalation->next = temp_serviceescalation_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_serviceescalation_list = new_serviceescalation_list;
-
-	return OK;
-	}
-
-
-/* sort hostescalations by name */
-int xodtemplate_sort_hostescalations() {
-	xodtemplate_hostescalation *new_hostescalation_list = NULL;
-	xodtemplate_hostescalation *temp_hostescalation = NULL;
-	xodtemplate_hostescalation *last_hostescalation = NULL;
-	xodtemplate_hostescalation *temp_hostescalation_orig = NULL;
-	xodtemplate_hostescalation *next_hostescalation_orig = NULL;
-
-	/* sort all existing hostescalations */
-	for(temp_hostescalation_orig = xodtemplate_hostescalation_list; temp_hostescalation_orig != NULL; temp_hostescalation_orig = next_hostescalation_orig) {
-
-		next_hostescalation_orig = temp_hostescalation_orig->next;
-
-		/* add hostescalation to new list, sorted by host name then hostescalation description */
-		last_hostescalation = new_hostescalation_list;
-		for(temp_hostescalation = new_hostescalation_list; temp_hostescalation != NULL; temp_hostescalation = temp_hostescalation->next) {
-
-			if(xodtemplate_compare_strings1(temp_hostescalation_orig->host_name, temp_hostescalation->host_name) <= 0)
-				break;
-			else
-				last_hostescalation = temp_hostescalation;
-			}
-
-		/* first item added to new sorted list */
-		if(new_hostescalation_list == NULL) {
-			temp_hostescalation_orig->next = NULL;
-			new_hostescalation_list = temp_hostescalation_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_hostescalation == new_hostescalation_list) {
-			temp_hostescalation_orig->next = new_hostescalation_list;
-			new_hostescalation_list = temp_hostescalation_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_hostescalation_orig->next = temp_hostescalation;
-			last_hostescalation->next = temp_hostescalation_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_hostescalation_list = new_hostescalation_list;
-
-	return OK;
-	}
-
-
-/* sort hostdependencies by name */
-int xodtemplate_sort_hostdependencies() {
-	xodtemplate_hostdependency *new_hostdependency_list = NULL;
-	xodtemplate_hostdependency *temp_hostdependency = NULL;
-	xodtemplate_hostdependency *last_hostdependency = NULL;
-	xodtemplate_hostdependency *temp_hostdependency_orig = NULL;
-	xodtemplate_hostdependency *next_hostdependency_orig = NULL;
-
-	/* sort all existing hostdependencys */
-	for(temp_hostdependency_orig = xodtemplate_hostdependency_list; temp_hostdependency_orig != NULL; temp_hostdependency_orig = next_hostdependency_orig) {
-
-		next_hostdependency_orig = temp_hostdependency_orig->next;
-
-		/* add hostdependency to new list, sorted by host name then hostdependency description */
-		last_hostdependency = new_hostdependency_list;
-		for(temp_hostdependency = new_hostdependency_list; temp_hostdependency != NULL; temp_hostdependency = temp_hostdependency->next) {
-
-			if(xodtemplate_compare_strings1(temp_hostdependency_orig->host_name, temp_hostdependency->host_name) <= 0)
-				break;
-			else
-				last_hostdependency = temp_hostdependency;
-			}
-
-		/* first item added to new sorted list */
-		if(new_hostdependency_list == NULL) {
-			temp_hostdependency_orig->next = NULL;
-			new_hostdependency_list = temp_hostdependency_orig;
-			}
-
-		/* item goes at head of new sorted list */
-		else if(temp_hostdependency == new_hostdependency_list) {
-			temp_hostdependency_orig->next = new_hostdependency_list;
-			new_hostdependency_list = temp_hostdependency_orig;
-			}
-
-		/* item goes in middle or at end of new sorted list */
-		else {
-			temp_hostdependency_orig->next = temp_hostdependency;
-			last_hostdependency->next = temp_hostdependency_orig;
-			}
-		}
-
-	/* list is now sorted */
-	xodtemplate_hostdependency_list = new_hostdependency_list;
-
-	return OK;
-	}
-
-#endif
-
-
-
-
-/******************************************************************/
 /*********************** MERGE FUNCTIONS **************************/
 /******************************************************************/
 
 #ifdef NSCORE
-
-/* merge extinfo definitions */
-int xodtemplate_merge_extinfo_ojects(void) {
-	xodtemplate_hostextinfo *temp_hostextinfo = NULL;
-	xodtemplate_serviceextinfo *temp_serviceextinfo = NULL;
-	xodtemplate_host *temp_host = NULL;
-	xodtemplate_service *temp_service = NULL;
-
-	/* merge service extinfo definitions */
-	for(temp_serviceextinfo = xodtemplate_serviceextinfo_list; temp_serviceextinfo != NULL; temp_serviceextinfo = temp_serviceextinfo->next) {
-
-		/* make sure we have everything */
-		if(temp_serviceextinfo->host_name == NULL || temp_serviceextinfo->service_description == NULL)
-			continue;
-
-		/* find the service */
-		if((temp_service = xodtemplate_find_real_service(temp_serviceextinfo->host_name, temp_serviceextinfo->service_description)) == NULL)
-			continue;
-
-		/* merge the definitions */
-		xodtemplate_merge_service_extinfo_object(temp_service, temp_serviceextinfo);
-		}
-
-	/* merge host extinfo definitions */
-	for(temp_hostextinfo = xodtemplate_hostextinfo_list; temp_hostextinfo != NULL; temp_hostextinfo = temp_hostextinfo->next) {
-
-		/* make sure we have everything */
-		if(temp_hostextinfo->host_name == NULL)
-			continue;
-
-		/* find the host */
-		if((temp_host = xodtemplate_find_real_host(temp_hostextinfo->host_name)) == NULL)
-			continue;
-
-		/* merge the definitions */
-		xodtemplate_merge_host_extinfo_object(temp_host, temp_hostextinfo);
-		}
-
-	return OK;
-	}
-
 
 /* merges a service extinfo definition */
 int xodtemplate_merge_service_extinfo_object(xodtemplate_service *this_service, xodtemplate_serviceextinfo *this_serviceextinfo) {
@@ -10108,708 +7801,6 @@ int xodtemplate_merge_host_extinfo_object(xodtemplate_host *this_host, xodtempla
 #endif
 
 
-
-/******************************************************************/
-/*********************** CACHE FUNCTIONS **************************/
-/******************************************************************/
-
-#ifdef NSCORE
-
-/* writes cached object definitions for use by web interface */
-int xodtemplate_cache_objects(char *cache_file) {
-	FILE *fp = NULL;
-	register int x = 0;
-	char *days[7] = {"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"};
-	char *months[12] = {"january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"};
-	xodtemplate_timeperiod *temp_timeperiod = NULL;
-	xodtemplate_daterange *temp_daterange = NULL;
-	xodtemplate_command *temp_command = NULL;
-	xodtemplate_contactgroup *temp_contactgroup = NULL;
-	xodtemplate_hostgroup *temp_hostgroup = NULL;
-	xodtemplate_servicegroup *temp_servicegroup = NULL;
-	xodtemplate_contact *temp_contact = NULL;
-	xodtemplate_host *temp_host = NULL;
-	xodtemplate_service *temp_service = NULL;
-	xodtemplate_servicedependency *temp_servicedependency = NULL;
-	xodtemplate_serviceescalation *temp_serviceescalation = NULL;
-	xodtemplate_hostdependency *temp_hostdependency = NULL;
-	xodtemplate_hostescalation *temp_hostescalation = NULL;
-	xodtemplate_customvariablesmember *temp_customvariablesmember = NULL;
-	time_t current_time = 0L;
-	void *ptr = NULL;
-
-
-	time(&current_time);
-
-	/* open the cache file for writing */
-	fp = fopen(cache_file, "w");
-	if(fp == NULL) {
-		logit(NSLOG_CONFIG_WARNING, TRUE, "Warning: Could not open object cache file '%s' for writing!\n", cache_file);
-		return ERROR;
-		}
-
-	/* write header to cache file */
-	fprintf(fp, "########################################\n");
-	fprintf(fp, "#       NAGIOS OBJECT CACHE FILE\n");
-	fprintf(fp, "#\n");
-	fprintf(fp, "# THIS FILE IS AUTOMATICALLY GENERATED\n");
-	fprintf(fp, "# BY NAGIOS.  DO NOT MODIFY THIS FILE!\n");
-	fprintf(fp, "#\n");
-	fprintf(fp, "# Created: %s", ctime(&current_time));
-	fprintf(fp, "########################################\n\n");
-
-
-	/* cache timeperiods */
-	/*for(temp_timeperiod=xodtemplate_timeperiod_list;temp_timeperiod!=NULL;temp_timeperiod=temp_timeperiod->next){*/
-	ptr = NULL;
-	for(temp_timeperiod = (xodtemplate_timeperiod *)skiplist_get_first(xobject_skiplists[TIMEPERIOD_SKIPLIST], &ptr); temp_timeperiod != NULL; temp_timeperiod = (xodtemplate_timeperiod *)skiplist_get_next(&ptr)) {
-
-		if(temp_timeperiod->register_object == FALSE)
-			continue;
-		fprintf(fp, "define timeperiod {\n");
-		if(temp_timeperiod->timeperiod_name)
-			fprintf(fp, "\ttimeperiod_name\t%s\n", temp_timeperiod->timeperiod_name);
-		if(temp_timeperiod->alias)
-			fprintf(fp, "\talias\t%s\n", temp_timeperiod->alias);
-		for(x = 0; x < DATERANGE_TYPES; x++) {
-			for(temp_daterange = temp_timeperiod->exceptions[x]; temp_daterange != NULL; temp_daterange = temp_daterange->next) {
-
-				/* skip null entries */
-				if(temp_daterange->timeranges == NULL || !strcmp(temp_daterange->timeranges, XODTEMPLATE_NULL))
-					continue;
-
-				switch(temp_daterange->type) {
-					case DATERANGE_CALENDAR_DATE:
-						fprintf(fp, "\t%d-%02d-%02d", temp_daterange->syear, temp_daterange->smon + 1, temp_daterange->smday);
-						if((temp_daterange->smday != temp_daterange->emday) || (temp_daterange->smon != temp_daterange->emon) || (temp_daterange->syear != temp_daterange->eyear))
-							fprintf(fp, " - %d-%02d-%02d", temp_daterange->eyear, temp_daterange->emon + 1, temp_daterange->emday);
-						if(temp_daterange->skip_interval > 1)
-							fprintf(fp, " / %d", temp_daterange->skip_interval);
-						break;
-					case DATERANGE_MONTH_DATE:
-						fprintf(fp, "\t%s %d", months[temp_daterange->smon], temp_daterange->smday);
-						if((temp_daterange->smon != temp_daterange->emon) || (temp_daterange->smday != temp_daterange->emday)) {
-							fprintf(fp, " - %s %d", months[temp_daterange->emon], temp_daterange->emday);
-							if(temp_daterange->skip_interval > 1)
-								fprintf(fp, " / %d", temp_daterange->skip_interval);
-							}
-						break;
-					case DATERANGE_MONTH_DAY:
-						fprintf(fp, "\tday %d", temp_daterange->smday);
-						if(temp_daterange->smday != temp_daterange->emday) {
-							fprintf(fp, " - %d", temp_daterange->emday);
-							if(temp_daterange->skip_interval > 1)
-								fprintf(fp, " / %d", temp_daterange->skip_interval);
-							}
-						break;
-					case DATERANGE_MONTH_WEEK_DAY:
-						fprintf(fp, "\t%s %d %s", days[temp_daterange->swday], temp_daterange->swday_offset, months[temp_daterange->smon]);
-						if((temp_daterange->smon != temp_daterange->emon) || (temp_daterange->swday != temp_daterange->ewday) || (temp_daterange->swday_offset != temp_daterange->ewday_offset)) {
-							fprintf(fp, " - %s %d %s", days[temp_daterange->ewday], temp_daterange->ewday_offset, months[temp_daterange->emon]);
-							if(temp_daterange->skip_interval > 1)
-								fprintf(fp, " / %d", temp_daterange->skip_interval);
-							}
-						break;
-					case DATERANGE_WEEK_DAY:
-						fprintf(fp, "\t%s %d", days[temp_daterange->swday], temp_daterange->swday_offset);
-						if((temp_daterange->swday != temp_daterange->ewday) || (temp_daterange->swday_offset != temp_daterange->ewday_offset)) {
-							fprintf(fp, " - %s %d", days[temp_daterange->ewday], temp_daterange->ewday_offset);
-							if(temp_daterange->skip_interval > 1)
-								fprintf(fp, " / %d", temp_daterange->skip_interval);
-							}
-						break;
-					default:
-						break;
-					}
-
-				fprintf(fp, "\t%s\n", temp_daterange->timeranges);
-				}
-			}
-		for(x = 0; x < 7; x++) {
-			/* skip null entries */
-			if(temp_timeperiod->timeranges[x] == NULL  || !strcmp(temp_timeperiod->timeranges[x], XODTEMPLATE_NULL))
-				continue;
-
-			fprintf(fp, "\t%s\t%s\n", days[x], temp_timeperiod->timeranges[x]);
-			}
-		if(temp_timeperiod->exclusions)
-			fprintf(fp, "\texclude\t%s\n", temp_timeperiod->exclusions);
-		fprintf(fp, "\t}\n\n");
-		}
-
-	/* cache commands */
-	/*for(temp_command=xodtemplate_command_list;temp_command!=NULL;temp_command=temp_command->next){*/
-	ptr = NULL;
-	for(temp_command = (xodtemplate_command *)skiplist_get_first(xobject_skiplists[COMMAND_SKIPLIST], &ptr); temp_command != NULL; temp_command = (xodtemplate_command *)skiplist_get_next(&ptr)) {
-		if(temp_command->register_object == FALSE)
-			continue;
-		fprintf(fp, "define command {\n");
-		if(temp_command->command_name)
-			fprintf(fp, "\tcommand_name\t%s\n", temp_command->command_name);
-		if(temp_command->command_line)
-			fprintf(fp, "\tcommand_line\t%s\n", temp_command->command_line);
-		fprintf(fp, "\t}\n\n");
-		}
-
-	/* cache contactgroups */
-	/*for(temp_contactgroup=xodtemplate_contactgroup_list;temp_contactgroup!=NULL;temp_contactgroup=temp_contactgroup->next){*/
-	ptr = NULL;
-	for(temp_contactgroup = (xodtemplate_contactgroup *)skiplist_get_first(xobject_skiplists[CONTACTGROUP_SKIPLIST], &ptr); temp_contactgroup != NULL; temp_contactgroup = (xodtemplate_contactgroup *)skiplist_get_next(&ptr)) {
-		if(temp_contactgroup->register_object == FALSE)
-			continue;
-		fprintf(fp, "define contactgroup {\n");
-		if(temp_contactgroup->contactgroup_name)
-			fprintf(fp, "\tcontactgroup_name\t%s\n", temp_contactgroup->contactgroup_name);
-		if(temp_contactgroup->alias)
-			fprintf(fp, "\talias\t%s\n", temp_contactgroup->alias);
-		if(temp_contactgroup->members)
-			fprintf(fp, "\tmembers\t%s\n", temp_contactgroup->members);
-		fprintf(fp, "\t}\n\n");
-		}
-
-	/* cache hostgroups */
-	/*for(temp_hostgroup=xodtemplate_hostgroup_list;temp_hostgroup!=NULL;temp_hostgroup=temp_hostgroup->next){*/
-	ptr = NULL;
-	for(temp_hostgroup = (xodtemplate_hostgroup *)skiplist_get_first(xobject_skiplists[HOSTGROUP_SKIPLIST], &ptr); temp_hostgroup != NULL; temp_hostgroup = (xodtemplate_hostgroup *)skiplist_get_next(&ptr)) {
-		if(temp_hostgroup->register_object == FALSE)
-			continue;
-		fprintf(fp, "define hostgroup {\n");
-		if(temp_hostgroup->hostgroup_name)
-			fprintf(fp, "\thostgroup_name\t%s\n", temp_hostgroup->hostgroup_name);
-		if(temp_hostgroup->alias)
-			fprintf(fp, "\talias\t%s\n", temp_hostgroup->alias);
-		if(temp_hostgroup->members)
-			fprintf(fp, "\tmembers\t%s\n", temp_hostgroup->members);
-		if(temp_hostgroup->notes)
-			fprintf(fp, "\tnotes\t%s\n", temp_hostgroup->notes);
-		if(temp_hostgroup->notes_url)
-			fprintf(fp, "\tnotes_url\t%s\n", temp_hostgroup->notes_url);
-		if(temp_hostgroup->action_url)
-			fprintf(fp, "\taction_url\t%s\n", temp_hostgroup->action_url);
-		fprintf(fp, "\t}\n\n");
-		}
-
-	/* cache servicegroups */
-	/*for(temp_servicegroup=xodtemplate_servicegroup_list;temp_servicegroup!=NULL;temp_servicegroup=temp_servicegroup->next){*/
-	ptr = NULL;
-	for(temp_servicegroup = (xodtemplate_servicegroup *)skiplist_get_first(xobject_skiplists[SERVICEGROUP_SKIPLIST], &ptr); temp_servicegroup != NULL; temp_servicegroup = (xodtemplate_servicegroup *)skiplist_get_next(&ptr)) {
-		if(temp_servicegroup->register_object == FALSE)
-			continue;
-		fprintf(fp, "define servicegroup {\n");
-		if(temp_servicegroup->servicegroup_name)
-			fprintf(fp, "\tservicegroup_name\t%s\n", temp_servicegroup->servicegroup_name);
-		if(temp_servicegroup->alias)
-			fprintf(fp, "\talias\t%s\n", temp_servicegroup->alias);
-		if(temp_servicegroup->members)
-			fprintf(fp, "\tmembers\t%s\n", temp_servicegroup->members);
-		if(temp_servicegroup->notes)
-			fprintf(fp, "\tnotes\t%s\n", temp_servicegroup->notes);
-		if(temp_servicegroup->notes_url)
-			fprintf(fp, "\tnotes_url\t%s\n", temp_servicegroup->notes_url);
-		if(temp_servicegroup->action_url)
-			fprintf(fp, "\taction_url\t%s\n", temp_servicegroup->action_url);
-		fprintf(fp, "\t}\n\n");
-		}
-
-	/* cache contacts */
-	/*for(temp_contact=xodtemplate_contact_list;temp_contact!=NULL;temp_contact=temp_contact->next){*/
-	ptr = NULL;
-	for(temp_contact = (xodtemplate_contact *)skiplist_get_first(xobject_skiplists[CONTACT_SKIPLIST], &ptr); temp_contact != NULL; temp_contact = (xodtemplate_contact *)skiplist_get_next(&ptr)) {
-		if(temp_contact->register_object == FALSE)
-			continue;
-		fprintf(fp, "define contact {\n");
-		if(temp_contact->contact_name)
-			fprintf(fp, "\tcontact_name\t%s\n", temp_contact->contact_name);
-		if(temp_contact->alias)
-			fprintf(fp, "\talias\t%s\n", temp_contact->alias);
-		if(temp_contact->service_notification_period)
-			fprintf(fp, "\tservice_notification_period\t%s\n", temp_contact->service_notification_period);
-		if(temp_contact->host_notification_period)
-			fprintf(fp, "\thost_notification_period\t%s\n", temp_contact->host_notification_period);
-		fprintf(fp, "\tservice_notification_options\t");
-		x = 0;
-		if(temp_contact->notify_on_service_warning == TRUE)
-			fprintf(fp, "%sw", (x++ > 0) ? "," : "");
-		if(temp_contact->notify_on_service_unknown == TRUE)
-			fprintf(fp, "%su", (x++ > 0) ? "," : "");
-		if(temp_contact->notify_on_service_critical == TRUE)
-			fprintf(fp, "%sc", (x++ > 0) ? "," : "");
-		if(temp_contact->notify_on_service_recovery == TRUE)
-			fprintf(fp, "%sr", (x++ > 0) ? "," : "");
-		if(temp_contact->notify_on_service_flapping == TRUE)
-			fprintf(fp, "%sf", (x++ > 0) ? "," : "");
-		if(temp_contact->notify_on_service_downtime == TRUE)
-			fprintf(fp, "%ss", (x++ > 0) ? "," : "");
-		if(x == 0)
-			fprintf(fp, "n");
-		fprintf(fp, "\n");
-		fprintf(fp, "\thost_notification_options\t");
-		x = 0;
-		if(temp_contact->notify_on_host_down == TRUE)
-			fprintf(fp, "%sd", (x++ > 0) ? "," : "");
-		if(temp_contact->notify_on_host_unreachable == TRUE)
-			fprintf(fp, "%su", (x++ > 0) ? "," : "");
-		if(temp_contact->notify_on_host_recovery == TRUE)
-			fprintf(fp, "%sr", (x++ > 0) ? "," : "");
-		if(temp_contact->notify_on_host_flapping == TRUE)
-			fprintf(fp, "%sf", (x++ > 0) ? "," : "");
-		if(temp_contact->notify_on_host_downtime == TRUE)
-			fprintf(fp, "%ss", (x++ > 0) ? "," : "");
-		if(x == 0)
-			fprintf(fp, "n");
-		fprintf(fp, "\n");
-		if(temp_contact->service_notification_commands)
-			fprintf(fp, "\tservice_notification_commands\t%s\n", temp_contact->service_notification_commands);
-		if(temp_contact->host_notification_commands)
-			fprintf(fp, "\thost_notification_commands\t%s\n", temp_contact->host_notification_commands);
-		if(temp_contact->email)
-			fprintf(fp, "\temail\t%s\n", temp_contact->email);
-		if(temp_contact->pager)
-			fprintf(fp, "\tpager\t%s\n", temp_contact->pager);
-		for(x = 0; x < MAX_XODTEMPLATE_CONTACT_ADDRESSES; x++) {
-			if(temp_contact->address[x])
-				fprintf(fp, "\taddress%d\t%s\n", x + 1, temp_contact->address[x]);
-			}
-		fprintf(fp, "\thost_notifications_enabled\t%d\n", temp_contact->host_notifications_enabled);
-		fprintf(fp, "\tservice_notifications_enabled\t%d\n", temp_contact->service_notifications_enabled);
-		fprintf(fp, "\tcan_submit_commands\t%d\n", temp_contact->can_submit_commands);
-		fprintf(fp, "\tretain_status_information\t%d\n", temp_contact->retain_status_information);
-		fprintf(fp, "\tretain_nonstatus_information\t%d\n", temp_contact->retain_nonstatus_information);
-
-		/* custom variables */
-		for(temp_customvariablesmember = temp_contact->custom_variables; temp_customvariablesmember != NULL; temp_customvariablesmember = temp_customvariablesmember->next) {
-			if(temp_customvariablesmember->variable_name)
-				fprintf(fp, "\t_%s\t%s\n", temp_customvariablesmember->variable_name, (temp_customvariablesmember->variable_value == NULL) ? XODTEMPLATE_NULL : temp_customvariablesmember->variable_value);
-			}
-
-
-		fprintf(fp, "\t}\n\n");
-		}
-
-	/* cache hosts */
-	/*for(temp_host=xodtemplate_host_list;temp_host!=NULL;temp_host=temp_host->next){*/
-	ptr = NULL;
-	for(temp_host = (xodtemplate_host *)skiplist_get_first(xobject_skiplists[HOST_SKIPLIST], &ptr); temp_host != NULL; temp_host = (xodtemplate_host *)skiplist_get_next(&ptr)) {
-		if(temp_host->register_object == FALSE)
-			continue;
-		fprintf(fp, "define host {\n");
-		if(temp_host->host_name)
-			fprintf(fp, "\thost_name\t%s\n", temp_host->host_name);
-		if(temp_host->display_name)
-			fprintf(fp, "\tdisplay_name\t%s\n", temp_host->display_name);
-		if(temp_host->alias)
-			fprintf(fp, "\talias\t%s\n", temp_host->alias);
-		if(temp_host->address)
-			fprintf(fp, "\taddress\t%s\n", temp_host->address);
-		if(temp_host->parents)
-			fprintf(fp, "\tparents\t%s\n", temp_host->parents);
-		if(temp_host->check_period)
-			fprintf(fp, "\tcheck_period\t%s\n", temp_host->check_period);
-		if(temp_host->check_command)
-			fprintf(fp, "\tcheck_command\t%s\n", temp_host->check_command);
-		if(temp_host->event_handler)
-			fprintf(fp, "\tevent_handler\t%s\n", temp_host->event_handler);
-		if(temp_host->contacts)
-			fprintf(fp, "\tcontacts\t%s\n", temp_host->contacts);
-		if(temp_host->contact_groups)
-			fprintf(fp, "\tcontact_groups\t%s\n", temp_host->contact_groups);
-		if(temp_host->notification_period)
-			fprintf(fp, "\tnotification_period\t%s\n", temp_host->notification_period);
-		if(temp_host->failure_prediction_options)
-			fprintf(fp, "\tfailure_prediction_options\t%s\n", temp_host->failure_prediction_options);
-		fprintf(fp, "\tinitial_state\t");
-		if(temp_host->initial_state == HOST_DOWN)
-			fprintf(fp, "d\n");
-		else if(temp_host->initial_state == HOST_UNREACHABLE)
-			fprintf(fp, "u\n");
-		else
-			fprintf(fp, "o\n");
-		fprintf(fp, "\tcheck_interval\t%f\n", temp_host->check_interval);
-		fprintf(fp, "\tretry_interval\t%f\n", temp_host->retry_interval);
-		fprintf(fp, "\tmax_check_attempts\t%d\n", temp_host->max_check_attempts);
-		fprintf(fp, "\tactive_checks_enabled\t%d\n", temp_host->active_checks_enabled);
-		fprintf(fp, "\tpassive_checks_enabled\t%d\n", temp_host->passive_checks_enabled);
-		fprintf(fp, "\tobsess_over_host\t%d\n", temp_host->obsess_over_host);
-		fprintf(fp, "\tevent_handler_enabled\t%d\n", temp_host->event_handler_enabled);
-		fprintf(fp, "\tlow_flap_threshold\t%f\n", temp_host->low_flap_threshold);
-		fprintf(fp, "\thigh_flap_threshold\t%f\n", temp_host->high_flap_threshold);
-		fprintf(fp, "\tflap_detection_enabled\t%d\n", temp_host->flap_detection_enabled);
-		fprintf(fp, "\tflap_detection_options\t");
-		x = 0;
-		if(temp_host->flap_detection_on_up == TRUE)
-			fprintf(fp, "%so", (x++ > 0) ? "," : "");
-		if(temp_host->flap_detection_on_down == TRUE)
-			fprintf(fp, "%sd", (x++ > 0) ? "," : "");
-		if(temp_host->flap_detection_on_unreachable == TRUE)
-			fprintf(fp, "%su", (x++ > 0) ? "," : "");
-		if(x == 0)
-			fprintf(fp, "n");
-		fprintf(fp, "\n");
-		fprintf(fp, "\tfreshness_threshold\t%d\n", temp_host->freshness_threshold);
-		fprintf(fp, "\tcheck_freshness\t%d\n", temp_host->check_freshness);
-		fprintf(fp, "\tnotification_options\t");
-		x = 0;
-		if(temp_host->notify_on_down == TRUE)
-			fprintf(fp, "%sd", (x++ > 0) ? "," : "");
-		if(temp_host->notify_on_unreachable == TRUE)
-			fprintf(fp, "%su", (x++ > 0) ? "," : "");
-		if(temp_host->notify_on_recovery == TRUE)
-			fprintf(fp, "%sr", (x++ > 0) ? "," : "");
-		if(temp_host->notify_on_flapping == TRUE)
-			fprintf(fp, "%sf", (x++ > 0) ? "," : "");
-		if(temp_host->notify_on_downtime == TRUE)
-			fprintf(fp, "%ss", (x++ > 0) ? "," : "");
-		if(x == 0)
-			fprintf(fp, "n");
-		fprintf(fp, "\n");
-		fprintf(fp, "\tnotifications_enabled\t%d\n", temp_host->notifications_enabled);
-		fprintf(fp, "\tnotification_interval\t%f\n", temp_host->notification_interval);
-		fprintf(fp, "\tfirst_notification_delay\t%f\n", temp_host->first_notification_delay);
-		fprintf(fp, "\tstalking_options\t");
-		x = 0;
-		if(temp_host->stalk_on_up == TRUE)
-			fprintf(fp, "%so", (x++ > 0) ? "," : "");
-		if(temp_host->stalk_on_down == TRUE)
-			fprintf(fp, "%sd", (x++ > 0) ? "," : "");
-		if(temp_host->stalk_on_unreachable == TRUE)
-			fprintf(fp, "%su", (x++ > 0) ? "," : "");
-		if(x == 0)
-			fprintf(fp, "n");
-		fprintf(fp, "\n");
-		fprintf(fp, "\tprocess_perf_data\t%d\n", temp_host->process_perf_data);
-		fprintf(fp, "\tfailure_prediction_enabled\t%d\n", temp_host->failure_prediction_enabled);
-		if(temp_host->icon_image)
-			fprintf(fp, "\ticon_image\t%s\n", temp_host->icon_image);
-		if(temp_host->icon_image_alt)
-			fprintf(fp, "\ticon_image_alt\t%s\n", temp_host->icon_image_alt);
-		if(temp_host->vrml_image)
-			fprintf(fp, "\tvrml_image\t%s\n", temp_host->vrml_image);
-		if(temp_host->statusmap_image)
-			fprintf(fp, "\tstatusmap_image\t%s\n", temp_host->statusmap_image);
-		if(temp_host->have_2d_coords == TRUE)
-			fprintf(fp, "\t2d_coords\t%d,%d\n", temp_host->x_2d, temp_host->y_2d);
-		if(temp_host->have_3d_coords == TRUE)
-			fprintf(fp, "\t3d_coords\t%f,%f,%f\n", temp_host->x_3d, temp_host->y_3d, temp_host->z_3d);
-		if(temp_host->notes)
-			fprintf(fp, "\tnotes\t%s\n", temp_host->notes);
-		if(temp_host->notes_url)
-			fprintf(fp, "\tnotes_url\t%s\n", temp_host->notes_url);
-		if(temp_host->action_url)
-			fprintf(fp, "\taction_url\t%s\n", temp_host->action_url);
-		fprintf(fp, "\tretain_status_information\t%d\n", temp_host->retain_status_information);
-		fprintf(fp, "\tretain_nonstatus_information\t%d\n", temp_host->retain_nonstatus_information);
-
-		/* custom variables */
-		for(temp_customvariablesmember = temp_host->custom_variables; temp_customvariablesmember != NULL; temp_customvariablesmember = temp_customvariablesmember->next) {
-			if(temp_customvariablesmember->variable_name)
-				fprintf(fp, "\t_%s\t%s\n", temp_customvariablesmember->variable_name, (temp_customvariablesmember->variable_value == NULL) ? XODTEMPLATE_NULL : temp_customvariablesmember->variable_value);
-			}
-
-
-		fprintf(fp, "\t}\n\n");
-		}
-
-	/* cache services */
-	/*for(temp_service=xodtemplate_service_list;temp_service!=NULL;temp_service=temp_service->next){*/
-	ptr = NULL;
-	for(temp_service = (xodtemplate_service *)skiplist_get_first(xobject_skiplists[SERVICE_SKIPLIST], &ptr); temp_service != NULL; temp_service = (xodtemplate_service *)skiplist_get_next(&ptr)) {
-		if(temp_service->register_object == FALSE)
-			continue;
-		fprintf(fp, "define service {\n");
-		if(temp_service->host_name)
-			fprintf(fp, "\thost_name\t%s\n", temp_service->host_name);
-		if(temp_service->service_description)
-			fprintf(fp, "\tservice_description\t%s\n", temp_service->service_description);
-		if(temp_service->display_name)
-			fprintf(fp, "\tdisplay_name\t%s\n", temp_service->display_name);
-		if(temp_service->check_period)
-			fprintf(fp, "\tcheck_period\t%s\n", temp_service->check_period);
-		if(temp_service->check_command)
-			fprintf(fp, "\tcheck_command\t%s\n", temp_service->check_command);
-		if(temp_service->event_handler)
-			fprintf(fp, "\tevent_handler\t%s\n", temp_service->event_handler);
-		if(temp_service->contacts)
-			fprintf(fp, "\tcontacts\t%s\n", temp_service->contacts);
-		if(temp_service->contact_groups)
-			fprintf(fp, "\tcontact_groups\t%s\n", temp_service->contact_groups);
-		if(temp_service->notification_period)
-			fprintf(fp, "\tnotification_period\t%s\n", temp_service->notification_period);
-		if(temp_service->failure_prediction_options)
-			fprintf(fp, "\tfailure_prediction_options\t%s\n", temp_service->failure_prediction_options);
-		fprintf(fp, "\tinitial_state\t");
-		if(temp_service->initial_state == STATE_WARNING)
-			fprintf(fp, "w\n");
-		else if(temp_service->initial_state == STATE_UNKNOWN)
-			fprintf(fp, "u\n");
-		else if(temp_service->initial_state == STATE_CRITICAL)
-			fprintf(fp, "c\n");
-		else
-			fprintf(fp, "o\n");
-		fprintf(fp, "\tcheck_interval\t%f\n", temp_service->check_interval);
-		fprintf(fp, "\tretry_interval\t%f\n", temp_service->retry_interval);
-		fprintf(fp, "\tmax_check_attempts\t%d\n", temp_service->max_check_attempts);
-		fprintf(fp, "\tis_volatile\t%d\n", temp_service->is_volatile);
-		fprintf(fp, "\tparallelize_check\t%d\n", temp_service->parallelize_check);
-		fprintf(fp, "\tactive_checks_enabled\t%d\n", temp_service->active_checks_enabled);
-		fprintf(fp, "\tpassive_checks_enabled\t%d\n", temp_service->passive_checks_enabled);
-		fprintf(fp, "\tobsess_over_service\t%d\n", temp_service->obsess_over_service);
-		fprintf(fp, "\tevent_handler_enabled\t%d\n", temp_service->event_handler_enabled);
-		fprintf(fp, "\tlow_flap_threshold\t%f\n", temp_service->low_flap_threshold);
-		fprintf(fp, "\thigh_flap_threshold\t%f\n", temp_service->high_flap_threshold);
-		fprintf(fp, "\tflap_detection_enabled\t%d\n", temp_service->flap_detection_enabled);
-		fprintf(fp, "\tflap_detection_options\t");
-		x = 0;
-		if(temp_service->flap_detection_on_ok == TRUE)
-			fprintf(fp, "%so", (x++ > 0) ? "," : "");
-		if(temp_service->flap_detection_on_warning == TRUE)
-			fprintf(fp, "%sw", (x++ > 0) ? "," : "");
-		if(temp_service->flap_detection_on_unknown == TRUE)
-			fprintf(fp, "%su", (x++ > 0) ? "," : "");
-		if(temp_service->flap_detection_on_critical == TRUE)
-			fprintf(fp, "%sc", (x++ > 0) ? "," : "");
-		if(x == 0)
-			fprintf(fp, "n");
-		fprintf(fp, "\n");
-		fprintf(fp, "\tfreshness_threshold\t%d\n", temp_service->freshness_threshold);
-		fprintf(fp, "\tcheck_freshness\t%d\n", temp_service->check_freshness);
-		fprintf(fp, "\tnotification_options\t");
-		x = 0;
-		if(temp_service->notify_on_unknown == TRUE)
-			fprintf(fp, "%su", (x++ > 0) ? "," : "");
-		if(temp_service->notify_on_warning == TRUE)
-			fprintf(fp, "%sw", (x++ > 0) ? "," : "");
-		if(temp_service->notify_on_critical == TRUE)
-			fprintf(fp, "%sc", (x++ > 0) ? "," : "");
-		if(temp_service->notify_on_recovery == TRUE)
-			fprintf(fp, "%sr", (x++ > 0) ? "," : "");
-		if(temp_service->notify_on_flapping == TRUE)
-			fprintf(fp, "%sf", (x++ > 0) ? "," : "");
-		if(temp_service->notify_on_downtime == TRUE)
-			fprintf(fp, "%ss", (x++ > 0) ? "," : "");
-		if(x == 0)
-			fprintf(fp, "n");
-		fprintf(fp, "\n");
-		fprintf(fp, "\tnotifications_enabled\t%d\n", temp_service->notifications_enabled);
-		fprintf(fp, "\tnotification_interval\t%f\n", temp_service->notification_interval);
-		fprintf(fp, "\tfirst_notification_delay\t%f\n", temp_service->first_notification_delay);
-		fprintf(fp, "\tstalking_options\t");
-		x = 0;
-		if(temp_service->stalk_on_ok == TRUE)
-			fprintf(fp, "%so", (x++ > 0) ? "," : "");
-		if(temp_service->stalk_on_unknown == TRUE)
-			fprintf(fp, "%su", (x++ > 0) ? "," : "");
-		if(temp_service->stalk_on_warning == TRUE)
-			fprintf(fp, "%sw", (x++ > 0) ? "," : "");
-		if(temp_service->stalk_on_critical == TRUE)
-			fprintf(fp, "%sc", (x++ > 0) ? "," : "");
-		if(x == 0)
-			fprintf(fp, "n");
-		fprintf(fp, "\n");
-		fprintf(fp, "\tprocess_perf_data\t%d\n", temp_service->process_perf_data);
-		fprintf(fp, "\tfailure_prediction_enabled\t%d\n", temp_service->failure_prediction_enabled);
-		if(temp_service->icon_image)
-			fprintf(fp, "\ticon_image\t%s\n", temp_service->icon_image);
-		if(temp_service->icon_image_alt)
-			fprintf(fp, "\ticon_image_alt\t%s\n", temp_service->icon_image_alt);
-		if(temp_service->notes)
-			fprintf(fp, "\tnotes\t%s\n", temp_service->notes);
-		if(temp_service->notes_url)
-			fprintf(fp, "\tnotes_url\t%s\n", temp_service->notes_url);
-		if(temp_service->action_url)
-			fprintf(fp, "\taction_url\t%s\n", temp_service->action_url);
-		fprintf(fp, "\tretain_status_information\t%d\n", temp_service->retain_status_information);
-		fprintf(fp, "\tretain_nonstatus_information\t%d\n", temp_service->retain_nonstatus_information);
-
-		/* custom variables */
-		for(temp_customvariablesmember = temp_service->custom_variables; temp_customvariablesmember != NULL; temp_customvariablesmember = temp_customvariablesmember->next) {
-			if(temp_customvariablesmember->variable_name)
-				fprintf(fp, "\t_%s\t%s\n", temp_customvariablesmember->variable_name, (temp_customvariablesmember->variable_value == NULL) ? XODTEMPLATE_NULL : temp_customvariablesmember->variable_value);
-			}
-
-		fprintf(fp, "\t}\n\n");
-		}
-
-	/* cache service dependencies */
-	/*for(temp_servicedependency=xodtemplate_servicedependency_list;temp_servicedependency!=NULL;temp_servicedependency=temp_servicedependency->next){*/
-	ptr = NULL;
-	for(temp_servicedependency = (xodtemplate_servicedependency *)skiplist_get_first(xobject_skiplists[SERVICEDEPENDENCY_SKIPLIST], &ptr); temp_servicedependency != NULL; temp_servicedependency = (xodtemplate_servicedependency *)skiplist_get_next(&ptr)) {
-		if(temp_servicedependency->register_object == FALSE)
-			continue;
-		fprintf(fp, "define servicedependency {\n");
-		if(temp_servicedependency->host_name)
-			fprintf(fp, "\thost_name\t%s\n", temp_servicedependency->host_name);
-		if(temp_servicedependency->service_description)
-			fprintf(fp, "\tservice_description\t%s\n", temp_servicedependency->service_description);
-		if(temp_servicedependency->dependent_host_name)
-			fprintf(fp, "\tdependent_host_name\t%s\n", temp_servicedependency->dependent_host_name);
-		if(temp_servicedependency->dependent_service_description)
-			fprintf(fp, "\tdependent_service_description\t%s\n", temp_servicedependency->dependent_service_description);
-		if(temp_servicedependency->dependency_period)
-			fprintf(fp, "\tdependency_period\t%s\n", temp_servicedependency->dependency_period);
-		fprintf(fp, "\tinherits_parent\t%d\n", temp_servicedependency->inherits_parent);
-		if(temp_servicedependency->have_notification_dependency_options == TRUE) {
-			fprintf(fp, "\tnotification_failure_options\t");
-			x = 0;
-			if(temp_servicedependency->fail_notify_on_ok == TRUE)
-				fprintf(fp, "%so", (x++ > 0) ? "," : "");
-			if(temp_servicedependency->fail_notify_on_unknown == TRUE)
-				fprintf(fp, "%su", (x++ > 0) ? "," : "");
-			if(temp_servicedependency->fail_notify_on_warning == TRUE)
-				fprintf(fp, "%sw", (x++ > 0) ? "," : "");
-			if(temp_servicedependency->fail_notify_on_critical == TRUE)
-				fprintf(fp, "%sc", (x++ > 0) ? "," : "");
-			if(temp_servicedependency->fail_notify_on_pending == TRUE)
-				fprintf(fp, "%sp", (x++ > 0) ? "," : "");
-			if(x == 0)
-				fprintf(fp, "n");
-			fprintf(fp, "\n");
-			}
-		if(temp_servicedependency->have_execution_dependency_options == TRUE) {
-			fprintf(fp, "\texecution_failure_options\t");
-			x = 0;
-			if(temp_servicedependency->fail_execute_on_ok == TRUE)
-				fprintf(fp, "%so", (x++ > 0) ? "," : "");
-			if(temp_servicedependency->fail_execute_on_unknown == TRUE)
-				fprintf(fp, "%su", (x++ > 0) ? "," : "");
-			if(temp_servicedependency->fail_execute_on_warning == TRUE)
-				fprintf(fp, "%sw", (x++ > 0) ? "," : "");
-			if(temp_servicedependency->fail_execute_on_critical == TRUE)
-				fprintf(fp, "%sc", (x++ > 0) ? "," : "");
-			if(temp_servicedependency->fail_execute_on_pending == TRUE)
-				fprintf(fp, "%sp", (x++ > 0) ? "," : "");
-			if(x == 0)
-				fprintf(fp, "n");
-			fprintf(fp, "\n");
-			}
-		fprintf(fp, "\t}\n\n");
-		}
-
-	/* cache service escalations */
-	/*for(temp_serviceescalation=xodtemplate_serviceescalation_list;temp_serviceescalation!=NULL;temp_serviceescalation=temp_serviceescalation->next){*/
-	ptr = NULL;
-	for(temp_serviceescalation = (xodtemplate_serviceescalation *)skiplist_get_first(xobject_skiplists[SERVICEESCALATION_SKIPLIST], &ptr); temp_serviceescalation != NULL; temp_serviceescalation = (xodtemplate_serviceescalation *)skiplist_get_next(&ptr)) {
-		if(temp_serviceescalation->register_object == FALSE)
-			continue;
-		fprintf(fp, "define serviceescalation {\n");
-		if(temp_serviceescalation->host_name)
-			fprintf(fp, "\thost_name\t%s\n", temp_serviceescalation->host_name);
-		if(temp_serviceescalation->service_description)
-			fprintf(fp, "\tservice_description\t%s\n", temp_serviceescalation->service_description);
-		fprintf(fp, "\tfirst_notification\t%d\n", temp_serviceescalation->first_notification);
-		fprintf(fp, "\tlast_notification\t%d\n", temp_serviceescalation->last_notification);
-		fprintf(fp, "\tnotification_interval\t%f\n", temp_serviceescalation->notification_interval);
-		if(temp_serviceescalation->escalation_period)
-			fprintf(fp, "\tescalation_period\t%s\n", temp_serviceescalation->escalation_period);
-		if(temp_serviceescalation->have_escalation_options == TRUE) {
-			fprintf(fp, "\tescalation_options\t");
-			x = 0;
-			if(temp_serviceescalation->escalate_on_warning == TRUE)
-				fprintf(fp, "%sw", (x++ > 0) ? "," : "");
-			if(temp_serviceescalation->escalate_on_unknown == TRUE)
-				fprintf(fp, "%su", (x++ > 0) ? "," : "");
-			if(temp_serviceescalation->escalate_on_critical == TRUE)
-				fprintf(fp, "%sc", (x++ > 0) ? "," : "");
-			if(temp_serviceescalation->escalate_on_recovery == TRUE)
-				fprintf(fp, "%sr", (x++ > 0) ? "," : "");
-			if(x == 0)
-				fprintf(fp, "n");
-			fprintf(fp, "\n");
-			}
-		if(temp_serviceescalation->contacts)
-			fprintf(fp, "\tcontacts\t%s\n", temp_serviceescalation->contacts);
-		if(temp_serviceescalation->contact_groups)
-			fprintf(fp, "\tcontact_groups\t%s\n", temp_serviceescalation->contact_groups);
-		fprintf(fp, "\t}\n\n");
-		}
-
-	/* cache host dependencies */
-	/*for(temp_hostdependency=xodtemplate_hostdependency_list;temp_hostdependency!=NULL;temp_hostdependency=temp_hostdependency->next){*/
-	ptr = NULL;
-	for(temp_hostdependency = (xodtemplate_hostdependency *)skiplist_get_first(xobject_skiplists[HOSTDEPENDENCY_SKIPLIST], &ptr); temp_hostdependency != NULL; temp_hostdependency = (xodtemplate_hostdependency *)skiplist_get_next(&ptr)) {
-		if(temp_hostdependency->register_object == FALSE)
-			continue;
-		fprintf(fp, "define hostdependency {\n");
-		if(temp_hostdependency->host_name)
-			fprintf(fp, "\thost_name\t%s\n", temp_hostdependency->host_name);
-		if(temp_hostdependency->dependent_host_name)
-			fprintf(fp, "\tdependent_host_name\t%s\n", temp_hostdependency->dependent_host_name);
-		if(temp_hostdependency->dependency_period)
-			fprintf(fp, "\tdependency_period\t%s\n", temp_hostdependency->dependency_period);
-		fprintf(fp, "\tinherits_parent\t%d\n", temp_hostdependency->inherits_parent);
-		if(temp_hostdependency->have_notification_dependency_options == TRUE) {
-			fprintf(fp, "\tnotification_failure_options\t");
-			x = 0;
-			if(temp_hostdependency->fail_notify_on_up == TRUE)
-				fprintf(fp, "%so", (x++ > 0) ? "," : "");
-			if(temp_hostdependency->fail_notify_on_down == TRUE)
-				fprintf(fp, "%sd", (x++ > 0) ? "," : "");
-			if(temp_hostdependency->fail_notify_on_unreachable == TRUE)
-				fprintf(fp, "%su", (x++ > 0) ? "," : "");
-			if(temp_hostdependency->fail_notify_on_pending == TRUE)
-				fprintf(fp, "%sp", (x++ > 0) ? "," : "");
-			if(x == 0)
-				fprintf(fp, "n");
-			fprintf(fp, "\n");
-			}
-		if(temp_hostdependency->have_execution_dependency_options == TRUE) {
-			fprintf(fp, "\texecution_failure_options\t");
-			x = 0;
-			if(temp_hostdependency->fail_execute_on_up == TRUE)
-				fprintf(fp, "%so", (x++ > 0) ? "," : "");
-			if(temp_hostdependency->fail_execute_on_down == TRUE)
-				fprintf(fp, "%sd", (x++ > 0) ? "," : "");
-			if(temp_hostdependency->fail_execute_on_unreachable == TRUE)
-				fprintf(fp, "%su", (x++ > 0) ? "," : "");
-			if(temp_hostdependency->fail_execute_on_pending == TRUE)
-				fprintf(fp, "%sp", (x++ > 0) ? "," : "");
-			if(x == 0)
-				fprintf(fp, "n");
-			fprintf(fp, "\n");
-			}
-		fprintf(fp, "\t}\n\n");
-		}
-
-	/* cache host escalations */
-	/*for(temp_hostescalation=xodtemplate_hostescalation_list;temp_hostescalation!=NULL;temp_hostescalation=temp_hostescalation->next){*/
-	ptr = NULL;
-	for(temp_hostescalation = (xodtemplate_hostescalation *)skiplist_get_first(xobject_skiplists[HOSTESCALATION_SKIPLIST], &ptr); temp_hostescalation != NULL; temp_hostescalation = (xodtemplate_hostescalation *)skiplist_get_next(&ptr)) {
-		if(temp_hostescalation->register_object == FALSE)
-			continue;
-		fprintf(fp, "define hostescalation {\n");
-		if(temp_hostescalation->host_name)
-			fprintf(fp, "\thost_name\t%s\n", temp_hostescalation->host_name);
-		fprintf(fp, "\tfirst_notification\t%d\n", temp_hostescalation->first_notification);
-		fprintf(fp, "\tlast_notification\t%d\n", temp_hostescalation->last_notification);
-		fprintf(fp, "\tnotification_interval\t%f\n", temp_hostescalation->notification_interval);
-		if(temp_hostescalation->escalation_period)
-			fprintf(fp, "\tescalation_period\t%s\n", temp_hostescalation->escalation_period);
-		if(temp_hostescalation->have_escalation_options == TRUE) {
-			fprintf(fp, "\tescalation_options\t");
-			x = 0;
-			if(temp_hostescalation->escalate_on_down == TRUE)
-				fprintf(fp, "%sd", (x++ > 0) ? "," : "");
-			if(temp_hostescalation->escalate_on_unreachable == TRUE)
-				fprintf(fp, "%su", (x++ > 0) ? "," : "");
-			if(temp_hostescalation->escalate_on_recovery == TRUE)
-				fprintf(fp, "%sr", (x++ > 0) ? "," : "");
-			if(x == 0)
-				fprintf(fp, "n");
-			fprintf(fp, "\n");
-			}
-		if(temp_hostescalation->contacts)
-			fprintf(fp, "\tcontacts\t%s\n", temp_hostescalation->contacts);
-		if(temp_hostescalation->contact_groups)
-			fprintf(fp, "\tcontact_groups\t%s\n", temp_hostescalation->contact_groups);
-		fprintf(fp, "\t}\n\n");
-		}
-
-	fclose(fp);
-
-	return OK;
-	}
-
-#endif
-
 /******************************************************************/
 /******************** SKIPLIST FUNCTIONS **************************/
 /******************************************************************/
@@ -10845,13 +7836,10 @@ int xodtemplate_init_xobject_skiplists(void) {
 	xobject_skiplists[CONTACTGROUP_SKIPLIST] = skiplist_new(10, 0.5, FALSE, FALSE, xodtemplate_skiplist_compare_contactgroup);
 	xobject_skiplists[HOSTGROUP_SKIPLIST] = skiplist_new(10, 0.5, FALSE, FALSE, xodtemplate_skiplist_compare_hostgroup);
 	xobject_skiplists[SERVICEGROUP_SKIPLIST] = skiplist_new(10, 0.5, FALSE, FALSE, xodtemplate_skiplist_compare_servicegroup);
-	/* allow dups in the following lists... */
-	xobject_skiplists[HOSTDEPENDENCY_SKIPLIST] = skiplist_new(16, 0.5, TRUE, FALSE, xodtemplate_skiplist_compare_hostdependency);
-	xobject_skiplists[SERVICEDEPENDENCY_SKIPLIST] = skiplist_new(16, 0.5, TRUE, FALSE, xodtemplate_skiplist_compare_servicedependency);
-	xobject_skiplists[HOSTESCALATION_SKIPLIST] = skiplist_new(16, 0.5, TRUE, FALSE, xodtemplate_skiplist_compare_hostescalation);
-	xobject_skiplists[SERVICEESCALATION_SKIPLIST] = skiplist_new(16, 0.5, TRUE, FALSE, xodtemplate_skiplist_compare_serviceescalation);
-	/* host and service extinfo entries don't need to be added to a list... */
-
+	/*
+	 * host and service extinfo, dependencies, and escalations don't
+	 * need to be sorted, so we avoid creating skiplists for them.
+	 */
 	return OK;
 	}
 
@@ -11382,24 +8370,12 @@ int xodtemplate_free_memory(void) {
 	xodtemplate_hostgroup *next_hostgroup = NULL;
 	xodtemplate_servicegroup *this_servicegroup = NULL;
 	xodtemplate_servicegroup *next_servicegroup = NULL;
-	xodtemplate_servicedependency *this_servicedependency = NULL;
-	xodtemplate_servicedependency *next_servicedependency = NULL;
-	xodtemplate_serviceescalation *this_serviceescalation = NULL;
-	xodtemplate_serviceescalation *next_serviceescalation = NULL;
 	xodtemplate_contact *this_contact = NULL;
 	xodtemplate_contact *next_contact = NULL;
 	xodtemplate_host *this_host = NULL;
 	xodtemplate_host *next_host = NULL;
 	xodtemplate_service *this_service = NULL;
 	xodtemplate_service *next_service = NULL;
-	xodtemplate_hostdependency *this_hostdependency = NULL;
-	xodtemplate_hostdependency *next_hostdependency = NULL;
-	xodtemplate_hostescalation *this_hostescalation = NULL;
-	xodtemplate_hostescalation *next_hostescalation = NULL;
-	xodtemplate_hostextinfo *this_hostextinfo = NULL;
-	xodtemplate_hostextinfo *next_hostextinfo = NULL;
-	xodtemplate_serviceextinfo *this_serviceextinfo = NULL;
-	xodtemplate_serviceextinfo *next_serviceextinfo = NULL;
 	xodtemplate_customvariablesmember *this_customvariablesmember = NULL;
 	xodtemplate_customvariablesmember *next_customvariablesmember = NULL;
 	register int x = 0;
@@ -11448,6 +8424,9 @@ int xodtemplate_free_memory(void) {
 		my_free(this_contactgroup->alias);
 		my_free(this_contactgroup->members);
 		my_free(this_contactgroup->contactgroup_members);
+		bitmap_destroy(this_contactgroup->member_map);
+		free_objectlist(&this_contactgroup->member_list);
+		free_objectlist(&this_contactgroup->group_list);
 		my_free(this_contactgroup);
 		}
 	xodtemplate_contactgroup_list = NULL;
@@ -11465,6 +8444,9 @@ int xodtemplate_free_memory(void) {
 		my_free(this_hostgroup->notes);
 		my_free(this_hostgroup->notes_url);
 		my_free(this_hostgroup->action_url);
+		bitmap_destroy(this_hostgroup->member_map);
+		free_objectlist(&this_hostgroup->member_list);
+		free_objectlist(&this_hostgroup->group_list);
 		my_free(this_hostgroup);
 		}
 	xodtemplate_hostgroup_list = NULL;
@@ -11482,46 +8464,13 @@ int xodtemplate_free_memory(void) {
 		my_free(this_servicegroup->notes);
 		my_free(this_servicegroup->notes_url);
 		my_free(this_servicegroup->action_url);
+		bitmap_destroy(this_servicegroup->member_map);
+		free_objectlist(&this_servicegroup->member_list);
+		free_objectlist(&this_servicegroup->group_list);
 		my_free(this_servicegroup);
 		}
 	xodtemplate_servicegroup_list = NULL;
 	xodtemplate_servicegroup_list_tail = NULL;
-
-	/* free memory allocated to servicedependency list */
-	for(this_servicedependency = xodtemplate_servicedependency_list; this_servicedependency != NULL; this_servicedependency = next_servicedependency) {
-		next_servicedependency = this_servicedependency->next;
-		my_free(this_servicedependency->template);
-		my_free(this_servicedependency->name);
-		my_free(this_servicedependency->servicegroup_name);
-		my_free(this_servicedependency->hostgroup_name);
-		my_free(this_servicedependency->host_name);
-		my_free(this_servicedependency->service_description);
-		my_free(this_servicedependency->dependent_servicegroup_name);
-		my_free(this_servicedependency->dependent_hostgroup_name);
-		my_free(this_servicedependency->dependent_host_name);
-		my_free(this_servicedependency->dependent_service_description);
-		my_free(this_servicedependency->dependency_period);
-		my_free(this_servicedependency);
-		}
-	xodtemplate_servicedependency_list = NULL;
-	xodtemplate_servicedependency_list_tail = NULL;
-
-	/* free memory allocated to serviceescalation list */
-	for(this_serviceescalation = xodtemplate_serviceescalation_list; this_serviceescalation != NULL; this_serviceescalation = next_serviceescalation) {
-		next_serviceescalation = this_serviceescalation->next;
-		my_free(this_serviceescalation->template);
-		my_free(this_serviceescalation->name);
-		my_free(this_serviceescalation->servicegroup_name);
-		my_free(this_serviceescalation->hostgroup_name);
-		my_free(this_serviceescalation->host_name);
-		my_free(this_serviceescalation->service_description);
-		my_free(this_serviceescalation->escalation_period);
-		my_free(this_serviceescalation->contact_groups);
-		my_free(this_serviceescalation->contacts);
-		my_free(this_serviceescalation);
-		}
-	xodtemplate_serviceescalation_list = NULL;
-	xodtemplate_serviceescalation_list_tail = NULL;
 
 	/* free memory allocated to contact list */
 	for(this_contact = xodtemplate_contact_list; this_contact != NULL; this_contact = next_contact) {
@@ -11583,7 +8532,6 @@ int xodtemplate_free_memory(void) {
 		my_free(this_host->contact_groups);
 		my_free(this_host->contacts);
 		my_free(this_host->notification_period);
-		my_free(this_host->failure_prediction_options);
 		my_free(this_host->notes);
 		my_free(this_host->notes_url);
 		my_free(this_host->action_url);
@@ -11598,106 +8546,48 @@ int xodtemplate_free_memory(void) {
 
 	/* free memory allocated to service list */
 	for(this_service = xodtemplate_service_list; this_service != NULL; this_service = next_service) {
+		next_service = this_service->next;
 
 		/* free custom variables */
-		this_customvariablesmember = this_service->custom_variables;
-		while(this_customvariablesmember != NULL) {
-			next_customvariablesmember = this_customvariablesmember->next;
-			my_free(this_customvariablesmember->variable_name);
-			my_free(this_customvariablesmember->variable_value);
-			my_free(this_customvariablesmember);
-			this_customvariablesmember = next_customvariablesmember;
-			}
+		if(this_service->is_copy == FALSE) {
+			this_customvariablesmember = this_service->custom_variables;
+			while(this_customvariablesmember != NULL) {
+				next_customvariablesmember = this_customvariablesmember->next;
+				my_free(this_customvariablesmember->variable_name);
+				my_free(this_customvariablesmember->variable_value);
+				my_free(this_customvariablesmember);
+				this_customvariablesmember = next_customvariablesmember;
+				}
 
-		next_service = this_service->next;
-		my_free(this_service->template);
-		my_free(this_service->name);
-		my_free(this_service->display_name);
-		my_free(this_service->hostgroup_name);
-		my_free(this_service->host_name);
-		my_free(this_service->service_description);
-		my_free(this_service->service_groups);
-		my_free(this_service->check_command);
-		my_free(this_service->check_period);
-		my_free(this_service->event_handler);
-		my_free(this_service->notification_period);
+			my_free(this_service->template);
+			my_free(this_service->name);
+			my_free(this_service->display_name);
+			my_free(this_service->hostgroup_name);
+			my_free(this_service->service_description);
+			my_free(this_service->check_command);
+			my_free(this_service->check_period);
+			my_free(this_service->event_handler);
+			my_free(this_service->notification_period);
+			my_free(this_service->notes);
+			my_free(this_service->notes_url);
+			my_free(this_service->action_url);
+			my_free(this_service->icon_image);
+			my_free(this_service->icon_image_alt);
+			}
 		my_free(this_service->contact_groups);
 		my_free(this_service->contacts);
-		my_free(this_service->failure_prediction_options);
-		my_free(this_service->notes);
-		my_free(this_service->notes_url);
-		my_free(this_service->action_url);
-		my_free(this_service->icon_image);
-		my_free(this_service->icon_image_alt);
+		my_free(this_service->service_groups);
 		my_free(this_service);
 		}
 	xodtemplate_service_list = NULL;
 	xodtemplate_service_list_tail = NULL;
 
-	/* free memory allocated to hostdependency list */
-	for(this_hostdependency = xodtemplate_hostdependency_list; this_hostdependency != NULL; this_hostdependency = next_hostdependency) {
-		next_hostdependency = this_hostdependency->next;
-		my_free(this_hostdependency->template);
-		my_free(this_hostdependency->name);
-		my_free(this_hostdependency->hostgroup_name);
-		my_free(this_hostdependency->dependent_hostgroup_name);
-		my_free(this_hostdependency->host_name);
-		my_free(this_hostdependency->dependent_host_name);
-		my_free(this_hostdependency->dependency_period);
-		my_free(this_hostdependency);
-		}
-	xodtemplate_hostdependency_list = NULL;
-	xodtemplate_hostdependency_list_tail = NULL;
-
-	/* free memory allocated to hostescalation list */
-	for(this_hostescalation = xodtemplate_hostescalation_list; this_hostescalation != NULL; this_hostescalation = next_hostescalation) {
-		next_hostescalation = this_hostescalation->next;
-		my_free(this_hostescalation->template);
-		my_free(this_hostescalation->name);
-		my_free(this_hostescalation->hostgroup_name);
-		my_free(this_hostescalation->host_name);
-		my_free(this_hostescalation->escalation_period);
-		my_free(this_hostescalation->contact_groups);
-		my_free(this_hostescalation->contacts);
-		my_free(this_hostescalation);
-		}
-	xodtemplate_hostescalation_list = NULL;
-	xodtemplate_hostescalation_list_tail = NULL;
-
-	/* free memory allocated to hostextinfo list */
-	for(this_hostextinfo = xodtemplate_hostextinfo_list; this_hostextinfo != NULL; this_hostextinfo = next_hostextinfo) {
-		next_hostextinfo = this_hostextinfo->next;
-		my_free(this_hostextinfo->template);
-		my_free(this_hostextinfo->name);
-		my_free(this_hostextinfo->host_name);
-		my_free(this_hostextinfo->hostgroup_name);
-		my_free(this_hostextinfo->notes);
-		my_free(this_hostextinfo->notes_url);
-		my_free(this_hostextinfo->action_url);
-		my_free(this_hostextinfo->icon_image);
-		my_free(this_hostextinfo->icon_image_alt);
-		my_free(this_hostextinfo->vrml_image);
-		my_free(this_hostextinfo->statusmap_image);
-		my_free(this_hostextinfo);
-		}
+	/*
+	 * extinfo objects are free()'d while they're parsed, as are
+	 * dependencies and escalations
+	 */
 	xodtemplate_hostextinfo_list = NULL;
 	xodtemplate_hostextinfo_list_tail = NULL;
-
-	/* free memory allocated to serviceextinfo list */
-	for(this_serviceextinfo = xodtemplate_serviceextinfo_list; this_serviceextinfo != NULL; this_serviceextinfo = next_serviceextinfo) {
-		next_serviceextinfo = this_serviceextinfo->next;
-		my_free(this_serviceextinfo->template);
-		my_free(this_serviceextinfo->name);
-		my_free(this_serviceextinfo->host_name);
-		my_free(this_serviceextinfo->hostgroup_name);
-		my_free(this_serviceextinfo->service_description);
-		my_free(this_serviceextinfo->notes);
-		my_free(this_serviceextinfo->notes_url);
-		my_free(this_serviceextinfo->action_url);
-		my_free(this_serviceextinfo->icon_image);
-		my_free(this_serviceextinfo->icon_image_alt);
-		my_free(this_serviceextinfo);
-		}
 	xodtemplate_serviceextinfo_list = NULL;
 	xodtemplate_serviceextinfo_list_tail = NULL;
 
@@ -11828,179 +8718,8 @@ void xodtemplate_remove_memberlist_item(xodtemplate_memberlist *item, xodtemplat
 
 #ifdef NSCORE
 
-/* expands a comma-delimited list of contactgroups and/or contacts to member contact names */
-xodtemplate_memberlist *xodtemplate_expand_contactgroups_and_contacts(char *contactgroups, char *contacts, int _config_file, int _start_line) {
-	xodtemplate_memberlist *temp_list = NULL;
-	xodtemplate_memberlist *reject_list = NULL;
-	xodtemplate_memberlist *list_ptr = NULL;
-	xodtemplate_memberlist *reject_ptr = NULL;
-	int result = OK;
-
-	/* process list of contactgroups... */
-	if(contactgroups != NULL) {
-
-		/* expand contactgroups */
-		result = xodtemplate_expand_contactgroups(&temp_list, &reject_list, contactgroups, _config_file, _start_line);
-		if(result != OK) {
-			xodtemplate_free_memberlist(&temp_list);
-			xodtemplate_free_memberlist(&reject_list);
-			return NULL;
-			}
-		}
-
-	/* process contact names */
-	if(contacts != NULL) {
-
-		/* expand contacts */
-		result = xodtemplate_expand_contacts(&temp_list, &reject_list, contacts, _config_file, _start_line);
-		if(result != OK) {
-			xodtemplate_free_memberlist(&temp_list);
-			xodtemplate_free_memberlist(&reject_list);
-			return NULL;
-			}
-		}
-
-	/* remove rejects (if any) from the list (no duplicate entries exist in either list) */
-	/* NOTE: rejects from this list also affect contacts generated from processing contactgroup names (see above) */
-	for(reject_ptr = reject_list; reject_ptr != NULL; reject_ptr = reject_ptr->next) {
-		for(list_ptr = temp_list; list_ptr != NULL; list_ptr = list_ptr->next) {
-			if(!strcmp(reject_ptr->name1, list_ptr->name1)) {
-				xodtemplate_remove_memberlist_item(list_ptr, &temp_list);
-				break;
-				}
-			}
-		}
-	xodtemplate_free_memberlist(&reject_list);
-	reject_list = NULL;
-
-	return temp_list;
-	}
-
-
-
-/* expands contactgroups */
-int xodtemplate_expand_contactgroups(xodtemplate_memberlist **list, xodtemplate_memberlist **reject_list, char *contactgroups, int _config_file, int _start_line) {
-	char *contactgroup_names = NULL;
-	char *temp_ptr = NULL;
-	xodtemplate_contactgroup *temp_contactgroup = NULL;
-	regex_t preg;
-	int found_match = TRUE;
-	int reject_item = FALSE;
-	int use_regexp = FALSE;
-
-	if(list == NULL || contactgroups == NULL)
-		return ERROR;
-
-	/* allocate memory for contactgroup name list */
-	if((contactgroup_names = (char *)strdup(contactgroups)) == NULL)
-		return ERROR;
-
-	for(temp_ptr = strtok(contactgroup_names, ","); temp_ptr; temp_ptr = strtok(NULL, ",")) {
-
-		found_match = FALSE;
-		reject_item = FALSE;
-
-		/* strip trailing spaces */
-		strip(temp_ptr);
-
-		/* should we use regular expression matching? */
-		if(use_regexp_matches == TRUE && (use_true_regexp_matching == TRUE || strstr(temp_ptr, "*") || strstr(temp_ptr, "?") || strstr(temp_ptr, "+") || strstr(temp_ptr, "\\.")))
-			use_regexp = TRUE;
-		else
-			use_regexp = FALSE;
-
-		/* use regular expression matching */
-		if(use_regexp == TRUE) {
-
-			/* compile regular expression */
-			if(regcomp(&preg, temp_ptr, REG_EXTENDED)) {
-				my_free(contactgroup_names);
-				return ERROR;
-				}
-
-			/* test match against all contactgroup names */
-			for(temp_contactgroup = xodtemplate_contactgroup_list; temp_contactgroup != NULL; temp_contactgroup = temp_contactgroup->next) {
-
-				if(temp_contactgroup->contactgroup_name == NULL)
-					continue;
-
-				/* skip this contactgroup if it did not match the expression */
-				if(regexec(&preg, temp_contactgroup->contactgroup_name, 0, NULL, 0))
-					continue;
-
-				found_match = TRUE;
-
-				/* dont' add contactgroups that shouldn't be registered */
-				if(temp_contactgroup->register_object == FALSE)
-					continue;
-
-				/* add contactgroup members to list */
-				xodtemplate_add_contactgroup_members_to_memberlist(list, temp_contactgroup, _config_file, _start_line);
-				}
-
-			/* free memory allocated to compiled regexp */
-			regfree(&preg);
-			}
-
-		/* use standard matching... */
-		else {
-
-			/* return a list of all contactgroups */
-			if(!strcmp(temp_ptr, "*")) {
-
-				found_match = TRUE;
-
-				for(temp_contactgroup = xodtemplate_contactgroup_list; temp_contactgroup != NULL; temp_contactgroup = temp_contactgroup->next) {
-
-					/* dont' add contactgroups that shouldn't be registered */
-					if(temp_contactgroup->register_object == FALSE)
-						continue;
-
-					/* add contactgroup to list */
-					xodtemplate_add_contactgroup_members_to_memberlist(list, temp_contactgroup, _config_file, _start_line);
-					}
-				}
-
-			/* else this is just a single contactgroup... */
-			else {
-
-				/* this contactgroup should be excluded (rejected) */
-				if(temp_ptr[0] == '!') {
-					reject_item = TRUE;
-					temp_ptr++;
-					}
-
-				/* find the contactgroup */
-				temp_contactgroup = xodtemplate_find_real_contactgroup(temp_ptr);
-				if(temp_contactgroup != NULL) {
-
-					found_match = TRUE;
-
-					/* add contactgroup members to proper list */
-					xodtemplate_add_contactgroup_members_to_memberlist((reject_item == TRUE) ? reject_list : list, temp_contactgroup, _config_file, _start_line);
-					}
-				}
-			}
-
-		if(found_match == FALSE) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not find any contactgroup matching '%s' (config file '%s', starting on line %d)\n", temp_ptr, xodtemplate_config_file_name(_config_file), _start_line);
-			break;
-			}
-		}
-
-	/* free memory */
-	my_free(contactgroup_names);
-
-	if(found_match == FALSE)
-		return ERROR;
-
-	return OK;
-	}
-
-
-
 /* expands contacts */
-int xodtemplate_expand_contacts(xodtemplate_memberlist **list, xodtemplate_memberlist **reject_list, char *contacts, int _config_file, int _start_line) {
+int xodtemplate_expand_contacts(objectlist **ret, bitmap *reject_map, char *contacts, int _config_file, int _start_line) {
 	char *contact_names = NULL;
 	char *temp_ptr = NULL;
 	xodtemplate_contact *temp_contact = NULL;
@@ -12009,8 +8728,10 @@ int xodtemplate_expand_contacts(xodtemplate_memberlist **list, xodtemplate_membe
 	int reject_item = FALSE;
 	int use_regexp = FALSE;
 
-	if(list == NULL || contacts == NULL)
+	if(ret == NULL || contacts == NULL)
 		return ERROR;
+
+	*ret = NULL;
 
 	if((contact_names = (char *)strdup(contacts)) == NULL)
 		return ERROR;
@@ -12054,7 +8775,7 @@ int xodtemplate_expand_contacts(xodtemplate_memberlist **list, xodtemplate_membe
 					continue;
 
 				/* add contact to list */
-				xodtemplate_add_member_to_memberlist(list, temp_contact->contact_name, NULL);
+				add_object_to_objectlist(ret, temp_contact);
 				}
 
 			/* free memory allocated to compiled regexp */
@@ -12079,7 +8800,7 @@ int xodtemplate_expand_contacts(xodtemplate_memberlist **list, xodtemplate_membe
 						continue;
 
 					/* add contact to list */
-					xodtemplate_add_member_to_memberlist(list, temp_contact->contact_name, NULL);
+					add_object_to_objectlist(ret, temp_contact);
 					}
 				}
 
@@ -12099,7 +8820,12 @@ int xodtemplate_expand_contacts(xodtemplate_memberlist **list, xodtemplate_membe
 					found_match = TRUE;
 
 					/* add contact to list */
-					xodtemplate_add_member_to_memberlist((reject_item == TRUE) ? reject_list : list, temp_ptr, NULL);
+					if(reject_item) {
+						bitmap_set(reject_map, temp_contact->id);
+						}
+					else {
+						add_object_to_objectlist(ret, temp_contact);
+						}
 					}
 				}
 			}
@@ -12121,107 +8847,78 @@ int xodtemplate_expand_contacts(xodtemplate_memberlist **list, xodtemplate_membe
 
 
 
-/* adds members of a contactgroups to the list of expanded (accepted) or rejected contacts */
-int xodtemplate_add_contactgroup_members_to_memberlist(xodtemplate_memberlist **list, xodtemplate_contactgroup *temp_contactgroup, int _config_file, int _start_line) {
-	char *group_members = NULL;
-	char *member_name = NULL;
-	char *member_ptr = NULL;
+/*
+ * expands a comma-delimited list of hostgroups and/or hosts to
+ * an objectlist of hosts. This cannot be called until hostgroups
+ * have been recombobulated.
+ */
+objectlist *xodtemplate_expand_hostgroups_and_hosts(char *hostgroups, char *hosts, int _config_file, int _start_line) {
+	objectlist *ret = NULL, *glist = NULL, *hlist, *list = NULL, *next;
+	bitmap *reject;
+	int result;
 
-	if(list == NULL || temp_contactgroup == NULL)
-		return ERROR;
-
-	/* if we have no members, just return. Empty contactgroups are ok */
-	if(temp_contactgroup->members == NULL) {
-		return OK;
+	reject = bitmap_create(xodcount.hosts);
+	if(!reject) {
+		logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Unable to create reject map for expanding hosts and hostgroups\n");
+		return NULL;
 		}
 
-	/* save a copy of the members */
-	if((group_members = (char *)strdup(temp_contactgroup->members)) == NULL)
-		return ERROR;
-
-	/* process all contacts that belong to the contactgroup */
-	/* NOTE: members of the group have already have been expanded by xodtemplate_recombobulate_contactgroups(), so we don't need to do it here */
-	member_ptr = group_members;
-	for(member_name = my_strsep(&member_ptr, ","); member_name != NULL; member_name = my_strsep(&member_ptr, ",")) {
-
-		/* strip trailing spaces from member name */
-		strip(member_name);
-
-		/* add contact to the list */
-		xodtemplate_add_member_to_memberlist(list, member_name, NULL);
+	/*
+	 * process host names first. If they're explicitly added we must obey
+	 */
+	if(hosts != NULL) {
+		/* expand hosts */
+		result = xodtemplate_expand_hosts(&ret, reject, hosts, _config_file, _start_line);
+		if(result != OK) {
+			free_objectlist(&glist);
+			free_objectlist(&ret);
+			bitmap_destroy(reject);
+			return NULL;
+			}
 		}
-
-	my_free(group_members);
-
-	return OK;
-	}
-
-
-
-/* expands a comma-delimited list of hostgroups and/or hosts to member host names */
-xodtemplate_memberlist *xodtemplate_expand_hostgroups_and_hosts(char *hostgroups, char *hosts, int _config_file, int _start_line) {
-	xodtemplate_memberlist *temp_list = NULL;
-	xodtemplate_memberlist *reject_list = NULL;
-	xodtemplate_memberlist *list_ptr = NULL;
-	xodtemplate_memberlist *reject_ptr = NULL;
-	int result = OK;
 
 	/* process list of hostgroups... */
 	if(hostgroups != NULL) {
-
 		/* expand host */
-		result = xodtemplate_expand_hostgroups(&temp_list, &reject_list, hostgroups, _config_file, _start_line);
+		result = xodtemplate_expand_hostgroups(&glist, reject, hostgroups, _config_file, _start_line);
 		if(result != OK) {
-			xodtemplate_free_memberlist(&temp_list);
-			xodtemplate_free_memberlist(&reject_list);
+			printf("Failed to expand hostgroups '%s' to something sensible\n", hostgroups);
+			free_objectlist(&glist);
+			bitmap_destroy(reject);
 			return NULL;
 			}
 		}
 
-	/* process host names */
-	if(hosts != NULL) {
-
-		/* expand hosts */
-		result = xodtemplate_expand_hosts(&temp_list, &reject_list, hosts, _config_file, _start_line);
-		if(result != OK) {
-			xodtemplate_free_memberlist(&temp_list);
-			xodtemplate_free_memberlist(&reject_list);
-			return NULL;
-			}
+	/*
+	 * add hostgroup hosts to ret, taking care not to add any that are
+	 * in the rejected list
+	 */
+	for(list = glist; list; list = next) {
+		xodtemplate_hostgroup *hg = (xodtemplate_hostgroup *)list->object_ptr;
+		next = list->next;
+		free(list); /* free it as we go along */
+		for(hlist = hg->member_list; hlist; hlist = hlist->next) {
+			xodtemplate_host *h = (xodtemplate_host *)hlist->object_ptr;
+			if(bitmap_isset(reject, h->id))
+				continue;
+			add_object_to_objectlist(&ret, h);
 		}
+	}
+	bitmap_destroy(reject);
 
-#ifdef TESTING
-	printf("->PRIOR TO CLEANUP\n");
-	printf("   REJECT LIST:\n");
-	for(list_ptr = reject_list; list_ptr != NULL; list_ptr = list_ptr->next) {
-		printf("      '%s'\n", list_ptr->name1);
-		}
-	printf("   ACCEPT LIST:\n");
-	for(list_ptr = temp_list; list_ptr != NULL; list_ptr = list_ptr->next) {
-		printf("      '%s'\n", list_ptr->name1);
-		}
-#endif
-
-	/* remove rejects (if any) from the list (no duplicate entries exist in either list) */
-	/* NOTE: rejects from this list also affect hosts generated from processing hostgroup names (see above) */
-	for(reject_ptr = reject_list; reject_ptr != NULL; reject_ptr = reject_ptr->next) {
-		for(list_ptr = temp_list; list_ptr != NULL; list_ptr = list_ptr->next) {
-			if(!strcmp(reject_ptr->name1, list_ptr->name1)) {
-				xodtemplate_remove_memberlist_item(list_ptr, &temp_list);
-				break;
-				}
-			}
-		}
-	xodtemplate_free_memberlist(&reject_list);
-	reject_list = NULL;
-
-	return temp_list;
+	return ret;
 	}
 
 
-
-/* expands hostgroups */
-int xodtemplate_expand_hostgroups(xodtemplate_memberlist **list, xodtemplate_memberlist **reject_list, char *hostgroups, int _config_file, int _start_line) {
+/*
+ * expands hostgroups.
+ * list will be populated with all selected hostgroups on success
+ * and set to NULL on errors.
+ * reject_map marks rejected *hosts* from rejected hostgroups
+ * This can only be called after hostgroups are recombobulated.
+ * returns ERROR on error and OK on success.
+ */
+int xodtemplate_expand_hostgroups(objectlist **list, bitmap *reject_map, char *hostgroups, int _config_file, int _start_line) {
 	char *hostgroup_names = NULL;
 	char *temp_ptr = NULL;
 	xodtemplate_hostgroup *temp_hostgroup = NULL;
@@ -12232,6 +8929,8 @@ int xodtemplate_expand_hostgroups(xodtemplate_memberlist **list, xodtemplate_mem
 
 	if(list == NULL || hostgroups == NULL)
 		return ERROR;
+
+	*list = NULL;
 
 	/* allocate memory for hostgroup name list */
 	if((hostgroup_names = (char *)strdup(hostgroups)) == NULL)
@@ -12276,8 +8975,7 @@ int xodtemplate_expand_hostgroups(xodtemplate_memberlist **list, xodtemplate_mem
 				if(temp_hostgroup->register_object == FALSE)
 					continue;
 
-				/* add hostgroup members to list */
-				xodtemplate_add_hostgroup_members_to_memberlist(list, temp_hostgroup, _config_file, _start_line);
+				add_object_to_objectlist(list, temp_hostgroup);
 				}
 
 			/* free memory allocated to compiled regexp */
@@ -12299,7 +8997,7 @@ int xodtemplate_expand_hostgroups(xodtemplate_memberlist **list, xodtemplate_mem
 						continue;
 
 					/* add hostgroup to list */
-					xodtemplate_add_hostgroup_members_to_memberlist(list, temp_hostgroup, _config_file, _start_line);
+					add_object_to_objectlist(list, temp_hostgroup);
 					}
 				}
 
@@ -12315,11 +9013,15 @@ int xodtemplate_expand_hostgroups(xodtemplate_memberlist **list, xodtemplate_mem
 				/* find the hostgroup */
 				temp_hostgroup = xodtemplate_find_real_hostgroup(temp_ptr);
 				if(temp_hostgroup != NULL) {
-
 					found_match = TRUE;
 
-					/* add hostgroup members to proper list */
-					xodtemplate_add_hostgroup_members_to_memberlist((reject_item == TRUE) ? reject_list : list, temp_hostgroup, _config_file, _start_line);
+					if(reject_item) {
+						bitmap_unite(reject_map, temp_hostgroup->member_map);
+						}
+					else {
+						/* add hostgroup members to proper list */
+						add_object_to_objectlist(list, temp_hostgroup);
+						}
 					}
 				}
 			}
@@ -12342,8 +9044,7 @@ int xodtemplate_expand_hostgroups(xodtemplate_memberlist **list, xodtemplate_mem
 
 
 /* expands hosts */
-int xodtemplate_expand_hosts(xodtemplate_memberlist **list, xodtemplate_memberlist **reject_list, char *hosts, int _config_file, int _start_line) {
-	char *host_names = NULL;
+int xodtemplate_expand_hosts(objectlist **list, bitmap *reject_map, char *hosts, int _config_file, int _start_line) {
 	char *temp_ptr = NULL;
 	xodtemplate_host *temp_host = NULL;
 	regex_t preg;
@@ -12354,11 +9055,8 @@ int xodtemplate_expand_hosts(xodtemplate_memberlist **list, xodtemplate_memberli
 	if(list == NULL || hosts == NULL)
 		return ERROR;
 
-	if((host_names = (char *)strdup(hosts)) == NULL)
-		return ERROR;
-
 	/* expand each host name */
-	for(temp_ptr = strtok(host_names, ","); temp_ptr; temp_ptr = strtok(NULL, ",")) {
+	for(temp_ptr = strtok(hosts, ","); temp_ptr; temp_ptr = strtok(NULL, ",")) {
 
 		found_match = FALSE;
 		reject_item = FALSE;
@@ -12375,7 +9073,6 @@ int xodtemplate_expand_hosts(xodtemplate_memberlist **list, xodtemplate_memberli
 
 			/* compile regular expression */
 			if(regcomp(&preg, temp_ptr, REG_EXTENDED)) {
-				my_free(host_names);
 				return ERROR;
 				}
 
@@ -12396,7 +9093,7 @@ int xodtemplate_expand_hosts(xodtemplate_memberlist **list, xodtemplate_memberli
 					continue;
 
 				/* add host to list */
-				xodtemplate_add_member_to_memberlist(list, temp_host->host_name, NULL);
+				add_object_to_objectlist(list, temp_host);
 				}
 
 			/* free memory allocated to compiled regexp */
@@ -12421,7 +9118,7 @@ int xodtemplate_expand_hosts(xodtemplate_memberlist **list, xodtemplate_memberli
 						continue;
 
 					/* add host to list */
-					xodtemplate_add_member_to_memberlist(list, temp_host->host_name, NULL);
+					add_object_to_objectlist(list, temp_host);
 					}
 				}
 
@@ -12441,7 +9138,12 @@ int xodtemplate_expand_hosts(xodtemplate_memberlist **list, xodtemplate_memberli
 					found_match = TRUE;
 
 					/* add host to list */
-					xodtemplate_add_member_to_memberlist((reject_item == TRUE) ? reject_list : list, temp_ptr, NULL);
+					if(!reject_item) {
+						add_object_to_objectlist(list, temp_host);
+						}
+					else {
+						bitmap_set(reject_map, temp_host->id);
+						}
 					}
 				}
 			}
@@ -12452,9 +9154,6 @@ int xodtemplate_expand_hosts(xodtemplate_memberlist **list, xodtemplate_memberli
 			}
 		}
 
-	/* free memory */
-	my_free(host_names);
-
 	if(found_match == FALSE)
 		return ERROR;
 
@@ -12462,94 +9161,13 @@ int xodtemplate_expand_hosts(xodtemplate_memberlist **list, xodtemplate_memberli
 	}
 
 
-/* adds members of a hostgroups to the list of expanded (accepted) or rejected hosts */
-int xodtemplate_add_hostgroup_members_to_memberlist(xodtemplate_memberlist **list, xodtemplate_hostgroup *temp_hostgroup, int _config_file, int _start_line) {
-	char *group_members = NULL;
-	char *member_name = NULL;
-	char *member_ptr = NULL;
-
-	if(list == NULL || temp_hostgroup == NULL)
-		return ERROR;
-
-	/* if we have no members, just return. Empty hostgroups are ok */
-	if(temp_hostgroup->members == NULL) {
-		return OK;
-		}
-
-	/* save a copy of the members */
-	if((group_members = (char *)strdup(temp_hostgroup->members)) == NULL)
-		return ERROR;
-
-	/* process all hosts that belong to the hostgroup */
-	/* NOTE: members of the group have already have been expanded by xodtemplate_recombobulate_hostgroups(), so we don't need to do it here */
-	member_ptr = group_members;
-	for(member_name = my_strsep(&member_ptr, ","); member_name != NULL; member_name = my_strsep(&member_ptr, ",")) {
-
-		/* strip trailing spaces from member name */
-		strip(member_name);
-
-		/* add host to the list */
-		xodtemplate_add_member_to_memberlist(list, member_name, NULL);
-		}
-
-	my_free(group_members);
-
-	return OK;
-	}
-
-
-
-/* expands a comma-delimited list of servicegroups and/or service descriptions */
-xodtemplate_memberlist *xodtemplate_expand_servicegroups_and_services(char *servicegroups, char *host_name, char *services, int _config_file, int _start_line) {
-	xodtemplate_memberlist *temp_list = NULL;
-	xodtemplate_memberlist *reject_list = NULL;
-	xodtemplate_memberlist *list_ptr = NULL;
-	xodtemplate_memberlist *reject_ptr = NULL;
-	int result = OK;
-
-	/* process list of servicegroups... */
-	if(servicegroups != NULL) {
-
-		/* expand servicegroups */
-		result = xodtemplate_expand_servicegroups(&temp_list, &reject_list, servicegroups, _config_file, _start_line);
-		if(result != OK) {
-			xodtemplate_free_memberlist(&temp_list);
-			xodtemplate_free_memberlist(&reject_list);
-			return NULL;
-			}
-		}
-
-	/* process service names */
-	if(host_name != NULL && services != NULL) {
-
-		/* expand services */
-		result = xodtemplate_expand_services(&temp_list, &reject_list, host_name, services, _config_file, _start_line);
-		if(result != OK) {
-			xodtemplate_free_memberlist(&temp_list);
-			xodtemplate_free_memberlist(&reject_list);
-			return NULL;
-			}
-		}
-
-	/* remove rejects (if any) from the list (no duplicate entries exist in either list) */
-	/* NOTE: rejects from this list also affect hosts generated from processing hostgroup names (see above) */
-	for(reject_ptr = reject_list; reject_ptr != NULL; reject_ptr = reject_ptr->next) {
-		for(list_ptr = temp_list; list_ptr != NULL; list_ptr = list_ptr->next) {
-			if(!strcmp(reject_ptr->name1, list_ptr->name1) && !strcmp(reject_ptr->name2, list_ptr->name2)) {
-				xodtemplate_remove_memberlist_item(list_ptr, &temp_list);
-				break;
-				}
-			}
-		}
-	xodtemplate_free_memberlist(&reject_list);
-	reject_list = NULL;
-
-	return temp_list;
-	}
-
-
-/* expands servicegroups */
-int xodtemplate_expand_servicegroups(xodtemplate_memberlist **list, xodtemplate_memberlist **reject_list, char *servicegroups, int _config_file, int _start_line) {
+/*
+ * expands servicegroups.
+ * list will hold all selected servicegroups.
+ * reject will map services from all rejected servicegroups
+ * This can only be called after servicegroups are recombobulated.
+ */
+int xodtemplate_expand_servicegroups(objectlist **list, bitmap *reject, char *servicegroups, int _config_file, int _start_line) {
 	xodtemplate_servicegroup  *temp_servicegroup = NULL;
 	regex_t preg;
 	char *servicegroup_names = NULL;
@@ -12607,8 +9225,8 @@ int xodtemplate_expand_servicegroups(xodtemplate_memberlist **list, xodtemplate_
 				if(temp_servicegroup->register_object == FALSE)
 					continue;
 
-				/* add servicegroup members to list */
-				xodtemplate_add_servicegroup_members_to_memberlist(list, temp_servicegroup, _config_file, _start_line);
+				/* add servicegroup to list */
+				add_object_to_objectlist(list, temp_servicegroup);
 				}
 
 			/* free memory allocated to compiled regexp */
@@ -12630,7 +9248,7 @@ int xodtemplate_expand_servicegroups(xodtemplate_memberlist **list, xodtemplate_
 						continue;
 
 					/* add servicegroup to list */
-					xodtemplate_add_servicegroup_members_to_memberlist(list, temp_servicegroup, _config_file, _start_line);
+					prepend_object_to_objectlist(list, temp_servicegroup);
 					}
 				}
 
@@ -12649,7 +9267,10 @@ int xodtemplate_expand_servicegroups(xodtemplate_memberlist **list, xodtemplate_
 					found_match = TRUE;
 
 					/* add servicegroup members to list */
-					xodtemplate_add_servicegroup_members_to_memberlist((reject_item == TRUE) ? reject_list : list, temp_servicegroup, _config_file, _start_line);
+					if(reject_item)
+						bitmap_unite(reject, temp_servicegroup->member_map);
+					else
+						add_object_to_objectlist(list, temp_servicegroup);
 					}
 				}
 			}
@@ -12669,25 +9290,66 @@ int xodtemplate_expand_servicegroups(xodtemplate_memberlist **list, xodtemplate_
 
 	return OK;
 	}
-
+#endif
 
 /* expands services (host name is not expanded) */
-int xodtemplate_expand_services(xodtemplate_memberlist **list, xodtemplate_memberlist **reject_list, char *host_name, char *services, int _config_file, int _start_line) {
+int xodtemplate_expand_services(objectlist **list, bitmap *reject_map, char *host_name, char *services, int _config_file, int _start_line) {
 	char *service_names = NULL;
 	char *temp_ptr = NULL;
 	xodtemplate_service *temp_service = NULL;
+#ifndef NSCGI
 	regex_t preg;
 	regex_t preg2;
-	int found_match = TRUE;
-	int reject_item = FALSE;
 	int use_regexp_host = FALSE;
 	int use_regexp_service = FALSE;
+#endif
+	int found_match = TRUE;
+	int reject_item = FALSE;
 
 	if(list == NULL)
 		return ERROR;
+
+	/*
+	 * One-step recursion for convenience.
+	 * Useful for servicegroups' "members" directive
+	 */
+	if(host_name == NULL && services != NULL) {
+		char *scopy, *next_p, *p1, *p2;
+
+		if (!(scopy = strdup(services)))
+			return ERROR;
+		for(next_p = p1 = scopy; next_p; p1 = next_p + 1) {
+			p2 = strchr(p1, ',');
+			if (!p2) {
+				logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Service description missing from list '%s' (config file '%s', starting at line %d)\n",
+					  services, xodtemplate_config_file_name(_config_file), _start_line);
+				free(scopy);
+				return ERROR;
+			}
+			*p2 = 0;
+			while(!*p2 || *p2 == ' ' || *p2 == '\t')
+				p2++;
+			while(*p1 == ',' || *p1 == ' ' || *p1 == '\t')
+				p1++;
+			next_p = strchr(p2 + 1, ',');
+			if(next_p)
+				*next_p = 0;
+			strip(p1);
+			strip(p2);
+
+			/* now we have arguments we can handle safely, so do that */
+			if(xodtemplate_expand_services(list, reject_map, p1, p2, _config_file, _start_line) != OK) {
+				free(scopy);
+				free(services);
+				return ERROR;
+				}
+			}
+		free(scopy);
+		}
 	if(host_name == NULL || services == NULL)
 		return OK;
 
+#ifndef NSCGI
 	/* should we use regular expression matching for the host name? */
 	if(use_regexp_matches == TRUE && (use_true_regexp_matching == TRUE || strstr(host_name, "*") || strstr(host_name, "?") || strstr(host_name, "+") || strstr(host_name, "\\.")))
 		use_regexp_host = TRUE;
@@ -12697,10 +9359,13 @@ int xodtemplate_expand_services(xodtemplate_memberlist **list, xodtemplate_membe
 		if(regcomp(&preg2, host_name, REG_EXTENDED))
 			return ERROR;
 		}
+#endif
 
 	if((service_names = (char *)strdup(services)) == NULL) {
+#ifndef NSCGI
 		if(use_regexp_host == TRUE)
 			regfree(&preg2);
+#endif
 		return ERROR;
 		}
 
@@ -12713,6 +9378,7 @@ int xodtemplate_expand_services(xodtemplate_memberlist **list, xodtemplate_membe
 		/* strip trailing spaces */
 		strip(temp_ptr);
 
+#ifndef NSCGI
 		/* should we use regular expression matching for the service description? */
 		if(use_regexp_matches == TRUE && (use_true_regexp_matching == TRUE || strstr(temp_ptr, "*") || strstr(temp_ptr, "?") || strstr(temp_ptr, "+") || strstr(temp_ptr, "\\.")))
 			use_regexp_service = TRUE;
@@ -12765,7 +9431,7 @@ int xodtemplate_expand_services(xodtemplate_memberlist **list, xodtemplate_membe
 					continue;
 
 				/* add service to the list */
-				xodtemplate_add_member_to_memberlist(list, host_name, temp_service->service_description);
+				add_object_to_objectlist(list, temp_service);
 				}
 
 			/* free memory allocated to compiled regexp */
@@ -12774,121 +9440,69 @@ int xodtemplate_expand_services(xodtemplate_memberlist **list, xodtemplate_membe
 			}
 
 		/* use standard matching... */
-		else {
-
+		else if(!strcmp(temp_ptr, "*")) {
 			/* return a list of all services on the host */
-			if(!strcmp(temp_ptr, "*")) {
 
-				found_match = TRUE;
+			found_match = TRUE;
 
-				for(temp_service = xodtemplate_service_list; temp_service != NULL; temp_service = temp_service->next) {
+			for(temp_service = xodtemplate_service_list; temp_service != NULL; temp_service = temp_service->next) {
 
-					if(temp_service->host_name == NULL || temp_service->service_description == NULL)
-						continue;
+				if(temp_service->host_name == NULL || temp_service->service_description == NULL)
+					continue;
 
-					if(strcmp(temp_service->host_name, host_name))
-						continue;
+				if(strcmp(temp_service->host_name, host_name))
+					continue;
 
-					/* dont' add services that shouldn't be registered */
-					if(temp_service->register_object == FALSE)
-						continue;
+				/* dont' add services that shouldn't be registered */
+				if(temp_service->register_object == FALSE)
+					continue;
 
-					/* add service to the list */
-					xodtemplate_add_member_to_memberlist(list, host_name, temp_service->service_description);
-					}
-				}
-
-			/* else this is just a single service... */
-			else {
-
-				/* this service should be excluded (rejected) */
-				if(temp_ptr[0] == '!') {
-					reject_item = TRUE;
-					temp_ptr++;
-					}
-
-				/* find the service */
-				if((temp_service = xodtemplate_find_real_service(host_name, temp_ptr)) != NULL) {
-
-					found_match = TRUE;
-
-					/* add service to the list */
-					xodtemplate_add_member_to_memberlist((reject_item == TRUE) ? reject_list : list, host_name, temp_service->service_description);
-					}
+				/* add service to the list */
+				add_object_to_objectlist(list, temp_service);
 				}
 			}
 
+		/* else this is just a single service... */
+		else {
+
+			/* this service should be excluded (rejected) */
+			if(temp_ptr[0] == '!') {
+				reject_item = TRUE;
+				temp_ptr++;
+				}
+
+#endif
+			/* find the service */
+			if((temp_service = xodtemplate_find_real_service(host_name, temp_ptr)) != NULL) {
+
+				found_match = TRUE;
+
+				if(reject_item == TRUE)
+					bitmap_set(reject_map, temp_service->id);
+				else
+					add_object_to_objectlist(list, temp_service);
+			}
+#ifndef NSCGI
+		}
+#endif
 		/* we didn't find a match */
 		if(found_match == FALSE && reject_item == FALSE) {
 			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Could not find a service matching host name '%s' and description '%s' (config file '%s', starting on line %d)\n", host_name, temp_ptr, xodtemplate_config_file_name(_config_file), _start_line);
 			break;
 			}
 		}
-
+#ifndef NSCGI
 	if(use_regexp_host == TRUE)
 		regfree(&preg2);
 	my_free(service_names);
-
+#endif
 	if(found_match == FALSE && reject_item == FALSE)
 		return ERROR;
 
 	return OK;
 	}
 
-
-/* adds members of a servicegroups to the list of expanded services */
-int xodtemplate_add_servicegroup_members_to_memberlist(xodtemplate_memberlist **list, xodtemplate_servicegroup *temp_servicegroup, int _config_file, int _start_line) {
-	char *group_members = NULL;
-	char *member_name = NULL;
-	char *host_name = NULL;
-	char *member_ptr = NULL;
-
-	if(list == NULL || temp_servicegroup == NULL)
-		return ERROR;
-
-	/* if we have no members, just return. Empty servicegroups are ok */
-	if(temp_servicegroup->members == NULL) {
-		return OK;
-		}
-
-	/* save a copy of the members */
-	if((group_members = (char *)strdup(temp_servicegroup->members)) == NULL)
-		return ERROR;
-
-	/* process all services that belong to the servicegroup */
-	/* NOTE: members of the group have already have been expanded by xodtemplate_recombobulate_servicegroups(), so we don't need to do it here */
-	member_ptr = group_members;
-	for(member_name = my_strsep(&member_ptr, ","); member_name != NULL; member_name = my_strsep(&member_ptr, ",")) {
-
-		/* strip trailing spaces from member name */
-		strip(member_name);
-
-		/* host name */
-		if(host_name == NULL) {
-			if((host_name = (char *)strdup(member_name)) == NULL) {
-				my_free(group_members);
-				return ERROR;
-				}
-			}
-
-		/* service description */
-		else {
-
-			/* add service to the list */
-			xodtemplate_add_member_to_memberlist(list, host_name, member_name);
-
-			my_free(host_name);
-			}
-		}
-
-	my_free(group_members);
-
-	return OK;
-	}
-
-
-
-
+#ifndef NSCGI
 /* returns a comma-delimited list of hostgroup names */
 char * xodtemplate_process_hostgroup_names(char *hostgroups, int _config_file, int _start_line) {
 	xodtemplate_memberlist *temp_list = NULL;
@@ -13042,7 +9656,7 @@ int xodtemplate_get_hostgroup_names(xodtemplate_memberlist **list, xodtemplate_m
 
 					found_match = TRUE;
 
-					/* add hostgroup members to proper list */
+					/* add hostgroup to proper list */
 					xodtemplate_add_member_to_memberlist((reject_item == TRUE) ? reject_list : list, temp_hostgroup->hostgroup_name, NULL);
 					}
 				}
@@ -13415,14 +10029,13 @@ int xodtemplate_get_servicegroup_names(xodtemplate_memberlist **list, xodtemplat
 	return OK;
 	}
 
-#ifdef NSCORE
 
 /******************************************************************/
 /****************** ADDITIVE INHERITANCE STUFF ********************/
 /******************************************************************/
 
 /* determines the value of an inherited string */
-int xodtemplate_get_inherited_string(int *have_template_value, char **template_value, int *have_this_value, char **this_value) {
+int xodtemplate_get_inherited_string(char *have_template_value, char **template_value, char *have_this_value, char **this_value) {
 	char *buf = NULL;
 
 	/* template has a value we should use */
@@ -13584,7 +10197,6 @@ int xodtemplate_clean_additive_strings(void) {
 
 	return OK;
 	}
-#endif
 
 #endif
 

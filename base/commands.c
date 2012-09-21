@@ -29,30 +29,261 @@
 #include "../include/sretention.h"
 #include "../include/broker.h"
 #include "../include/nagios.h"
+#include "../include/workers.h"
 
-extern int      enable_notifications;
-extern int      execute_service_checks;
-extern int      accept_passive_service_checks;
-extern int      execute_host_checks;
-extern int      accept_passive_host_checks;
-extern int      enable_event_handlers;
-extern int      obsess_over_services;
-extern int      obsess_over_hosts;
-extern int      check_service_freshness;
-extern int      check_host_freshness;
-extern int      enable_failure_prediction;
-extern int      process_performance_data;
 
-extern int      log_external_commands;
-extern int      log_passive_checks;
+static int command_file_fd;
+static FILE *command_file_fp;
+static int command_file_created = FALSE;
+static worker_process *command_wproc;
 
-extern unsigned long    modified_host_process_attributes;
-extern unsigned long    modified_service_process_attributes;
 
-extern char     *global_host_event_handler;
-extern char     *global_service_event_handler;
-extern command  *global_host_event_handler_ptr;
-extern command  *global_service_event_handler_ptr;
+/******************************************************************/
+/************* EXTERNAL COMMAND WORKER CONTROLLERS ****************/
+/******************************************************************/
+
+
+/* creates external command file as a named pipe (FIFO) and opens it for reading (non-blocked mode) */
+int open_command_file(void) {
+	struct stat st;
+	int result = 0;
+
+	/* if we're not checking external commands, don't do anything */
+	if(check_external_commands == FALSE)
+		return OK;
+
+	/* the command file was already created */
+	if(command_file_created == TRUE)
+		return OK;
+
+	/* reset umask (group needs write permissions) */
+	umask(S_IWOTH);
+
+	/* use existing FIFO if possible */
+	if(!(stat(command_file, &st) != -1 && (st.st_mode & S_IFIFO))) {
+
+		/* create the external command file as a named pipe (FIFO) */
+		if((result = mkfifo(command_file, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP)) != 0) {
+
+			logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: Could not create external command file '%s' as named pipe: (%d) -> %s.  If this file already exists and you are sure that another copy of Nagios is not running, you should delete this file.\n", command_file, errno, strerror(errno));
+			return ERROR;
+			}
+		}
+
+	/* open the command file for reading (non-blocked) - O_TRUNC flag cannot be used due to errors on some systems */
+	/* NOTE: file must be opened read-write for poll() to work */
+	if((command_file_fd = open(command_file, O_RDWR | O_NONBLOCK)) < 0) {
+
+		logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: Could not open external command file for reading via open(): (%d) -> %s\n", errno, strerror(errno));
+
+		return ERROR;
+		}
+
+	/* set a flag to remember we already created the file */
+	command_file_created = TRUE;
+
+	return OK;
+	}
+
+
+/* closes the external command file FIFO and deletes it */
+int close_command_file(void) {
+
+	/* if we're not checking external commands, don't do anything */
+	if(check_external_commands == FALSE)
+		return OK;
+
+	/* the command file wasn't created or was already cleaned up */
+	if(command_file_created == FALSE)
+		return OK;
+
+	/* reset our flag */
+	command_file_created = FALSE;
+
+	/* close the command file */
+	fclose(command_file_fp);
+
+	return OK;
+	}
+
+
+/* shutdown command file worker thread */
+int shutdown_command_file_worker(void) {
+	if (!command_wproc)
+		return 0;
+
+	iocache_destroy(command_wproc->ioc);
+	wproc_destroy(command_wproc, WPROC_FORCE);
+	command_wproc = NULL;
+	return 0;
+	}
+
+
+int command_input_handler(int sd, int events, void *arg) {
+	int ret;
+	char *buf;
+	unsigned long size;
+
+	ret = iocache_read(command_wproc->ioc, sd);
+	log_debug_info(DEBUGL_COMMANDS, 2, "Read %d bytes from command worker\n", ret);
+	if (ret == 0) {
+		logit(NSLOG_RUNTIME_WARNING, TRUE, "Command file worker seems to have died. Respawning\n");
+		shutdown_command_file_worker();
+		launch_command_file_worker();
+		return 0;
+		}
+	while ((buf = iocache_use_delim(command_wproc->ioc, "\n", 1, &size))) {
+		if (buf[0] == '[') {
+			/* raw external command */
+			buf[size] = 0;
+			log_debug_info(DEBUGL_COMMANDS, 1, "Read raw external command '%s'\n", buf);
+			}
+		process_external_command1(buf);
+		}
+	return 0;
+	}
+
+
+/* main controller of command file helper process */
+static int command_file_worker(int sd) {
+	iocache *ioc;
+
+	if (open_command_file() == ERROR)
+		return (EXIT_FAILURE);
+
+	ioc = iocache_create(65536);
+	if (!ioc)
+		exit(EXIT_FAILURE);
+
+	while(1) {
+		struct pollfd pfd;
+		int pollval, ret;
+		char *buf;
+		unsigned long size;
+
+		/* if our master has gone away, we need to die */
+		if (kill(nagios_pid, 0) < 0 && errno == ESRCH) {
+			return EXIT_SUCCESS;
+			}
+
+		errno = 0;
+		/* wait for data to arrive */
+		/* select seems to not work, so we have to use poll instead */
+		/* 10-15-08 EG check into implementing William's patch @ http://blog.netways.de/2008/08/15/nagios-unter-mac-os-x-installieren/ */
+		/* 10-15-08 EG poll() seems broken on OSX - see Jonathan's patch a few lines down */
+		pfd.fd = command_file_fd;
+		pfd.events = POLLIN;
+		pollval = poll(&pfd, 1, 500);
+
+		/* loop if no data */
+		if(pollval == 0)
+			continue;
+
+		/* check for errors */
+		if(pollval == -1) {
+			/* @todo printf("Failed to poll() command file pipe: %m\n"); */
+			if (errno == EINTR)
+				continue;
+			return EXIT_FAILURE;
+			}
+
+		errno = 0;
+		ret = iocache_read(ioc, command_file_fd);
+		if (ret < 1) {
+			if (errno == EINTR)
+				continue;
+			return EXIT_FAILURE;
+		}
+
+		size = iocache_available(ioc);
+		buf = iocache_use_size(ioc, size);
+		ret = write(sd, buf, size);
+		/*
+		 * @todo Add libio to get io_write_all(), which handles
+		 * EINTR and EAGAIN properly instead of just exiting.
+		 */
+		if (ret < 0 && errno != EINTR)
+			return EXIT_FAILURE;
+		} /* while(1) */
+	}
+
+
+int launch_command_file_worker(void) {
+	int ret, pid, sv[2];
+	char *str;
+
+	/*
+	 * if we're restarting, we may well already have a command
+	 * file worker process attached. Keep it if that's so.
+	 */
+	if (command_wproc && command_wproc->pid &&
+		kill(command_wproc->pid, 0) == 0 && iobroker_is_registered(nagios_iobs, command_wproc->sd))
+	{
+		return 0;
+	}
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+		logit(NSLOG_RUNTIME_ERROR, TRUE, "Failed to create socketpair for command file worker: %m\n");
+		return ERROR;
+	}
+
+	pid = fork();
+	if (pid < 0) {
+		logit(NSLOG_RUNTIME_ERROR, TRUE, "Failed to fork() command file worker: %m\n");
+		goto err_close;
+	}
+
+	if (pid) {
+		command_wproc = calloc(1, sizeof(*command_wproc));
+		if (!command_wproc) {
+			logit(NSLOG_RUNTIME_ERROR, TRUE, "Failed to calloc(1, %d) for command file worker: %m\n",
+				  (int)sizeof(*command_wproc));
+			goto err_close;
+		}
+		command_wproc->type = "command file";
+		command_wproc->ioc = iocache_create(512 * 1024);
+		if (!command_wproc->ioc) {
+			logit(NSLOG_RUNTIME_ERROR, TRUE, "Failed to create I/O cache for command file worker: %m\n");
+			goto err_free;
+		}
+
+		command_wproc->pid = pid;
+		command_wproc->sd = sv[0];
+		ret = iobroker_register(nagios_iobs, command_wproc->sd, command_wproc, command_input_handler);
+		if (ret < 0) {
+			logit(NSLOG_RUNTIME_ERROR, TRUE, "Failed to register command file worker socket %d with io broker %p\n",
+				  command_wproc->sd, nagios_iobs);
+			goto err_ioc;
+		}
+		logit(NSLOG_INFO_MESSAGE, TRUE, "Successfully launched command file worker with pid %d\n",
+			  command_wproc->pid);
+		return OK;
+	}
+
+	/* child goes here */
+	close(sv[0]);
+
+	/* make our own process-group so we can be traced into and stuff */
+	setpgid(0, 0);
+
+	/* we must preserve command_file before nuking memory */
+	(void)chdir("/tmp");
+	(void)chdir("nagios-cfw");
+	str = strdup(command_file);
+	free_memory(get_global_macros());
+	command_file = str;
+	exit(command_file_worker(sv[1]));
+
+	/* error conditions for parent */
+err_ioc:
+	free(command_wproc->ioc);
+err_free:
+	free(command_wproc);
+err_close:
+	close(sv[0]);
+	close(sv[1]);
+	return ERROR;
+	}
 
 /******************************************************************/
 /****************** EXTERNAL COMMAND PROCESSING *******************/
@@ -193,11 +424,6 @@ int process_external_command1(char *cmd) {
 
 	else if(!strcmp(command_id, "FLUSH_PENDING_COMMANDS"))
 		command_type = CMD_FLUSH_PENDING_COMMANDS;
-
-	else if(!strcmp(command_id, "ENABLE_FAILURE_PREDICTION"))
-		command_type = CMD_ENABLE_FAILURE_PREDICTION;
-	else if(!strcmp(command_id, "DISABLE_FAILURE_PREDICTION"))
-		command_type = CMD_DISABLE_FAILURE_PREDICTION;
 
 	else if(!strcmp(command_id, "ENABLE_PERFORMANCE_DATA"))
 		command_type = CMD_ENABLE_PERFORMANCE_DATA;
@@ -786,14 +1012,6 @@ int process_external_command2(int cmd, time_t entry_time, char *args) {
 
 		case CMD_DISABLE_HOST_FRESHNESS_CHECKS:
 			disable_host_freshness_checks();
-			break;
-
-		case CMD_ENABLE_FAILURE_PREDICTION:
-			enable_all_failure_prediction();
-			break;
-
-		case CMD_DISABLE_FAILURE_PREDICTION:
-			disable_all_failure_prediction();
 			break;
 
 		case CMD_ENABLE_PERFORMANCE_DATA:
@@ -1859,7 +2077,7 @@ int cmd_delay_notification(int cmd, char *args) {
 
 		/* delay the next notification... */
 		if(cmd == CMD_DELAY_HOST_NOTIFICATION)
-			temp_host->next_host_notification = delay_time;
+			temp_host->next_notification = delay_time;
 		else
 			temp_service->next_notification = delay_time;
 		}
@@ -2077,16 +2295,18 @@ int process_passive_service_check(time_t check_time, char *host_name, char *svc_
 		}
 
 	/* skip this is we aren't accepting passive checks for this service */
-	if(temp_service->accept_passive_service_checks == FALSE)
+	if(temp_service->accept_passive_checks == FALSE)
 		return ERROR;
 
 	memset(&cr, 0, sizeof(cr));
 	cr.exited_ok = 1;
-	cr.check_type = SERVICE_CHECK_PASSIVE;
+	cr.check_type = CHECK_TYPE_PASSIVE;
 	cr.host_name = temp_host->name;
-	cr.service_description = svc_description;
+	cr.service_description = temp_service->description;
 	cr.output = output;
 	cr.start_time.tv_sec = cr.finish_time.tv_sec = check_time;
+	cr.engine = &nagios_check_engine;
+	cr.source = command_wproc;
 
 	/* save the return code and make sure it's sane */
 	cr.return_code = return_code;
@@ -2176,13 +2396,13 @@ int process_passive_host_check(time_t check_time, char *host_name, int return_co
 		}
 
 	/* skip this is we aren't accepting passive checks for this host */
-	if(temp_host->accept_passive_host_checks == FALSE)
+	if(temp_host->accept_passive_checks == FALSE)
 		return ERROR;
 
 	memset(&cr, 0, sizeof(cr));
 	cr.host_name = temp_host->name;
 	cr.exited_ok = 1;
-	cr.check_type = HOST_CHECK_PASSIVE;
+	cr.check_type = CHECK_TYPE_PASSIVE;
 	cr.return_code = return_code;
 	cr.start_time.tv_sec = cr.finish_time.tv_sec = check_time;
 
@@ -2192,7 +2412,7 @@ int process_passive_host_check(time_t check_time, char *host_name, int return_co
 	if(cr.latency < 0.0)
 		cr.latency = 0.0;
 
-	handle_async_host_check_result_3x(temp_host, &cr);
+	handle_async_host_check_result(temp_host, &cr);
 
 	return OK;
 	}
@@ -3197,8 +3417,8 @@ int cmd_change_object_char_var(int cmd, char *args) {
 			break;
 
 		case CMD_CHANGE_HOST_CHECK_COMMAND:
-			my_free(temp_host->host_check_command);
-			temp_host->host_check_command = temp_ptr;
+			my_free(temp_host->check_command);
+			temp_host->check_command = temp_ptr;
 			temp_host->check_command_ptr = temp_command;
 			attr = MODATTR_CHECK_COMMAND;
 			break;
@@ -3225,8 +3445,8 @@ int cmd_change_object_char_var(int cmd, char *args) {
 			break;
 
 		case CMD_CHANGE_SVC_CHECK_COMMAND:
-			my_free(temp_service->service_check_command);
-			temp_service->service_check_command = temp_ptr;
+			my_free(temp_service->check_command);
+			temp_service->check_command = temp_ptr;
 			temp_service->check_command_ptr = temp_command;
 			attr = MODATTR_CHECK_COMMAND;
 			break;
@@ -4162,14 +4382,14 @@ void enable_passive_service_checks(service *svc) {
 	unsigned long attr = MODATTR_PASSIVE_CHECKS_ENABLED;
 
 	/* no change */
-	if(svc->accept_passive_service_checks == TRUE)
+	if(svc->accept_passive_checks == TRUE)
 		return;
 
 	/* set the attribute modified flag */
 	svc->modified_attributes |= attr;
 
 	/* set the passive check flag */
-	svc->accept_passive_service_checks = TRUE;
+	svc->accept_passive_checks = TRUE;
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */
@@ -4189,14 +4409,14 @@ void disable_passive_service_checks(service *svc) {
 	unsigned long attr = MODATTR_PASSIVE_CHECKS_ENABLED;
 
 	/* no change */
-	if(svc->accept_passive_service_checks == FALSE)
+	if(svc->accept_passive_checks == FALSE)
 		return;
 
 	/* set the attribute modified flag */
 	svc->modified_attributes |= attr;
 
 	/* set the passive check flag */
-	svc->accept_passive_service_checks = FALSE;
+	svc->accept_passive_checks = FALSE;
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */
@@ -4325,14 +4545,14 @@ void enable_passive_host_checks(host *hst) {
 	unsigned long attr = MODATTR_PASSIVE_CHECKS_ENABLED;
 
 	/* no change */
-	if(hst->accept_passive_host_checks == TRUE)
+	if(hst->accept_passive_checks == TRUE)
 		return;
 
 	/* set the attribute modified flag */
 	hst->modified_attributes |= attr;
 
 	/* set the passive check flag */
-	hst->accept_passive_host_checks = TRUE;
+	hst->accept_passive_checks = TRUE;
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */
@@ -4352,14 +4572,14 @@ void disable_passive_host_checks(host *hst) {
 	unsigned long attr = MODATTR_PASSIVE_CHECKS_ENABLED;
 
 	/* no change */
-	if(hst->accept_passive_host_checks == FALSE)
+	if(hst->accept_passive_checks == FALSE)
 		return;
 
 	/* set the attribute modified flag */
 	hst->modified_attributes |= attr;
 
 	/* set the passive check flag */
-	hst->accept_passive_host_checks = FALSE;
+	hst->accept_passive_checks = FALSE;
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */
@@ -4818,58 +5038,6 @@ void disable_host_freshness_checks(void) {
 	}
 
 
-/* enable failure prediction on a program-wide basis */
-void enable_all_failure_prediction(void) {
-	unsigned long attr = MODATTR_FAILURE_PREDICTION_ENABLED;
-
-	/* bail out if we're already set... */
-	if(enable_failure_prediction == TRUE)
-		return;
-
-	/* set the attribute modified flag */
-	modified_host_process_attributes |= attr;
-	modified_service_process_attributes |= attr;
-
-	enable_failure_prediction = TRUE;
-
-#ifdef USE_EVENT_BROKER
-	/* send data to event broker */
-	broker_adaptive_program_data(NEBTYPE_ADAPTIVEPROGRAM_UPDATE, NEBFLAG_NONE, NEBATTR_NONE, CMD_NONE, attr, modified_host_process_attributes, attr, modified_service_process_attributes, NULL);
-#endif
-
-	/* update the status log */
-	update_program_status(FALSE);
-
-	return;
-	}
-
-
-/* disable failure prediction on a program-wide basis */
-void disable_all_failure_prediction(void) {
-	unsigned long attr = MODATTR_FAILURE_PREDICTION_ENABLED;
-
-	/* bail out if we're already set... */
-	if(enable_failure_prediction == FALSE)
-		return;
-
-	/* set the attribute modified flag */
-	modified_host_process_attributes |= attr;
-	modified_service_process_attributes |= attr;
-
-	enable_failure_prediction = FALSE;
-
-#ifdef USE_EVENT_BROKER
-	/* send data to event broker */
-	broker_adaptive_program_data(NEBTYPE_ADAPTIVEPROGRAM_UPDATE, NEBFLAG_NONE, NEBATTR_NONE, CMD_NONE, attr, modified_host_process_attributes, attr, modified_service_process_attributes, NULL);
-#endif
-
-	/* update the status log */
-	update_program_status(FALSE);
-
-	return;
-	}
-
-
 /* enable performance data on a program-wide basis */
 void enable_performance_data(void) {
 	unsigned long attr = MODATTR_PERFORMANCE_DATA_ENABLED;
@@ -4927,14 +5095,14 @@ void start_obsessing_over_service(service *svc) {
 	unsigned long attr = MODATTR_OBSESSIVE_HANDLER_ENABLED;
 
 	/* no change */
-	if(svc->obsess_over_service == TRUE)
+	if(svc->obsess == TRUE)
 		return;
 
 	/* set the attribute modified flag */
 	svc->modified_attributes |= attr;
 
 	/* set the obsess over service flag */
-	svc->obsess_over_service = TRUE;
+	svc->obsess = TRUE;
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */
@@ -4953,14 +5121,14 @@ void stop_obsessing_over_service(service *svc) {
 	unsigned long attr = MODATTR_OBSESSIVE_HANDLER_ENABLED;
 
 	/* no change */
-	if(svc->obsess_over_service == FALSE)
+	if(svc->obsess == FALSE)
 		return;
 
 	/* set the attribute modified flag */
 	svc->modified_attributes |= attr;
 
 	/* set the obsess over service flag */
-	svc->obsess_over_service = FALSE;
+	svc->obsess = FALSE;
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */
@@ -4979,14 +5147,14 @@ void start_obsessing_over_host(host *hst) {
 	unsigned long attr = MODATTR_OBSESSIVE_HANDLER_ENABLED;
 
 	/* no change */
-	if(hst->obsess_over_host == TRUE)
+	if(hst->obsess == TRUE)
 		return;
 
 	/* set the attribute modified flag */
 	hst->modified_attributes |= attr;
 
-	/* set the obsess over host flag */
-	hst->obsess_over_host = TRUE;
+	/* set the obsess flag */
+	hst->obsess = TRUE;
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */
@@ -5005,14 +5173,14 @@ void stop_obsessing_over_host(host *hst) {
 	unsigned long attr = MODATTR_OBSESSIVE_HANDLER_ENABLED;
 
 	/* no change */
-	if(hst->obsess_over_host == FALSE)
+	if(hst->obsess == FALSE)
 		return;
 
 	/* set the attribute modified flag */
 	hst->modified_attributes |= attr;
 
 	/* set the obsess over host flag */
-	hst->obsess_over_host = FALSE;
+	hst->obsess = FALSE;
 
 #ifdef USE_EVENT_BROKER
 	/* send data to event broker */

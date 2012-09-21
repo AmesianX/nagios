@@ -30,6 +30,10 @@
 #define PAIR_SEP 0 /**< pair separator for buf2kvvec() and kvvec2buf() */
 #define KV_SEP '=' /**< key/value separator for buf2kvvec() and kvvec2buf() */
 
+#ifndef ETIME
+#define ETIME ETIMEDOUT
+#endif
+
 struct worker_process;
 
 /** Worker job data */
@@ -45,6 +49,7 @@ typedef struct worker_job {
 /** A worker process as seen from its controller */
 typedef struct worker_process {
 	const char *type; /**< identifying typename of this worker */
+	char *source_name; /**< check-source name of this worker */
 	int sd;    /**< communication socket */
 	pid_t pid; /**< pid */
 	int max_jobs; /**< Max number of jobs we can handle */

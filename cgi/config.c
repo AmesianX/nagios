@@ -469,6 +469,7 @@ void display_hosts(void) {
 	printf("<TH CLASS='data'>Host Name</TH>");
 	printf("<TH CLASS='data'>Alias/Description</TH>");
 	printf("<TH CLASS='data'>Address</TH>");
+	printf("<TH CLASS='data'>Hourly Value</TH>");
 	printf("<TH CLASS='data'>Parent Hosts</TH>");
 	printf("<TH CLASS='data'>Max. Check Attempts</TH>");
 	printf("<TH CLASS='data'>Check Interval</TH>\n");
@@ -493,8 +494,6 @@ void display_hosts(void) {
 	printf("<TH CLASS='data'>High Flap Threshold</TH>");
 	printf("<TH CLASS='data'>Flap Detection Options</TH>\n");
 	printf("<TH CLASS='data'>Process Performance Data</TH>");
-	printf("<TH CLASS='data'>Enable Failure Prediction</TH>");
-	printf("<TH CLASS='data'>Failure Prediction Options</TH>");
 	printf("<TH CLASS='data'>Notes</TH>");
 	printf("<TH CLASS='data'>Notes URL</TH>");
 	printf("<TH CLASS='data'>Action URL</TH>");
@@ -528,6 +527,7 @@ void display_hosts(void) {
 			       url_encode(temp_host->name), CONFIG_CGI, url_encode(temp_host->name), html_encode(temp_host->name, FALSE));
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, html_encode(temp_host->alias, FALSE));
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, html_encode(temp_host->address, FALSE));
+			printf("<TD CLASS='%s'>%u</TD>\n", bg_class, temp_host->hourly_value);
 
 			printf("<TD CLASS='%s'>", bg_class);
 			for(temp_hostsmember = temp_host->parent_hosts; temp_hostsmember != NULL; temp_hostsmember = temp_hostsmember->next) {
@@ -550,11 +550,10 @@ void display_hosts(void) {
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, time_string);
 
 			printf("<TD CLASS='%s'>", bg_class);
-			if(temp_host->host_check_command == NULL)
+			if(temp_host->check_command == NULL)
 				printf("&nbsp;");
 			else
-				/* printf("<a href='%s?type=commands&expand=%s'>%s</a></TD>\n",CONFIG_CGI,url_encode(strtok(temp_host->host_check_command,"!")),html_encode(temp_host->host_check_command,FALSE)); */
-				printf("<a href='%s?type=command&expand=%s'>%s</a></TD>\n", CONFIG_CGI, url_encode(temp_host->host_check_command), html_encode(temp_host->host_check_command, FALSE));
+				printf("<a href='%s?type=command&expand=%s'>%s</a></TD>\n", CONFIG_CGI, url_encode(temp_host->check_command), html_encode(temp_host->check_command, FALSE));
 			printf("</TD>\n");
 
 			printf("<TD CLASS='%s'>", bg_class);
@@ -564,11 +563,11 @@ void display_hosts(void) {
 				printf("<A HREF='%s?type=timeperiods&expand=%s'>%s</A>", CONFIG_CGI, url_encode(temp_host->check_period), html_encode(temp_host->check_period, FALSE));
 			printf("</TD>\n");
 
-			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_host->obsess_over_host == TRUE) ? "Yes" : "No");
+			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_host->obsess == TRUE) ? "Yes" : "No");
 
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_host->checks_enabled == TRUE) ? "Yes" : "No");
 
-			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_host->accept_passive_host_checks == TRUE) ? "Yes" : "No");
+			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_host->accept_passive_checks == TRUE) ? "Yes" : "No");
 
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_host->check_freshness == TRUE) ? "Yes" : "No");
 
@@ -608,23 +607,23 @@ void display_hosts(void) {
 
 			printf("<TD CLASS='%s'>", bg_class);
 			options = 0;
-			if(temp_host->notify_on_down == TRUE) {
+			if(flag_isset(temp_host->notification_options, OPT_DOWN) == TRUE) {
 				options = 1;
 				printf("Down");
 				}
-			if(temp_host->notify_on_unreachable == TRUE) {
+			if(flag_isset(temp_host->notification_options, OPT_UNREACHABLE) == TRUE) {
 				printf("%sUnreachable", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_host->notify_on_recovery == TRUE) {
+			if(flag_isset(temp_host->notification_options, OPT_RECOVERY) == TRUE) {
 				printf("%sRecovery", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_host->notify_on_flapping == TRUE) {
+			if(flag_isset(temp_host->notification_options, OPT_FLAPPING) == TRUE) {
 				printf("%sFlapping", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_host->notify_on_downtime == TRUE) {
+			if(flag_isset(temp_host->notification_options, OPT_DOWNTIME) == TRUE) {
 				printf("%sDowntime", (options) ? ", " : "");
 				options = 1;
 				}
@@ -653,15 +652,15 @@ void display_hosts(void) {
 
 			printf("<TD CLASS='%s'>", bg_class);
 			options = 0;
-			if(temp_host->stalk_on_up == TRUE) {
+			if(flag_isset(temp_host->stalking_options, OPT_UP) == TRUE) {
 				options = 1;
 				printf("Up");
 				}
-			if(temp_host->stalk_on_down == TRUE) {
+			if(flag_isset(temp_host->stalking_options, OPT_DOWN) == TRUE) {
 				printf("%sDown", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_host->stalk_on_unreachable == TRUE) {
+			if(flag_isset(temp_host->stalking_options, OPT_UNREACHABLE) == TRUE) {
 				printf("%sUnreachable", (options) ? ", " : "");
 				options = 1;
 				}
@@ -689,15 +688,15 @@ void display_hosts(void) {
 
 			printf("<TD CLASS='%s'>", bg_class);
 			options = 0;
-			if(temp_host->flap_detection_on_up == TRUE) {
+			if(flag_isset(temp_host->flap_detection_options, OPT_UP) == TRUE) {
 				options = 1;
 				printf("Up");
 				}
-			if(temp_host->flap_detection_on_down == TRUE) {
+			if(flag_isset(temp_host->flap_detection_options, OPT_DOWN) == TRUE) {
 				printf("%sDown", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_host->flap_detection_on_unreachable == TRUE) {
+			if(flag_isset(temp_host->flap_detection_options, OPT_UNREACHABLE) == TRUE) {
 				printf("%sUnreachable", (options) ? ", " : "");
 				options = 1;
 				}
@@ -708,12 +707,6 @@ void display_hosts(void) {
 			printf("<TD CLASS='%s'>", bg_class);
 			printf("%s\n", (temp_host->process_performance_data == TRUE) ? "Yes" : "No");
 			printf("</TD>\n");
-
-			printf("<TD CLASS='%s'>", bg_class);
-			printf("%s\n", (temp_host->failure_prediction_enabled == TRUE) ? "Yes" : "No");
-			printf("</TD>\n");
-
-			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_host->failure_prediction_options == NULL) ? "&nbsp;" : html_encode(temp_host->failure_prediction_options, FALSE));
 
 			printf("<TD CLASS='%s'>%s</TD>", bg_class, (temp_host->notes == NULL) ? "&nbsp;" : html_encode(temp_host->notes, FALSE));
 
@@ -956,6 +949,7 @@ void display_contacts(void) {
 	printf("<TH CLASS='data'>Alias</TH>");
 	printf("<TH CLASS='data'>Email Address</TH>");
 	printf("<TH CLASS='data'>Pager Address/Number</TH>");
+	printf("<TH CLASS='data'>Minimum Value</TH>");
 	printf("<TH CLASS='data'>Service Notification Options</TH>");
 	printf("<TH CLASS='data'>Host Notification Options</TH>");
 	printf("<TH CLASS='data'>Service Notification Period</TH>");
@@ -983,30 +977,31 @@ void display_contacts(void) {
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, html_encode(temp_contact->alias, FALSE));
 			printf("<TD CLASS='%s'><A HREF='mailto:%s'>%s</A></TD>\n", bg_class, (temp_contact->email == NULL) ? "&nbsp;" : url_encode(temp_contact->email), (temp_contact->email == NULL) ? "&nbsp;" : html_encode(temp_contact->email, FALSE));
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_contact->pager == NULL) ? "&nbsp;" : html_encode(temp_contact->pager, FALSE));
+			printf("<TD CLASS='%s'>%u</TD>\n", bg_class, temp_contact->minimum_value);
 
 			printf("<TD CLASS='%s'>", bg_class);
 			options = 0;
-			if(temp_contact->notify_on_service_unknown == TRUE) {
+			if(flag_isset(temp_contact->service_notification_options, OPT_UNKNOWN)) {
 				options = 1;
 				printf("Unknown");
 				}
-			if(temp_contact->notify_on_service_warning == TRUE) {
+			if(flag_isset(temp_contact->service_notification_options, OPT_WARNING)) {
 				printf("%sWarning", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_contact->notify_on_service_critical == TRUE) {
+			if(flag_isset(temp_contact->service_notification_options, OPT_CRITICAL)) {
 				printf("%sCritical", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_contact->notify_on_service_recovery == TRUE) {
+			if(flag_isset(temp_contact->service_notification_options, OPT_RECOVERY)) {
 				printf("%sRecovery", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_contact->notify_on_service_flapping == TRUE) {
+			if(flag_isset(temp_contact->service_notification_options, OPT_FLAPPING)) {
 				printf("%sFlapping", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_contact->notify_on_service_downtime == TRUE) {
+			if(flag_isset(temp_contact->service_notification_options, OPT_DOWNTIME)) {
 				printf("%sDowntime", (options) ? ", " : "");
 				options = 1;
 				}
@@ -1016,23 +1011,23 @@ void display_contacts(void) {
 
 			printf("<TD CLASS='%s'>", bg_class);
 			options = 0;
-			if(temp_contact->notify_on_host_down == TRUE) {
+			if(flag_isset(temp_contact->host_notification_options, OPT_DOWN) == TRUE) {
 				options = 1;
 				printf("Down");
 				}
-			if(temp_contact->notify_on_host_unreachable == TRUE) {
+			if(flag_isset(temp_contact->host_notification_options, OPT_UNREACHABLE) == TRUE) {
 				printf("%sUnreachable", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_contact->notify_on_host_recovery == TRUE) {
+			if(flag_isset(temp_contact->host_notification_options, OPT_RECOVERY) == TRUE) {
 				printf("%sRecovery", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_contact->notify_on_host_flapping == TRUE) {
+			if(flag_isset(temp_contact->host_notification_options, OPT_FLAPPING) == TRUE) {
 				printf("%sFlapping", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_contact->notify_on_host_downtime == TRUE) {
+			if(flag_isset(temp_contact->host_notification_options, OPT_DOWNTIME) == TRUE) {
 				printf("%sDowntime", (options) ? ", " : "");
 				options = 1;
 				}
@@ -1212,6 +1207,7 @@ void display_services(void) {
 	printf("<TR>\n");
 	printf("<TH CLASS='data'>Host</TH>\n");
 	printf("<TH CLASS='data'>Description</TH>\n");
+	printf("<TH CLASS='data'>Hourly Value</TH>\n");
 	printf("<TH CLASS='data'>Max. Check Attempts</TH>\n");
 	printf("<TH CLASS='data'>Normal Check Interval</TH>\n");
 	printf("<TH CLASS='data'>Retry Check Interal</TH>\n");
@@ -1238,8 +1234,6 @@ void display_services(void) {
 	printf("<TH CLASS='data'>High Flap Threshold</TH>");
 	printf("<TH CLASS='data'>Flap Detection Options</TH>");
 	printf("<TH CLASS='data'>Process Performance Data</TH>");
-	printf("<TH CLASS='data'>Enable Failure Prediction</TH>");
-	printf("<TH CLASS='data'>Failure Prediction Options</TH>");
 	printf("<TH CLASS='data'>Notes</TH>");
 	printf("<TH CLASS='data'>Notes URL</TH>");
 	printf("<TH CLASS='data'>Action URL</TH>");
@@ -1271,6 +1265,7 @@ void display_services(void) {
 			printf("<A HREF='%s?type=hosts&expand=%s'>%s</A></TD>\n", CONFIG_CGI, url_encode(temp_service->host_name), html_encode(temp_service->host_name, FALSE));
 
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, html_encode(temp_service->description, FALSE));
+			printf("<TD CLASS='%s'>%u</TD>\n", bg_class, temp_service->hourly_value);
 
 			printf("<TD CLASS='%s'>%d</TD>\n", bg_class, temp_service->max_attempts);
 
@@ -1279,7 +1274,7 @@ void display_services(void) {
 			get_interval_time_string(temp_service->retry_interval, time_string, sizeof(time_string));
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, time_string);
 
-			strncpy(command_line, temp_service->service_check_command, sizeof(command_line));
+			strncpy(command_line, temp_service->check_command, sizeof(command_line));
 			command_line[sizeof(command_line) - 1] = '\x0';
 			command_name = strtok(strdup(command_line), "!");
 
@@ -1297,11 +1292,11 @@ void display_services(void) {
 
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_service->is_volatile == TRUE) ? "Yes" : "No");
 
-			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_service->obsess_over_service == TRUE) ? "Yes" : "No");
+			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_service->obsess == TRUE) ? "Yes" : "No");
 
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_service->checks_enabled == TRUE) ? "Yes" : "No");
 
-			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_service->accept_passive_service_checks == TRUE) ? "Yes" : "No");
+			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_service->accept_passive_checks == TRUE) ? "Yes" : "No");
 
 			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_service->check_freshness == TRUE) ? "Yes" : "No");
 
@@ -1342,27 +1337,27 @@ void display_services(void) {
 
 			printf("<TD CLASS='%s'>", bg_class);
 			options = 0;
-			if(temp_service->notify_on_unknown == TRUE) {
+			if(flag_isset(temp_service->notification_options, OPT_UNKNOWN) == TRUE) {
 				options = 1;
 				printf("Unknown");
 				}
-			if(temp_service->notify_on_warning == TRUE) {
+			if(flag_isset(temp_service->notification_options, OPT_WARNING) == TRUE) {
 				printf("%sWarning", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_service->notify_on_critical == TRUE) {
+			if(flag_isset(temp_service->notification_options, OPT_CRITICAL) == TRUE) {
 				printf("%sCritical", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_service->notify_on_recovery == TRUE) {
+			if(flag_isset(temp_service->notification_options, OPT_RECOVERY) == TRUE) {
 				printf("%sRecovery", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_service->notify_on_flapping == TRUE) {
+			if(flag_isset(temp_service->notification_options, OPT_FLAPPING) == TRUE) {
 				printf("%sFlapping", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_service->notify_on_downtime == TRUE) {
+			if(flag_isset(temp_service->notification_options, OPT_DOWNTIME) == TRUE) {
 				printf("%sDowntime", (options) ? ", " : "");
 				options = 1;
 				}
@@ -1389,19 +1384,19 @@ void display_services(void) {
 
 			printf("<TD CLASS='%s'>", bg_class);
 			options = 0;
-			if(temp_service->stalk_on_ok == TRUE) {
+			if(flag_isset(temp_service->stalking_options, OPT_OK) == TRUE) {
 				options = 1;
 				printf("Ok");
 				}
-			if(temp_service->stalk_on_warning == TRUE) {
+			if(flag_isset(temp_service->stalking_options, OPT_WARNING) == TRUE) {
 				printf("%sWarning", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_service->stalk_on_unknown == TRUE) {
+			if(flag_isset(temp_service->stalking_options, OPT_UNKNOWN) == TRUE) {
 				printf("%sUnknown", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_service->stalk_on_critical == TRUE) {
+			if(flag_isset(temp_service->stalking_options, OPT_CRITICAL) == TRUE) {
 				printf("%sCritical", (options) ? ", " : "");
 				options = 1;
 				}
@@ -1429,19 +1424,19 @@ void display_services(void) {
 
 			printf("<TD CLASS='%s'>", bg_class);
 			options = 0;
-			if(temp_service->flap_detection_on_ok == TRUE) {
+			if(flag_isset(temp_service->flap_detection_options, OPT_OK) == TRUE) {
 				options = 1;
 				printf("Ok");
 				}
-			if(temp_service->flap_detection_on_warning == TRUE) {
+			if(flag_isset(temp_service->flap_detection_options, OPT_WARNING) == TRUE) {
 				printf("%sWarning", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_service->flap_detection_on_unknown == TRUE) {
+			if(flag_isset(temp_service->flap_detection_options, OPT_UNKNOWN) == TRUE) {
 				printf("%sUnknown", (options) ? ", " : "");
 				options = 1;
 				}
-			if(temp_service->flap_detection_on_critical == TRUE) {
+			if(flag_isset(temp_service->flap_detection_options, OPT_CRITICAL) == TRUE) {
 				printf("%sCritical", (options) ? ", " : "");
 				options = 1;
 				}
@@ -1452,12 +1447,6 @@ void display_services(void) {
 			printf("<TD CLASS='%s'>", bg_class);
 			printf("%s\n", (temp_service->process_performance_data == TRUE) ? "Yes" : "No");
 			printf("</TD>\n");
-
-			printf("<TD CLASS='%s'>", bg_class);
-			printf("%s\n", (temp_service->failure_prediction_enabled == TRUE) ? "Yes" : "No");
-			printf("</TD>\n");
-
-			printf("<TD CLASS='%s'>%s</TD>\n", bg_class, (temp_service->failure_prediction_options == NULL) ? "&nbsp;" : html_encode(temp_service->failure_prediction_options, FALSE));
 
 			printf("<TD CLASS='%s'>%s</TD>", bg_class, (temp_service->notes == NULL) ? "&nbsp;" : html_encode(temp_service->notes, FALSE));
 
@@ -1744,12 +1733,72 @@ void display_commands(void) {
 	}
 
 
+void display_servicedependency(servicedependency *temp_sd)
+{
+	char *bg_class;
+	static int odd = 0;
+	int options;
+
+	if(*to_expand != '\0' && (strcmp(to_expand, temp_sd->dependent_host_name) || strcmp(to_expand, temp_sd->host_name)))
+		return;
+
+	if(odd)
+		bg_class = "dataOdd";
+	else
+		bg_class = "dataEven";
+	odd ^= 1; /* xor with 1 always flips the switch */
+
+	printf("<TR CLASS='%s'>\n", bg_class);
+
+	printf("<TD CLASS='%s'><A HREF='%s?type=hosts&expand=%s'>%s</A></TD>", bg_class, CONFIG_CGI, url_encode(temp_sd->dependent_host_name), html_encode(temp_sd->dependent_host_name, FALSE));
+
+	printf("<TD CLASS='%s'><A HREF='%s?type=services&expand=%s#%s;", bg_class, CONFIG_CGI, url_encode(temp_sd->dependent_host_name), url_encode(temp_sd->dependent_host_name));
+	printf("%s'>%s</A></TD>\n", url_encode(temp_sd->dependent_service_description), html_encode(temp_sd->dependent_service_description, FALSE));
+
+	printf("<TD CLASS='%s'><A HREF='%s?type=hosts&expand=%s'>%s</A></TD>", bg_class, CONFIG_CGI, url_encode(temp_sd->host_name), html_encode(temp_sd->host_name, FALSE));
+
+	printf("<TD CLASS='%s'><A HREF='%s?type=services&expand=%s#%s;", bg_class, CONFIG_CGI, url_encode(temp_sd->host_name), url_encode(temp_sd->host_name));
+	printf("%s'>%s</A></TD>\n", url_encode(temp_sd->service_description), html_encode(temp_sd->service_description, FALSE));
+
+	printf("<TD CLASS='%s'>%s</TD>", bg_class, (temp_sd->dependency_type == NOTIFICATION_DEPENDENCY) ? "Notification" : "Check Execution");
+
+	printf("<TD CLASS='%s'>", bg_class);
+	if(temp_sd->dependency_period == NULL)
+		printf("&nbsp;");
+	else
+		printf("<A HREF='%s?type=timeperiods&expand=%s'>%s</A>", CONFIG_CGI, url_encode(temp_sd->dependency_period), html_encode(temp_sd->dependency_period, FALSE));
+	printf("</TD>\n");
+
+	printf("<TD CLASS='%s'>", bg_class);
+	options = FALSE;
+	if(flag_isset(temp_sd->failure_options, OPT_OK) == TRUE) {
+		printf("Ok");
+		options = TRUE;
+		}
+	if(flag_isset(temp_sd->failure_options, OPT_WARNING) == TRUE) {
+		printf("%sWarning", (options == TRUE) ? ", " : "");
+		options = TRUE;
+		}
+	if(flag_isset(temp_sd->failure_options, OPT_UNKNOWN) == TRUE) {
+		printf("%sUnknown", (options == TRUE) ? ", " : "");
+		options = TRUE;
+		}
+	if(flag_isset(temp_sd->failure_options, OPT_CRITICAL) == TRUE) {
+		printf("%sCritical", (options == TRUE) ? ", " : "");
+		options = TRUE;
+		}
+	if(flag_isset(temp_sd->failure_options, OPT_PENDING) == TRUE) {
+		printf("%sPending", (options == TRUE) ? ", " : "");
+		options = TRUE;
+		}
+	printf("</TD>\n");
+	printf("</TR>\n");
+	}
 
 void display_servicedependencies(void) {
-	servicedependency *temp_sd;
-	int odd = 0;
-	int options;
-	char *bg_class = "";
+	service *s;
+	objectlist *list;
+	unsigned int i, printed = 0;
 
 	/* see if user is authorized to view hostgroup information... */
 	if(is_authorized_for_configuration_information(&current_authdata) == FALSE) {
@@ -1778,66 +1827,26 @@ void display_servicedependencies(void) {
 	printf("<TH CLASS='data'>Dependency Failure Options</TH>");
 	printf("</TR>\n");
 
-	/* check all the service dependencies... */
-	for(temp_sd = servicedependency_list; temp_sd != NULL; temp_sd = temp_sd->next)
-		if(((*to_expand) == '\0') || (!strcmp(to_expand, temp_sd->dependent_host_name)) || (!strcmp(to_expand, temp_sd->host_name))) {
+	/*
+	 * servicedependencies aren't stashed separately, so we must traverse
+	 * all services to find them all, but we can break out early when
+	 * we've found the total number of dependencies.
+	 */
+	for(i = 0; i < num_objects.services; i++) {
+		s = &service_list[i];
 
-			if(odd) {
-				odd = 0;
-				bg_class = "dataOdd";
-				}
-			else {
-				odd = 1;
-				bg_class = "dataEven";
-				}
+		if(printed >= num_objects.servicedependencies)
+			break;
 
-			printf("<TR CLASS='%s'>\n", bg_class);
-
-			printf("<TD CLASS='%s'><A HREF='%s?type=hosts&expand=%s'>%s</A></TD>", bg_class, CONFIG_CGI, url_encode(temp_sd->dependent_host_name), html_encode(temp_sd->dependent_host_name, FALSE));
-
-			printf("<TD CLASS='%s'><A HREF='%s?type=services&expand=%s#%s;", bg_class, CONFIG_CGI, url_encode(temp_sd->dependent_host_name), url_encode(temp_sd->dependent_host_name));
-			printf("%s'>%s</A></TD>\n", url_encode(temp_sd->dependent_service_description), html_encode(temp_sd->dependent_service_description, FALSE));
-
-			printf("<TD CLASS='%s'><A HREF='%s?type=hosts&expand=%s'>%s</A></TD>", bg_class, CONFIG_CGI, url_encode(temp_sd->host_name), html_encode(temp_sd->host_name, FALSE));
-
-			printf("<TD CLASS='%s'><A HREF='%s?type=services&expand=%s#%s;", bg_class, CONFIG_CGI, url_encode(temp_sd->host_name), url_encode(temp_sd->host_name));
-			printf("%s'>%s</A></TD>\n", url_encode(temp_sd->service_description), html_encode(temp_sd->service_description, FALSE));
-
-			printf("<TD CLASS='%s'>%s</TD>", bg_class, (temp_sd->dependency_type == NOTIFICATION_DEPENDENCY) ? "Notification" : "Check Execution");
-
-			printf("<TD CLASS='%s'>", bg_class);
-			if(temp_sd->dependency_period == NULL)
-				printf("&nbsp;");
-			else
-				printf("<A HREF='%s?type=timeperiods&expand=%s'>%s</A>", CONFIG_CGI, url_encode(temp_sd->dependency_period), html_encode(temp_sd->dependency_period, FALSE));
-			printf("</TD>\n");
-
-			printf("<TD CLASS='%s'>", bg_class);
-			options = FALSE;
-			if(temp_sd->fail_on_ok == TRUE) {
-				printf("Ok");
-				options = TRUE;
-				}
-			if(temp_sd->fail_on_warning == TRUE) {
-				printf("%sWarning", (options == TRUE) ? ", " : "");
-				options = TRUE;
-				}
-			if(temp_sd->fail_on_unknown == TRUE) {
-				printf("%sUnknown", (options == TRUE) ? ", " : "");
-				options = TRUE;
-				}
-			if(temp_sd->fail_on_critical == TRUE) {
-				printf("%sCritical", (options == TRUE) ? ", " : "");
-				options = TRUE;
-				}
-			if(temp_sd->fail_on_pending == TRUE) {
-				printf("%sPending", (options == TRUE) ? ", " : "");
-				options = TRUE;
-				}
-			printf("</TD>\n");
-
-			printf("</TR>\n");
+		for(list = s->exec_deps; list; list = list->next) {
+			printed++;
+			display_servicedependency((servicedependency *)list->object_ptr);
 			}
+		for(list = s->notify_deps; list; list = list->next) {
+			printed++;
+			display_servicedependency((servicedependency *)list->object_ptr);
+			}
+		}
 
 	printf("</TABLE>\n");
 	printf("</DIV>\n");
@@ -1857,6 +1866,7 @@ void display_serviceescalations(void) {
 	int odd = 0;
 	char *bg_class = "";
 	int contact = 0;
+	unsigned int i, printed = 0;
 
 	/* see if user is authorized to view hostgroup information... */
 	if(is_authorized_for_configuration_information(&current_authdata) == FALSE) {
@@ -1885,8 +1895,25 @@ void display_serviceescalations(void) {
 	printf("<TH CLASS='data'>Escalation Options</TH>");
 	printf("</TR>\n");
 
-	/* check all the service escalations... */
-	for(temp_se = serviceescalation_list; temp_se != NULL; temp_se = temp_se->next) if(((*to_expand) == '\0') || (!strcmp(to_expand, temp_se->host_name))) {
+
+	/*
+	 * Service escalations are only stored with their respective
+	 * services, so parse them all and print them one by one
+	 */
+	for(i = 0; i < num_objects.services; i++) {
+		objectlist *list;
+		service *s = &service_list[i];
+
+		/* break early if we can't possibly find more escalations */
+		if(printed >= num_objects.serviceescalations)
+			break;
+
+		if(*to_expand != '\0' && strcmp(to_expand, s->host_name))
+			continue;
+
+		for(list = s->escalation_list; list; list = list->next) {
+			temp_se = (serviceescalation *)list->object_ptr;
+			printed++;
 
 			if(odd) {
 				odd = 0;
@@ -1948,19 +1975,19 @@ void display_serviceescalations(void) {
 
 			printf("<TD CLASS='%s'>", bg_class);
 			options = FALSE;
-			if(temp_se->escalate_on_warning == TRUE) {
+			if(flag_isset(temp_se->escalation_options, OPT_WARNING) == TRUE) {
 				printf("%sWarning", (options == TRUE) ? ", " : "");
 				options = TRUE;
 				}
-			if(temp_se->escalate_on_unknown == TRUE) {
+			if(flag_isset(temp_se->escalation_options, OPT_UNKNOWN) == TRUE) {
 				printf("%sUnknown", (options == TRUE) ? ", " : "");
 				options = TRUE;
 				}
-			if(temp_se->escalate_on_critical == TRUE) {
+			if(flag_isset(temp_se->escalation_options, OPT_CRITICAL) == TRUE) {
 				printf("%sCritical", (options == TRUE) ? ", " : "");
 				options = TRUE;
 				}
-			if(temp_se->escalate_on_recovery == TRUE) {
+			if(flag_isset(temp_se->escalation_options, OPT_RECOVERY) == TRUE) {
 				printf("%sRecovery", (options == TRUE) ? ", " : "");
 				options = TRUE;
 				}
@@ -1970,6 +1997,7 @@ void display_serviceescalations(void) {
 
 			printf("</TR>\n");
 			}
+		}
 
 	printf("</TABLE>\n");
 	printf("</DIV>\n");
@@ -1978,13 +2006,61 @@ void display_serviceescalations(void) {
 	return;
 	}
 
-
-
-void display_hostdependencies(void) {
-	hostdependency *temp_hd;
-	int odd = 0;
+void display_hostdependency(hostdependency *temp_hd)
+{
 	int options;
 	char *bg_class = "";
+	static int odd = 0;
+
+	if(*to_expand != '\0' && (strcmp(to_expand, temp_hd->dependent_host_name) && !strcmp(to_expand, temp_hd->host_name)))
+		return;
+
+	if(odd)
+		bg_class = "dataOdd";
+	else
+		bg_class = "dataEven";
+	odd ^= 1;
+
+	printf("<TR CLASS='%s'>\n", bg_class);
+
+	printf("<TD CLASS='%s'><A HREF='%s?type=hosts&expand=%s'>%s</A></TD>", bg_class, CONFIG_CGI, url_encode(temp_hd->dependent_host_name), html_encode(temp_hd->dependent_host_name, FALSE));
+
+	printf("<TD CLASS='%s'><A HREF='%s?type=hosts&expand=%s'>%s</A></TD>", bg_class, CONFIG_CGI, url_encode(temp_hd->host_name), html_encode(temp_hd->host_name, FALSE));
+
+	printf("<TD CLASS='%s'>%s</TD>", bg_class, (temp_hd->dependency_type == NOTIFICATION_DEPENDENCY) ? "Notification" : "Check Execution");
+
+	printf("<TD CLASS='%s'>", bg_class);
+	if(temp_hd->dependency_period == NULL)
+		printf("&nbsp;");
+	else
+		printf("<A HREF='%s?type=timeperiods&expand=%s'>%s</A>", CONFIG_CGI, url_encode(temp_hd->dependency_period), html_encode(temp_hd->dependency_period, FALSE));
+	printf("</TD>\n");
+
+	printf("<TD CLASS='%s'>", bg_class);
+	options = FALSE;
+	if(flag_isset(temp_hd->failure_options, OPT_UP) == TRUE) {
+		printf("Up");
+		options = TRUE;
+		}
+	if(flag_isset(temp_hd->failure_options, OPT_DOWN) == TRUE) {
+		printf("%sDown", (options == TRUE) ? ", " : "");
+		options = TRUE;
+		}
+	if(flag_isset(temp_hd->failure_options, OPT_UNREACHABLE) == TRUE) {
+		printf("%sUnreachable", (options == TRUE) ? ", " : "");
+		options = TRUE;
+		}
+	if(flag_isset(temp_hd->failure_options, OPT_PENDING) == TRUE) {
+		printf("%sPending", (options == TRUE) ? ", " : "");
+		options = TRUE;
+		}
+	printf("</TD>\n");
+
+	printf("</TR>\n");
+	}
+
+void display_hostdependencies(void) {
+	unsigned int i, printed = 0;
 
 	/* see if user is authorized to view hostdependency information... */
 	if(is_authorized_for_configuration_information(&current_authdata) == FALSE) {
@@ -2007,56 +2083,23 @@ void display_hostdependencies(void) {
 	printf("<TH CLASS='data'>Dependency Failure Options</TH>");
 	printf("</TR>\n");
 
-	/* check all the host dependencies... */
-	for(temp_hd = hostdependency_list; temp_hd != NULL; temp_hd = temp_hd->next)
-		if(((*to_expand) == '\0') || (!strcmp(to_expand, temp_hd->dependent_host_name)) || (!strcmp(to_expand, temp_hd->host_name))) {
+	/* print all host's dependencies... */
+	for(i = 0; i < num_objects.hosts; i++) {
+		objectlist *list;
+		host *h = &host_list[i];
 
-			if(odd) {
-				odd = 0;
-				bg_class = "dataOdd";
-				}
-			else {
-				odd = 1;
-				bg_class = "dataEven";
-				}
+		if(printed >= num_objects.hostescalations)
+			break;
 
-			printf("<TR CLASS='%s'>\n", bg_class);
-
-			printf("<TD CLASS='%s'><A HREF='%s?type=hosts&expand=%s'>%s</A></TD>", bg_class, CONFIG_CGI, url_encode(temp_hd->dependent_host_name), html_encode(temp_hd->dependent_host_name, FALSE));
-
-			printf("<TD CLASS='%s'><A HREF='%s?type=hosts&expand=%s'>%s</A></TD>", bg_class, CONFIG_CGI, url_encode(temp_hd->host_name), html_encode(temp_hd->host_name, FALSE));
-
-			printf("<TD CLASS='%s'>%s</TD>", bg_class, (temp_hd->dependency_type == NOTIFICATION_DEPENDENCY) ? "Notification" : "Check Execution");
-
-			printf("<TD CLASS='%s'>", bg_class);
-			if(temp_hd->dependency_period == NULL)
-				printf("&nbsp;");
-			else
-				printf("<A HREF='%s?type=timeperiods&expand=%s'>%s</A>", CONFIG_CGI, url_encode(temp_hd->dependency_period), html_encode(temp_hd->dependency_period, FALSE));
-			printf("</TD>\n");
-
-			printf("<TD CLASS='%s'>", bg_class);
-			options = FALSE;
-			if(temp_hd->fail_on_up == TRUE) {
-				printf("Up");
-				options = TRUE;
-				}
-			if(temp_hd->fail_on_down == TRUE) {
-				printf("%sDown", (options == TRUE) ? ", " : "");
-				options = TRUE;
-				}
-			if(temp_hd->fail_on_unreachable == TRUE) {
-				printf("%sUnreachable", (options == TRUE) ? ", " : "");
-				options = TRUE;
-				}
-			if(temp_hd->fail_on_pending == TRUE) {
-				printf("%sPending", (options == TRUE) ? ", " : "");
-				options = TRUE;
-				}
-			printf("</TD>\n");
-
-			printf("</TR>\n");
+		for(list = h->notify_deps; list; list = list->next) {
+			printed++;
+			display_hostdependency((hostdependency *)list->object_ptr);
 			}
+		for(list = h->exec_deps; list; list = list->next) {
+			printed++;
+			display_hostdependency((hostdependency *)list->object_ptr);
+			}
+		}
 
 	printf("</TABLE>\n");
 	printf("</DIV>\n");
@@ -2076,6 +2119,7 @@ void display_hostescalations(void) {
 	int odd = 0;
 	char *bg_class = "";
 	int contact = 0;
+	unsigned int i, printed = 0;
 
 	/* see if user is authorized to view hostgroup information... */
 	if(is_authorized_for_configuration_information(&current_authdata) == FALSE) {
@@ -2100,8 +2144,20 @@ void display_hostescalations(void) {
 	printf("<TH CLASS='data'>Escalation Options</TH>");
 	printf("</TR>\n");
 
-	/* check all the host escalations... */
-	for(temp_he = hostescalation_list; temp_he != NULL; temp_he = temp_he->next) if(((*to_expand) == '\0') || (!strcmp(to_expand, temp_he->host_name))) {
+	/* check all the hosts' escalations... */
+	for(i = 0; i < num_objects.hosts; i++) {
+		objectlist *list;
+		host *h = &host_list[i];
+
+		if(printed >= num_objects.hostescalations)
+			break;
+
+		if(*to_expand != '\0' && strcmp(to_expand, h->name))
+			continue;
+
+		for(list = h->escalation_list; list; list = list->next) {
+			temp_he = (hostescalation *)list->object_ptr;
+			printed++;
 
 			if(odd) {
 				odd = 0;
@@ -2160,15 +2216,15 @@ void display_hostescalations(void) {
 
 			printf("<TD CLASS='%s'>", bg_class);
 			options = FALSE;
-			if(temp_he->escalate_on_down == TRUE) {
+			if(flag_isset(temp_he->escalation_options, OPT_DOWN) == TRUE) {
 				printf("%sDown", (options == TRUE) ? ", " : "");
 				options = TRUE;
 				}
-			if(temp_he->escalate_on_unreachable == TRUE) {
+			if(flag_isset(temp_he->escalation_options, OPT_UNREACHABLE) == TRUE) {
 				printf("%sUnreachable", (options == TRUE) ? ", " : "");
 				options = TRUE;
 				}
-			if(temp_he->escalate_on_recovery == TRUE) {
+			if(flag_isset(temp_he->escalation_options, OPT_RECOVERY) == TRUE) {
 				printf("%sRecovery", (options == TRUE) ? ", " : "");
 				options = TRUE;
 				}
@@ -2178,6 +2234,7 @@ void display_hostescalations(void) {
 
 			printf("</TR>\n");
 			}
+		}
 
 	printf("</TABLE>\n");
 	printf("</DIV>\n");

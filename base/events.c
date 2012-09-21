@@ -31,55 +31,6 @@
 #include "../lib/squeue.h"
 
 
-extern int      test_scheduling;
-
-extern time_t   program_start;
-extern time_t   event_start;
-
-extern int      sigshutdown;
-extern int      sigrestart;
-
-extern int      interval_length;
-extern int      service_inter_check_delay_method;
-extern int      host_inter_check_delay_method;
-extern int      service_interleave_factor_method;
-extern int      max_host_check_spread;
-extern int      max_service_check_spread;
-
-extern int      check_reaper_interval;
-extern int      service_freshness_check_interval;
-extern int      host_freshness_check_interval;
-extern int      auto_rescheduling_interval;
-
-extern int      check_orphaned_services;
-extern int      check_orphaned_hosts;
-extern int      check_service_freshness;
-extern int      check_host_freshness;
-extern int      auto_reschedule_checks;
-
-extern int      retain_state_information;
-extern int      retention_update_interval;
-
-extern int      max_parallel_service_checks;
-extern int      currently_running_service_checks;
-
-extern int      aggregate_status_updates;
-extern int      status_update_interval;
-
-extern int      log_rotation_method;
-
-extern int      execute_service_checks;
-extern int      execute_host_checks;
-
-extern int      time_change_threshold;
-
-squeue_t *nagios_squeue = NULL; /* our scheduling queue */
-
-sched_info scheduling_info;
-extern iobroker_set *nagios_iobs;
-
-
-
 /******************************************************************/
 /************ EVENT SCHEDULING/HANDLING FUNCTIONS *****************/
 /******************************************************************/
@@ -100,11 +51,15 @@ void init_timing_loop(void) {
 	double max_inter_check_delay = 0.0;
 	struct timeval tv[9];
 	double runtime[9];
+	struct timeval now;
+	unsigned int fixed_hosts = 0, fixed_services = 0;
 
 	log_debug_info(DEBUGL_FUNCTIONS, 0, "init_timing_loop() start\n");
 
-	/* get the time right now */
-	time(&current_time);
+	/* get the time and seed the prng */
+	gettimeofday(&now, NULL);
+	current_time = now.tv_sec;
+	srand((now.tv_sec << 10) ^ now.tv_usec);
 
 
 	/******** GET BASIC HOST/SERVICE INFO  ********/
@@ -339,7 +294,7 @@ void init_timing_loop(void) {
 			 * hanging too long without being run.
 			 */
 			check_delay = temp_service->next_check - current_time;
-			if(check_delay > 0 && check_delay < (temp_service->check_interval * interval_length)) {
+			if(check_delay > 0 && check_delay < check_window(temp_service)) {
 				log_debug_info(DEBUGL_EVENTS, 2, "Service is already scheduled to be checked in the future: %s\n", ctime(&temp_service->next_check));
 				continue;
 				}
@@ -353,8 +308,20 @@ void init_timing_loop(void) {
 			log_debug_info(DEBUGL_EVENTS, 2, "CIB: %d, IBI: %d, TIB: %d, SIF: %d\n", current_interleave_block, interleave_block_index, total_interleave_blocks, scheduling_info.service_interleave_factor);
 			log_debug_info(DEBUGL_EVENTS, 2, "Mult factor: %d\n", mult_factor);
 
-			/* set the preferred next check time for the service */
+			/*
+			 * set the preferred next check time for the service
+			 * If we end up too far into the future, grab a random
+			 * time within the service's window instead.
+			 */
 			temp_service->next_check = (time_t)(current_time + (mult_factor * scheduling_info.service_inter_check_delay));
+			if(temp_service->next_check - current_time > check_window(temp_service)) {
+				log_debug_info(DEBUGL_EVENTS, 0, "  Fixing check time %lu secs too far away (%lu - %lu)\n",
+							   (temp_service->next_check - current_time) - check_window(temp_service),
+							   temp_service->next_check - current_time, check_window(temp_service));
+				fixed_services++;
+				temp_service->next_check = current_time + ranged_urand(0, check_window(temp_service));
+				log_debug_info(DEBUGL_EVENTS, 0, "  New check offset: %lu\n", temp_service->next_check - current_time);
+				}
 
 			log_debug_info(DEBUGL_EVENTS, 2, "Preferred Check Time: %lu --> %s", (unsigned long)temp_service->next_check, ctime(&temp_service->next_check));
 
@@ -397,7 +364,7 @@ void init_timing_loop(void) {
 			}
 
 		/* create a new service check event */
-		schedule_new_event(EVENT_SERVICE_CHECK, FALSE, temp_service->next_check, FALSE, 0, NULL, TRUE, (void *)temp_service, NULL, temp_service->check_options);
+		temp_service->next_check_event = schedule_new_event(EVENT_SERVICE_CHECK, FALSE, temp_service->next_check, FALSE, 0, NULL, TRUE, (void *)temp_service, NULL, temp_service->check_options);
 		}
 
 
@@ -492,8 +459,17 @@ void init_timing_loop(void) {
 			continue;
 			}
 
-		/* calculate preferred host check time */
+		/*
+		 * calculate preferred host check time.
+		 * If it's too far into the future, we grab a random time
+		 * within this host's max check window instead
+		 */
 		temp_host->next_check = (time_t)(current_time + (mult_factor * scheduling_info.host_inter_check_delay));
+		if(temp_host->next_check - current_time > check_window(temp_host)) {
+			log_debug_info(DEBUGL_EVENTS, 1, "Fixing check time (off by %lu)\n", (temp_host->next_check - current_time) - check_window(temp_host));
+			fixed_hosts++;
+			temp_host->next_check = current_time + ranged_urand(0, check_window(temp_host));
+			}
 
 		log_debug_info(DEBUGL_EVENTS, 2, "Preferred Check Time: %lu --> %s", (unsigned long)temp_host->next_check, ctime(&temp_host->next_check));
 
@@ -514,6 +490,8 @@ void init_timing_loop(void) {
 		mult_factor++;
 		}
 
+	log_debug_info(DEBUGL_EVENTS, 0, "Fixed scheduling for %u hosts and %u services\n", fixed_hosts, fixed_services);
+
 	if(test_scheduling == TRUE)
 		gettimeofday(&tv[7], NULL);
 
@@ -533,7 +511,7 @@ void init_timing_loop(void) {
 			}
 
 		/* schedule a new host check event */
-		schedule_new_event(EVENT_HOST_CHECK, FALSE, temp_host->next_check, FALSE, 0, NULL, TRUE, (void *)temp_host, NULL, temp_host->check_options);
+		temp_host->next_check_event = schedule_new_event(EVENT_HOST_CHECK, FALSE, temp_host->next_check, FALSE, 0, NULL, TRUE, (void *)temp_host, NULL, temp_host->check_options);
 		}
 
 	if(test_scheduling == TRUE)
@@ -562,8 +540,7 @@ void init_timing_loop(void) {
 		schedule_new_event(EVENT_HFRESHNESS_CHECK, TRUE, current_time + host_freshness_check_interval, TRUE, host_freshness_check_interval, NULL, TRUE, NULL, NULL, 0);
 
 	/* add a status save event */
-	if(aggregate_status_updates == TRUE)
-		schedule_new_event(EVENT_STATUS_SAVE, TRUE, current_time + status_update_interval, TRUE, status_update_interval, NULL, TRUE, NULL, NULL, 0);
+	schedule_new_event(EVENT_STATUS_SAVE, TRUE, current_time + status_update_interval, TRUE, status_update_interval, NULL, TRUE, NULL, NULL, 0);
 
 	/* add a log rotation event if necessary */
 	if(log_rotation_method != LOG_ROTATION_NONE)
@@ -613,7 +590,6 @@ void display_scheduling_info(void) {
 	float minimum_concurrent_checks1 = 0.0;
 	float minimum_concurrent_checks2 = 0.0;
 	float minimum_concurrent_checks = 0.0;
-	float max_reaper_interval = 0.0;
 	int suggestions = 0;
 
 	printf("Projected scheduling information for host and service checks\n");
@@ -684,24 +660,6 @@ void display_scheduling_info(void) {
 	printf("-----------------------\n");
 
 
-	/***** MAX REAPER INTERVAL RECOMMENDATION *****/
-
-	/* assume a 100% (2x) check burst for check reaper */
-	/* assume we want a max of 2k files in the result queue at any given time */
-	max_reaper_interval = floor(2000 * scheduling_info.service_inter_check_delay);
-	if(max_reaper_interval < 2.0)
-		max_reaper_interval = 2.0;
-	if(max_reaper_interval > 30.0)
-		max_reaper_interval = 30.0;
-	if((int)max_reaper_interval < check_reaper_interval) {
-		printf("* Value for 'check_result_reaper_frequency' should be <= %d seconds\n", (int)max_reaper_interval);
-		suggestions++;
-		}
-	if(check_reaper_interval < 2) {
-		printf("* Value for 'check_result_reaper_frequency' should be >= 2 seconds\n");
-		suggestions++;
-		}
-
 	/***** MINIMUM CONCURRENT CHECKS RECOMMENDATION *****/
 
 	/* first method (old) - assume a 100% (2x) service check burst for max concurrent checks */
@@ -742,8 +700,9 @@ int init_event_queue(void)
 {
 	unsigned int size;
 
-	size = scheduling_info.total_hosts + scheduling_info.total_services;
-	size += 4096 + (size / 100);
+	size = num_objects.hosts + num_objects.services;
+	if(size < 4096)
+		size = 4096;
 
 	nagios_squeue = squeue_create(size);
 	return 0;
@@ -755,7 +714,7 @@ timed_event *schedule_new_event(int event_type, int high_priority, time_t run_ti
 
 	log_debug_info(DEBUGL_FUNCTIONS, 0, "schedule_new_event()\n");
 
-	new_event = (timed_event *)malloc(sizeof(timed_event));
+	new_event = (timed_event *)calloc(1, sizeof(timed_event));
 	if(new_event != NULL) {
 		new_event->event_type = event_type;
 		new_event->event_data = event_data;
@@ -844,44 +803,45 @@ void remove_event(squeue_t *sq, timed_event *event) {
 	/* send event data to broker */
 	broker_timed_event(NEBTYPE_TIMEDEVENT_REMOVE, NEBFLAG_NONE, NEBATTR_NONE, event, NULL);
 #endif
-	if(sq && event)
+	if(!event)
+		return;
+
+	if(sq)
 		squeue_remove(sq, event->sq_event);
+
+	event->sq_event = NULL; /* mark this event as unscheduled */
 	}
 
 
 static int should_run_event(timed_event *temp_event)
 {
 	int run_event = TRUE;	/* default action is to execute the event */
-	int nudge_seconds = 5 + (rand() % 10);
+	int nudge_seconds = 0;
 
 	/* run a few checks before executing a service check... */
 	if(temp_event->event_type == EVENT_SERVICE_CHECK) {
 		service *temp_service = (service *)temp_event->event_data;
 
+		/* forced checks override normal check logic */
+		if((temp_service->check_options & CHECK_OPTION_FORCE_EXECUTION))
+			return TRUE;
+
 		/* don't run a service check if we're already maxed out on the number of parallel service checks...  */
 		if(max_parallel_service_checks != 0 && (currently_running_service_checks >= max_parallel_service_checks)) {
-			temp_service->next_check += nudge_seconds;
-			temp_event->run_time += nudge_seconds;
+			nudge_seconds = ranged_urand(5, 17);
 			logit(NSLOG_RUNTIME_WARNING, TRUE, "\tMax concurrent service checks (%d) has been reached.  Nudging %s:%s by %d seconds...\n", max_parallel_service_checks, temp_service->host_name, temp_service->description, nudge_seconds);
-			reschedule_event(nagios_squeue, temp_event);
-			return 0;
+			run_event = FALSE;
 		}
 
 		/* don't run a service check if active checks are disabled */
 		if(execute_service_checks == FALSE) {
-			temp_service->next_check = temp_service->last_check + (temp_service->check_interval * interval_length) + (rand() % 7);
-			temp_event->run_time = temp_service->next_check;
 			log_debug_info(DEBUGL_EVENTS | DEBUGL_CHECKS, 1, "We're not executing service checks right now, so we'll skip this event.\n");
-			reschedule_event(nagios_squeue, temp_event);
 			run_event = FALSE;
 		}
 
-		/* forced checks override normal check logic */
-		if((temp_service->check_options & CHECK_OPTION_FORCE_EXECUTION))
-			run_event = TRUE;
-
 		/* reschedule the check if we can't run it now */
 		if(run_event == FALSE) {
+			remove_event(nagios_squeue, temp_event);
 
 			if(nudge_seconds) {
 				/* We nudge the next check time when it is due to too many concurrent service checks */
@@ -916,10 +876,12 @@ static int should_run_event(timed_event *temp_event)
 
 		/* forced checks override normal check logic */
 		if((temp_host->check_options & CHECK_OPTION_FORCE_EXECUTION))
-			run_event = TRUE;
+			return TRUE;
 
 		/* reschedule the host check if we can't run it right now */
 		if(run_event == FALSE) {
+			remove_event(nagios_squeue, temp_event);
+
 			if(temp_host->state_type == SOFT_STATE && temp_host->current_state != STATE_OK)
 				temp_host->next_check = (time_t)(temp_host->next_check + (temp_host->retry_interval * interval_length));
 			else
@@ -1016,6 +978,13 @@ int event_execution_loop(void) {
 		if (tv_delta_msec(&now, event_runtime) > 100)
 			continue;
 
+		/* move on if we shouldn't run this event */
+		if(should_run_event(temp_event) == FALSE)
+			continue;
+
+		/* handle the event */
+		handle_timed_event(temp_event);
+
 		/*
 		 * we must remove the entry we've peeked, or
 		 * we'll keep getting the same one over and over.
@@ -1023,19 +992,13 @@ int event_execution_loop(void) {
 		 */
 		remove_event(nagios_squeue, temp_event);
 
-		/* handle high priority events */
-		if(temp_event->priority || should_run_event(temp_event)) {
-			/* handle the event */
-			handle_timed_event(temp_event);
+		/* reschedule the event if necessary */
+		if(temp_event->recurring == TRUE)
+			reschedule_event(nagios_squeue, temp_event);
 
-			/* reschedule the event if necessary */
-			if(temp_event->recurring == TRUE)
-				reschedule_event(nagios_squeue, temp_event);
-
-			/* else free memory associated with the event */
-			else
-				my_free(temp_event);
-		}
+		/* else free memory associated with the event */
+		else
+			my_free(temp_event);
 	}
 
 	log_debug_info(DEBUGL_FUNCTIONS, 0, "event_execution_loop() end\n");
@@ -1067,7 +1030,7 @@ int handle_timed_event(timed_event *event) {
 	/* get event latency */
 	gettimeofday(&tv, NULL);
 	event_runtime = squeue_event_runtime(event->sq_event);
-	latency = (double)(tv_delta_f(&tv, event_runtime));
+	latency = (double)(tv_delta_f(event_runtime, &tv));
 	if (latency < 0.0) /* events may run up to 0.1 seconds early */
 		latency = 0.0;
 
@@ -1081,7 +1044,6 @@ int handle_timed_event(timed_event *event) {
 			log_debug_info(DEBUGL_EVENTS, 0, "** Service Check Event ==> Host: '%s', Service: '%s', Options: %d, Latency: %f sec\n", temp_service->host_name, temp_service->description, event->event_options, latency);
 
 			/* run the service check */
-			temp_service = (service *)event->event_data;
 			run_scheduled_service_check(temp_service, event->event_options, latency);
 			break;
 
@@ -1092,7 +1054,6 @@ int handle_timed_event(timed_event *event) {
 			log_debug_info(DEBUGL_EVENTS, 0, "** Host Check Event ==> Host: '%s', Options: %d, Latency: %f sec\n", temp_host->name, event->event_options, latency);
 
 			/* run the host check */
-			temp_host = (host *)event->event_data;
 			perform_scheduled_host_check(temp_host, event->event_options, latency);
 			break;
 
@@ -1346,7 +1307,7 @@ void compensate_for_system_time_change(unsigned long last_time, unsigned long cu
 	/* adjust host timestamps */
 	for(temp_host = host_list; temp_host != NULL; temp_host = temp_host->next) {
 
-		adjust_timestamp_for_time_change(last_time, current_time, time_difference, &temp_host->last_host_notification);
+		adjust_timestamp_for_time_change(last_time, current_time, time_difference, &temp_host->last_notification);
 		adjust_timestamp_for_time_change(last_time, current_time, time_difference, &temp_host->last_check);
 		adjust_timestamp_for_time_change(last_time, current_time, time_difference, &temp_host->next_check);
 		adjust_timestamp_for_time_change(last_time, current_time, time_difference, &temp_host->last_state_change);
@@ -1354,7 +1315,7 @@ void compensate_for_system_time_change(unsigned long last_time, unsigned long cu
 		adjust_timestamp_for_time_change(last_time, current_time, time_difference, &temp_host->last_state_history_update);
 
 		/* recalculate next re-notification time */
-		temp_host->next_host_notification = get_next_host_notification_time(temp_host, temp_host->last_host_notification);
+		temp_host->next_notification = get_next_host_notification_time(temp_host, temp_host->last_notification);
 
 		/* update the status data */
 		update_host_status(temp_host, FALSE);

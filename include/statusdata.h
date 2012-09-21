@@ -80,7 +80,7 @@ typedef struct hoststatus_struct {
 	int     problem_has_been_acknowledged;
 	int     acknowledgement_type;
 	int     current_notification_number;
-	int     accept_passive_host_checks;
+	int     accept_passive_checks;
 	int     event_handler_enabled;
 	int     checks_enabled;
 	int     flap_detection_enabled;
@@ -89,9 +89,8 @@ typedef struct hoststatus_struct {
 	double  latency;
 	double  execution_time;
 	int     scheduled_downtime_depth;
-	int     failure_prediction_enabled;
 	int     process_performance_data;
-	int     obsess_over_host;
+	int     obsess;
 	struct  hoststatus_struct *next;
 	struct  hoststatus_struct *nexthash;
 	} hoststatus;
@@ -131,7 +130,7 @@ typedef struct servicestatus_struct {
 	int     problem_has_been_acknowledged;
 	int     acknowledgement_type;
 	int     current_notification_number;
-	int     accept_passive_service_checks;
+	int     accept_passive_checks;
 	int     event_handler_enabled;
 	int     flap_detection_enabled;
 	int     is_flapping;
@@ -139,9 +138,8 @@ typedef struct servicestatus_struct {
 	double  latency;
 	double  execution_time;
 	int     scheduled_downtime_depth;
-	int     failure_prediction_enabled;
 	int     process_performance_data;
-	int     obsess_over_service;
+	int     obsess;
 	struct  servicestatus_struct *next;
 	struct  servicestatus_struct *nexthash;
 	} servicestatus;
@@ -160,16 +158,16 @@ typedef struct servicestatus_struct {
 /**************************** HOST STATES ****************************/
 
 #define HOST_PENDING			1
-#define HOST_UP				2
-#define HOST_DOWN			4
-#define HOST_UNREACHABLE		8
+#define SD_HOST_UP				2
+#define SD_HOST_DOWN			4
+#define SD_HOST_UNREACHABLE		8
 
 /* Convert the (historically ordered) host states into a notion of "urgency".
 	  This is defined as, in ascending order:
-		HOST_UP			(business as usual)
+		SD_HOST_UP			(business as usual)
 		HOST_PENDING		(waiting for - supposedly first - check result)
-		HOST_UNREACHABLE	(a problem, but likely not its cause)
-		HOST_DOWN		(look here!!)
+		SD_HOST_UNREACHABLE	(a problem, but likely not its cause)
+		SD_HOST_DOWN		(look here!!)
 	  The exact values are irrelevant, so I try to make the conversion as
 	  CPU-efficient as possible: */
 #define HOST_URGENCY(hs)		((hs)|(((hs)&0x5)<<1))
