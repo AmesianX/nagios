@@ -354,6 +354,7 @@ int xodtemplate_read_config_data(char *main_config_file, int options) {
 #ifdef NSCGI
 	/* CGIs process only one file - the cached objects file */
 	result = xodtemplate_process_config_file(object_cache_file, options);
+	logit(NSLOG_CONFIG_ERROR, TRUE,"DEBUG - xod_template_process_config_file : result=%d\n", result);
 #endif
 	timing_point("Done parsing config files\n");
 

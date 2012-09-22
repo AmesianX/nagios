@@ -31,6 +31,7 @@ char            main_config_file[MAX_FILENAME_LENGTH];
 char            log_file[MAX_FILENAME_LENGTH];
 char            log_archive_path[MAX_FILENAME_LENGTH];
 char            command_file[MAX_FILENAME_LENGTH];
+char		cgi_debug_file[MAX_FILENAME_LENGTH];
 
 char            physical_html_path[MAX_FILENAME_LENGTH];
 char            physical_images_path[MAX_FILENAME_LENGTH];
@@ -113,8 +114,25 @@ char *encoded_html_string = NULL;
  * a no-op anyway, so it's not a big issue
  */
 void logit(int data_type, int display, const char *fmt, ...) {
-	return;
-	}
+        va_list ap;
+        char *buffer = NULL;
+	FILE *fp = NULL;
+	time_t tm;
+
+	if (cgi_debug_file[0] == '\0') return;
+
+        va_start(ap, fmt);
+        if(vasprintf(&buffer, fmt, ap) > 0) {
+		time(&tm);
+		fp = fopen(cgi_debug_file,"a+");
+ 		/* fp = fopen("/tmp/nagios_cgi_debug.log","a+"); */
+		if (fp) { fprintf(fp,"%ld %s",tm,buffer); fclose(fp); }
+                /* write_to_logs_and_console(buffer, data_type, display); */
+                free(buffer);
+                }
+        va_end(ap);
+        }
+
 int log_debug_info(int leve, int verbosity, const char *fmt, ...) {
 	return 0;
 	}
@@ -142,6 +160,7 @@ void reset_cgi_vars(void) {
 	strcpy(url_media_path, "");
 	strcpy(url_images_path, "");
 
+	cgi_debug_file[0] = '\0';
 	strcpy(log_file, "");
 	strcpy(log_archive_path, DEFAULT_LOG_ARCHIVE_PATH);
 	if(log_archive_path[strlen(log_archive_path) - 1] != '/' && strlen(log_archive_path) < sizeof(log_archive_path) - 2)
@@ -268,7 +287,13 @@ int read_cgi_config_file(char *filename) {
 		if(var == NULL || val == NULL)
 			continue;
 
-		if(!strcmp(var, "main_config_file")) {
+		if(!strcmp(var, "cgi_debug_file")) {
+			strncpy(cgi_debug_file, val, sizeof(cgi_debug_file));
+			cgi_debug_file[sizeof(cgi_debug_file) -1] = '\0';
+			strip(cgi_debug_file);
+			}
+
+		else if(!strcmp(var, "main_config_file")) {
 			strncpy(main_config_file, val, sizeof(main_config_file));
 			main_config_file[sizeof(main_config_file) - 1] = '\x0';
 			strip(main_config_file);

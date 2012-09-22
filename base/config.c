@@ -2,7 +2,6 @@
  *
  * CONFIG.C - Configuration input and verification routines for Nagios
  *
- *
  * License:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -54,7 +53,6 @@ static command *find_bang_command(char *name)
 }
 
 
-
 /******************************************************************/
 /************** CONFIGURATION INPUT FUNCTIONS *********************/
 /******************************************************************/
@@ -92,7 +90,6 @@ int read_main_config_file(char *main_config_file) {
 	mmapfile *thefile = NULL;
 	int current_line = 0;
 	int error = FALSE;
-	char *modptr = NULL;
 	char *argptr = NULL;
 	DIR *tmpdir = NULL;
 	nagios_macros *mac;
@@ -131,29 +128,13 @@ int read_main_config_file(char *main_config_file) {
 		if(input[0] == '\x0' || input[0] == '#')
 			continue;
 
-		/* get the variable name */
-		if((temp_ptr = my_strtok(input, "=")) == NULL) {
-			(void)asprintf(&error_message, "NULL variable");
-			error = TRUE;
-			break;
-			}
-		if((variable = (char *)strdup(temp_ptr)) == NULL) {
-			(void)asprintf(&error_message, "malloc() error");
+		/* get the variable and value */
+		if (!my_str2parts(input,'=', &variable,&value)) {
+			(void)asprintf(&error_message, "bad variable declaration: %s", input);
 			error = TRUE;
 			break;
 			}
 
-		/* get the value */
-		if((temp_ptr = my_strtok(NULL, "\n")) == NULL) {
-			(void)asprintf(&error_message, "NULL value");
-			error = TRUE;
-			break;
-			}
-		if((value = (char *)strdup(temp_ptr)) == NULL) {
-			(void)asprintf(&error_message, "malloc() error");
-			error = TRUE;
-			break;
-			}
 		strip(variable);
 		strip(value);
 
@@ -576,7 +557,6 @@ int read_main_config_file(char *main_config_file) {
 				break;
 				}
 			}
-
         
 		else if(!strcmp(variable,"service_check_timeout_state")){
 
@@ -1056,11 +1036,24 @@ int read_main_config_file(char *main_config_file) {
 
 
 		else if(!strcmp(variable, "broker_module")) {
-			modptr = strtok(value, " \n");
-			argptr = strtok(NULL, "\n");
+			/* WAS:	modptr = strtok(value, " \n");
+				argptr = strtok(NULL, "\n"); */
+			if ((argptr = strstr(value, " \n"))!=NULL) {
+			      *argptr='\0';
+			      argptr++;
+			      argptr++;
+			      if ((temp_ptr = strchr(argptr,'\n'))!=NULL)
+				    *temp_ptr='\0';
 #ifdef USE_EVENT_BROKER
-			neb_add_module(modptr, argptr, TRUE);
+			      /* input mod (value) and arg (argptr) are
+			       * strduped in neb_add_module already */
+			      neb_add_module(value, argptr, TRUE);
 #endif
+			      if (temp_ptr!=NULL) *temp_ptr='\n';
+			      argptr--;
+			      argptr--;
+			      *argptr=' ';
+			      }
 			}
 
 		else if(!strcmp(variable, "use_regexp_matching"))
@@ -1129,21 +1122,21 @@ int read_main_config_file(char *main_config_file) {
 			continue;
 		else if(!strcmp(variable, "perfdata_timeout"))
 			continue;
-		else if(strstr(variable, "host_perfdata") == variable)
+		else if(!strcmp(variable, "host_perfdata"))
 			continue;
-		else if(strstr(variable, "service_perfdata") == variable)
+		else if(!strcmp(variable, "service_perfdata"))
 			continue;
-		else if(strstr(variable, "host_saveddata") == variable)
+		else if(!strcmp(variable, "host_saveddata"))
 			continue;
-		else if(strstr(variable, "service_saveddata") == variable)
+		else if(!strcmp(variable, "service_saveddata"))
 			continue;
-		else if(strstr(input, "cfg_file=") == input || strstr(input, "cfg_dir=") == input)
+		else if(!strcmp(variable, "cfg_file") || !strcmp(input, "cfg_dir"))
 			continue;
-		else if(strstr(input, "state_retention_file=") == input)
+		else if(!strcmp(variable, "state_retention_file"))
 			continue;
-		else if(strstr(input, "object_cache_file=") == input)
+		else if(!strcmp(variable, "object_cache_file"))
 			object_cache_file = (char *)strdup(value);
-		else if(strstr(input, "precached_object_file=") == input)
+		else if(!strcmp(variable, "precached_object_file"))
 			object_precache_file = (char *)strdup(value);
 		else if(!strcmp(variable, "allow_empty_hostgroup_assignment")) {
 			allow_empty_hostgroup_assignment = (atoi(value) > 0) ? TRUE : FALSE;
@@ -1151,9 +1144,10 @@ int read_main_config_file(char *main_config_file) {
 
 		/* we don't know what this variable is... */
 		else {
-			asprintf(&error_message, "UNKNOWN VARIABLE");
+			/* asprintf(&error_message, "UNKNOWN VARIABLE");
 			error = TRUE;
 			break;
+			*/
 			}
 
 		}
@@ -1168,7 +1162,6 @@ int read_main_config_file(char *main_config_file) {
 		free_child_process_memory = (use_large_installation_tweaks == TRUE) ? FALSE : TRUE;
 	if(child_processes_fork_twice == -1)
 		child_processes_fork_twice = (use_large_installation_tweaks == TRUE) ? FALSE : TRUE;
-
 
 	/* handle errors */
 	if(error == TRUE) {
@@ -1197,14 +1190,11 @@ int read_main_config_file(char *main_config_file) {
 	return OK;
 	}
 
-
-
 /* processes macros in resource file */
 int read_resource_file(char *resource_file) {
 	char *input = NULL;
 	char *variable = NULL;
 	char *value = NULL;
-	char *temp_ptr = NULL;
 	mmapfile *thefile = NULL;
 	int current_line = 1;
 	int error = FALSE;
@@ -1235,24 +1225,9 @@ int read_resource_file(char *resource_file) {
 
 		strip(input);
 
-		/* get the variable name */
-		if((temp_ptr = my_strtok(input, "=")) == NULL) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: NULL variable - Line %d of resource file '%s'", current_line, resource_file);
-			error = TRUE;
-			break;
-			}
-		if((variable = (char *)strdup(temp_ptr)) == NULL) {
-			error = TRUE;
-			break;
-			}
-
-		/* get the value */
-		if((temp_ptr = my_strtok(NULL, "\n")) == NULL) {
-			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: NULL variable value - Line %d of resource file '%s'", current_line, resource_file);
-			error = TRUE;
-			break;
-			}
-		if((value = (char *)strdup(temp_ptr)) == NULL) {
+		/* get the variable and value pair */
+		if (!my_str2parts(input,'=', &variable,&value)) {
+			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Bad variable declaration - Line %d of resource file '%s'", current_line, resource_file);
 			error = TRUE;
 			break;
 			}
@@ -1287,11 +1262,7 @@ int read_resource_file(char *resource_file) {
 	return OK;
 	}
 
-
-
-
-
-
+	
 /****************************************************************/
 /**************** CONFIG VERIFICATION FUNCTIONS *****************/
 /****************************************************************/
@@ -1306,16 +1277,15 @@ int pre_flight_check(void) {
 	int temp_path_fd = -1;
 
 
-	if(test_scheduling == TRUE)
-		gettimeofday(&tv[0], NULL);
+        if(test_scheduling == TRUE)
+                gettimeofday(&tv[0], NULL);
 
-	/********************************************/
-	/* check object relationships               */
-	/********************************************/
+        /********************************************/
+        /* check object relationships               */
+        /********************************************/
 	pre_flight_object_check(&warnings, &errors);
 	if(test_scheduling == TRUE)
 		gettimeofday(&tv[1], NULL);
-
 
 	/********************************************/
 	/* check for circular paths between hosts   */
@@ -1330,6 +1300,7 @@ int pre_flight_check(void) {
 	/********************************************/
 	if(verify_config)
 		printf("Checking global event handlers...\n");
+
 	if(global_host_event_handler != NULL) {
 		global_host_event_handler_ptr = find_bang_command(global_host_event_handler);
 		if (global_host_event_handler_ptr == NULL) {
@@ -1337,6 +1308,7 @@ int pre_flight_check(void) {
 			errors++;
 			}
 		}
+
 	if(global_service_event_handler != NULL) {
 		global_service_event_handler_ptr = find_bang_command(global_service_event_handler);
 		if (global_service_event_handler_ptr == NULL) {
@@ -1345,12 +1317,12 @@ int pre_flight_check(void) {
 			}
 		}
 
-
 	/**************************************************/
 	/* check obsessive processor commands...          */
 	/**************************************************/
 	if(verify_config)
 		printf("Checking obsessive compulsive processor commands...\n");
+
 	if(ocsp_command != NULL) {
 		ocsp_command_ptr = find_bang_command(ocsp_command);
 		if (!ocsp_command_ptr) {
@@ -1364,7 +1336,6 @@ int pre_flight_check(void) {
 		ochp_command_ptr = find_bang_command(ochp_command);
 		errors += ochp_command_ptr == NULL;
 		}
-
 
 	/**************************************************/
 	/* check various settings...                      */
@@ -1433,8 +1404,6 @@ int pre_flight_check(void) {
 	return (errors > 0) ? ERROR : OK;
 	}
 
-
-
 /* do a pre-flight check to make sure object relationships make sense */
 int pre_flight_object_check(int *w, int *e) {
 	contact *temp_contact = NULL;
@@ -1457,7 +1426,6 @@ int pre_flight_object_check(int *w, int *e) {
 	int warnings = 0;
 	int errors = 0;
 
-
 #ifdef TEST
 	void *ptr = NULL;
 	char *buf1 = "";
@@ -1471,7 +1439,6 @@ int pre_flight_object_check(int *w, int *e) {
 		printf("FOUND ESCALATION FOR HOST '%s': %d-%d/%d, PTR=%p\n", buf1, temp_he->first_notification, temp_he->last_notification, temp_he->notification_interval, ptr);
 		}
 #endif
-
 
 	/*****************************************/
 	/* check each service...                 */
@@ -1555,8 +1522,6 @@ int pre_flight_object_check(int *w, int *e) {
 
 	if(verify_config)
 		printf("\tChecked %d services.\n", total_objects);
-
-
 
 	/*****************************************/
 	/* check all hosts...                    */
@@ -1658,10 +1623,8 @@ int pre_flight_object_check(int *w, int *e) {
 			}
 		}
 
-
 	if(verify_config)
 		printf("\tChecked %d hosts.\n", total_objects);
-
 
 	/*****************************************/
 	/* check each host group...              */
@@ -1699,7 +1662,6 @@ int pre_flight_object_check(int *w, int *e) {
 	if(verify_config)
 		printf("\tChecked %d host groups.\n", total_objects);
 
-
 	/*****************************************/
 	/* check each service group...           */
 	/*****************************************/
@@ -1735,8 +1697,6 @@ int pre_flight_object_check(int *w, int *e) {
 
 	if(verify_config)
 		printf("\tChecked %d service groups.\n", total_objects);
-
-
 
 	/*****************************************/
 	/* check all contacts...                 */
@@ -1833,8 +1793,6 @@ int pre_flight_object_check(int *w, int *e) {
 	if(verify_config)
 		printf("\tChecked %d contacts.\n", total_objects);
 
-
-
 	/*****************************************/
 	/* check each contact group...           */
 	/*****************************************/
@@ -1893,7 +1851,6 @@ int pre_flight_object_check(int *w, int *e) {
 		printf("\tChecked %d commands.\n", total_objects);
 
 
-
 	/*****************************************/
 	/* check all timeperiods...              */
 	/*****************************************/
@@ -1926,8 +1883,6 @@ int pre_flight_object_check(int *w, int *e) {
 
 	if(verify_config)
 		printf("\tChecked %d time periods.\n", total_objects);
-
-
 
 	/* update warning and error count */
 	*w += warnings;
@@ -2133,7 +2088,8 @@ int pre_flight_circular_check(int *w, int *e) {
 
 	for (i = 0; i < ARRAY_SIZE(ary); i++) {
 		if (!(ary[i] = calloc(1, alloc))) {
-			while (--i >= 0) {
+			while (i) {
+				i--;
 				my_free(ary[i]);
 				}
 			logit(NSLOG_CONFIG_ERROR, TRUE, "Error: Unable to allocate memory for circular path checks.\n");
@@ -2200,4 +2156,3 @@ int pre_flight_circular_check(int *w, int *e) {
 
 	return (errors > 0) ? ERROR : OK;
 	}
-

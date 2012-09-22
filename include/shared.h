@@ -36,6 +36,7 @@ struct object_count {
 extern struct object_count num_objects;
 
 extern void timing_point(const char *fmt, ...); /* print a message and the time since the first message */
+extern int my_str2parts(const char*, char, char**, char**);
 extern char *my_strtok(char *buffer, char *tokens);
 extern char *my_strsep(char **stringp, const char *delim);
 extern mmapfile *mmap_fopen(char *filename);
