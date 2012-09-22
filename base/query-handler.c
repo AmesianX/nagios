@@ -10,10 +10,11 @@ struct query_handler {
 	const char *name; /* also "address" of this handler. Must be unique */
 	unsigned int options;
 	qh_handler handler;
+	struct query_handler *next_qh;
 };
 
 static struct query_handler *qhandlers;
-static int qh_listen_sock; /* the listening socket */
+static int qh_listen_sock = -1; /* the listening socket */
 static unsigned int qh_running;
 unsigned int qh_max_running = 0; /* defaults to unlimited */
 static dkhash_table *qh_table;
@@ -55,8 +56,13 @@ static int qh_input(int sd, int events, void *ioc_)
 			return 0;
 		}
 
+		/*
+		 * @todo: Stash the iocache and the socket in some
+		 * addressable list so we can release them on deinit
+		 */
 		if(iobroker_register(nagios_iobs, nsd, ioc, qh_input) < 0) {
 			logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: Failed to register query input socket %d with I/O broker: %s\n", nsd, strerror(errno));
+			iocache_destroy(ioc);
 			close(nsd);
 			return 0;
 		}
@@ -85,6 +91,9 @@ static int qh_input(int sd, int events, void *ioc_)
 		 * to the handler
 		 */
 		buf = iocache_use_delim(ioc, "\0", 1, &len);
+		if(!buf)
+			return 0;
+
 		if(*buf != '@') {
 			/* bad request, so nuke the socket */
 			nsock_printf(sd, "400: Bad request");
@@ -127,6 +136,7 @@ int qh_deregister_handler(const char *name)
 int qh_register_handler(const char *name, unsigned int options, qh_handler handler)
 {
 	struct query_handler *qh;
+	int result;
 
 	if(!name || !handler)
 		return -1;
@@ -137,24 +147,46 @@ int qh_register_handler(const char *name, unsigned int options, qh_handler handl
 
 	/* names must be unique */
 	if(qh_find_handler(name)) {
+		logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: A query handler named '%s' already exists\n", name);
 		return -1;
 	}
 
 	if (!(qh = calloc(1, sizeof(*qh)))) {
+		logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: Failed to allocate memory for query handler '%s'\n", name);
 		return -errno;
 	}
 
 	qh->name = name;
 	qh->handler = handler;
 	qh->options = options;
+	qh->next_qh = qhandlers;
 	qhandlers = qh;
 
-	if(dkhash_insert(qh_table, qh->name, NULL, qh) < 0) {
-		logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: Failed to register query handler '%s': %s\n", name, strerror(errno));
+	result = dkhash_insert(qh_table, qh->name, NULL, qh);
+	if(result < 0) {
+		logit(NSLOG_RUNTIME_ERROR, TRUE,
+			  "Error: Failed to insert query handler '%s' (%p) into hash table %p (%d): %s\n",
+			  name, qh, qh_table, result, strerror(errno));
 		free(qh);
+		return result;
 	}
 
 	return 0;
+}
+
+void qh_deinit(const char *path)
+{
+	struct query_handler *qh, *next;
+
+	for(qh = qhandlers; qh; qh = next) {
+		next = qh->next_qh;
+		free(qh);
+	}
+
+	if(!path)
+		return;
+
+	unlink(path);
 }
 
 int qh_init(const char *path)
@@ -164,8 +196,11 @@ int qh_init(const char *path)
 	if(qh_listen_sock >= 0)
 		iobroker_close(nagios_iobs, qh_listen_sock);
 
-	if(!path) /* not configured, so do nothing */
+	if(!path) {
+		/* not configured, so do nothing */
+		logit(NSLOG_INFO_MESSAGE, TRUE, "Query socket not enabled. Set 'query_socket=</path/to/query-socket>' in config (and stop whining, Robin).\n");
 		return 0;
+	}
 
 	errno = 0;
 	qh_listen_sock = nsock_unix(path, 022, NSOCK_TCP | NSOCK_UNLINK);
