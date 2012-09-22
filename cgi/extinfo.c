@@ -56,8 +56,6 @@ extern comment           *comment_list;
 extern scheduled_downtime  *scheduled_downtime_list;
 extern hoststatus *hoststatus_list;
 extern servicestatus *servicestatus_list;
-extern hostgroup *hostgroup_list;
-extern servicegroup *servicegroup_list;
 
 
 #define MAX_MESSAGE_BUFFER		4096
