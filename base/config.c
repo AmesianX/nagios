@@ -1410,7 +1410,6 @@ int pre_flight_object_check(int *w, int *e) {
 	commandsmember *temp_commandsmember = NULL;
 	contactgroup *temp_contactgroup = NULL;
 	contactsmember *temp_contactsmember = NULL;
-	contactgroupsmember *temp_contactgroupsmember = NULL;
 	host *temp_host = NULL;
 	host *temp_host2 = NULL;
 	hostsmember *temp_hostsmember = NULL;
@@ -1574,34 +1573,6 @@ int pre_flight_object_check(int *w, int *e) {
 
 			/* save the pointer to the check timeperiod for later */
 			temp_host->check_period_ptr = temp_timeperiod;
-			}
-
-		/* check all contacts */
-		for(temp_contactsmember = temp_host->contacts; temp_contactsmember != NULL; temp_contactsmember = temp_contactsmember->next) {
-
-			temp_contact = find_contact(temp_contactsmember->contact_name);
-
-			if(temp_contact == NULL) {
-				logit(NSLOG_VERIFICATION_ERROR, TRUE, "Error: Contact '%s' specified in host '%s' is not defined anywhere!", temp_contactsmember->contact_name, temp_host->name);
-				errors++;
-				}
-
-			/* save the contact pointer for later */
-			temp_contactsmember->contact_ptr = temp_contact;
-			}
-
-		/* check all contact groups */
-		for(temp_contactgroupsmember = temp_host->contact_groups; temp_contactgroupsmember != NULL; temp_contactgroupsmember = temp_contactgroupsmember->next) {
-
-			temp_contactgroup = find_contactgroup(temp_contactgroupsmember->group_name);
-
-			if(temp_contactgroup == NULL) {
-				logit(NSLOG_VERIFICATION_ERROR, TRUE, "Error: Contact group '%s' specified in host '%s' is not defined anywhere!", temp_contactgroupsmember->group_name, temp_host->name);
-				errors++;
-				}
-
-			/* save the contact group pointer for later */
-			temp_contactgroupsmember->group_ptr = temp_contactgroup;
 			}
 
 		/* check to see if there is at least one contact/group */
@@ -2149,7 +2120,7 @@ int pre_flight_circular_check(int *w, int *e) {
 	for (i = 0; i < ARRAY_SIZE(ary); i++)
 		memset(ary[i], 0, alloc);
 	for(i = 0; i < num_objects.servicedependencies; i++) {
-		temp_sd = &servicedependency_list[i];
+		temp_sd = servicedependency_ary[i];
 		dep_type = temp_sd->dependency_type;
 		/*
 		 * this shouldn't happen, but it can in case dependencies are
@@ -2166,7 +2137,7 @@ int pre_flight_circular_check(int *w, int *e) {
 	for (i = 0; i < ARRAY_SIZE(ary); i++)
 		memset(ary[i], 0, alloc);
 	for(i = 0; i < num_objects.hostdependencies; i++) {
-		temp_hd = &hostdependency_list[i];
+		temp_hd = hostdependency_ary[i];
 		dep_type = temp_hd->dependency_type;
 		/* see above */
 		if(dep_type < 1 || dep_type > ARRAY_SIZE(ary))
