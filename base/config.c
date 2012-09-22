@@ -1122,21 +1122,21 @@ int read_main_config_file(char *main_config_file) {
 			continue;
 		else if(!strcmp(variable, "perfdata_timeout"))
 			continue;
-		else if(strstr(variable, "host_perfdata") == variable)
+		else if(!strcmp(variable, "host_perfdata"))
 			continue;
-		else if(strstr(variable, "service_perfdata") == variable)
+		else if(!strcmp(variable, "service_perfdata"))
 			continue;
-		else if(strstr(variable, "host_saveddata") == variable)
+		else if(!strcmp(variable, "host_saveddata"))
 			continue;
-		else if(strstr(variable, "service_saveddata") == variable)
+		else if(!strcmp(variable, "service_saveddata"))
 			continue;
-		else if(strstr(input, "cfg_file=") == input || strstr(input, "cfg_dir=") == input)
+		else if(!strcmp(variable, "cfg_file") || !strcmp(input, "cfg_dir"))
 			continue;
-		else if(strstr(input, "state_retention_file=") == input)
+		else if(!strcmp(variable, "state_retention_file"))
 			continue;
-		else if(strstr(input, "object_cache_file=") == input)
+		else if(!strcmp(variable, "object_cache_file"))
 			object_cache_file = (char *)strdup(value);
-		else if(strstr(input, "precached_object_file=") == input)
+		else if(!strcmp(variable, "precached_object_file"))
 			object_precache_file = (char *)strdup(value);
 		else if(!strcmp(variable, "allow_empty_hostgroup_assignment")) {
 			allow_empty_hostgroup_assignment = (atoi(value) > 0) ? TRUE : FALSE;
@@ -1144,9 +1144,10 @@ int read_main_config_file(char *main_config_file) {
 
 		/* we don't know what this variable is... */
 		else {
-			asprintf(&error_message, "UNKNOWN VARIABLE");
+			/* asprintf(&error_message, "UNKNOWN VARIABLE");
 			error = TRUE;
 			break;
+			*/
 			}
 
 		}
