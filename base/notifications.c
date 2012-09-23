@@ -748,7 +748,9 @@ int notify_contact_of_service(nagios_macros *mac, contact *cntct, service *svc, 
 
 		/* get the command name */
 		command_name = (char *)strdup(temp_commandsmember->command);
-		command_name_ptr = strtok(command_name, "!");
+		command_name_ptr = strchr(command_name,'!');
+		if (strchr(command_name_ptr,'!')!=NULL)
+			*(strchr(command_name_ptr,'!'))='\0';
 
 		/* run the notification command... */
 
@@ -1652,7 +1654,9 @@ int notify_contact_of_host(nagios_macros *mac, contact *cntct, host *hst, int ty
 
 		/* get the command name */
 		command_name = (char *)strdup(temp_commandsmember->command);
-		command_name_ptr = strtok(command_name, "!");
+                command_name_ptr = strchr(command_name,'!');
+		if (strchr(command_name_ptr,'!')!=NULL) 
+			*(strchr(command_name_ptr,'!'))='\0';
 
 		/* run the notification command... */
 

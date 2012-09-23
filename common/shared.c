@@ -71,7 +71,10 @@ int my_str2parts(const char* input, char separator, char** part1, char** part2) 
 	return 1;
 	}
 
-/* fix the problem with strtok() skipping empty options between tokens */
+/* fix the problem with strtok() skipping empty options between tokens
+ * this function is not thread-safe just like original strtok,
+ * use my_strsep and my_str2parts if you need a thread-safe replacement
+ */
 char *my_strtok(char *buffer, char *tokens) {
 	char *token_position = NULL;
 	char *sequence_head = NULL;

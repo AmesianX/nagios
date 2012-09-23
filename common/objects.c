@@ -104,7 +104,7 @@ struct flag_map host_flag_map[] = {
 const char *opts2str(int opts, struct flag_map *map, char ok_char)
 {
 	int i, pos = 0;
-	static char buf[16];
+	char buf[16];
 
 	if(!opts)
 		return "n";
@@ -2954,7 +2954,7 @@ int free_object_data(void) {
 #ifndef NSCGI
 static const char *timerange2str(const timerange *tr)
 {
-	static char str[12];
+	char str[12];
 	int sh, sm, eh, em;
 
 	if(!tr)

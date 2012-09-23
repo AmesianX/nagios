@@ -31,7 +31,7 @@
 #include "../include/cgiutils.h"
 #endif
 
-static char *macro_x_names[MACRO_X_COUNT]; /* the macro names */
+char *macro_x_names[MACRO_X_COUNT]; /* the macro names */
 char *macro_user[MAX_USER_MACROS]; /* $USERx$ macros */
 
 struct macro_key_code {
