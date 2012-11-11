@@ -163,12 +163,14 @@ int read_main_config_file(char *main_config_file) {
 
 			/* save the macro */
 			my_free(mac->x[MACRO_RESOURCEFILE]);
-			mac->x[MACRO_RESOURCEFILE] = (char *)strdup(value);
+			mac->x[MACRO_RESOURCEFILE] = nspath_absolute(value, config_file_dir);
 
 			/* process the resource file */
-			read_resource_file(value);
+			read_resource_file(mac->x[MACRO_RESOURCEFILE]);
 			}
 
+		else if(!strcmp(variable, "loadctl_options"))
+			error = set_loadctl_options(value, strlen(value)) != OK;
 		else if(!strcmp(variable, "check_workers"))
 			num_check_workers = atoi(value);
 		else if(!strcmp(variable, "query_socket"))
@@ -182,7 +184,7 @@ int read_main_config_file(char *main_config_file) {
 				}
 
 			my_free(log_file);
-			log_file = (char *)strdup(value);
+			log_file = nspath_absolute(value, config_file_dir);
 
 			/* save the macro */
 			my_free(mac->x[MACRO_LOGFILE]);
@@ -204,7 +206,7 @@ int read_main_config_file(char *main_config_file) {
 				}
 
 			my_free(debug_file);
-			debug_file = (char *)strdup(value);
+			debug_file = nspath_absolute(value, config_file_dir);
 			}
 
 		else if(!strcmp(variable, "max_debug_file_size"))
@@ -219,7 +221,7 @@ int read_main_config_file(char *main_config_file) {
 				}
 
 			my_free(command_file);
-			command_file = (char *)strdup(value);
+			command_file = nspath_absolute(value, config_file_dir);
 
 			/* save the macro */
 			my_free(mac->x[MACRO_COMMANDFILE]);
@@ -235,7 +237,7 @@ int read_main_config_file(char *main_config_file) {
 				}
 
 			my_free(temp_file);
-			temp_file = (char *)strdup(value);
+			temp_file = nspath_absolute(value, config_file_dir);
 
 			/* save the macro */
 			my_free(mac->x[MACRO_TEMPFILE]);
@@ -250,20 +252,18 @@ int read_main_config_file(char *main_config_file) {
 				break;
 				}
 
-			if((tmpdir = opendir((char *)value)) == NULL) {
-				(void)asprintf(&error_message, "Temp path is not a valid directory");
+			my_free(temp_path);
+			temp_path = nspath_absolute(value, config_file_dir);
+			/* make sure we don't have a trailing slash */
+			if(temp_path[strlen(temp_path) - 1] == '/')
+				temp_path[strlen(temp_path) - 1] = '\x0';
+
+			if((tmpdir = opendir(temp_path)) == NULL) {
+				asprintf(&error_message, "Temp path '%s' is not a valid directory", temp_path);
 				error = TRUE;
 				break;
 				}
 			closedir(tmpdir);
-
-			my_free(temp_path);
-			if((temp_path = (char *)strdup(value))) {
-				strip(temp_path);
-				/* make sure we don't have a trailing slash */
-				if(temp_path[strlen(temp_path) - 1] == '/')
-					temp_path[strlen(temp_path) - 1] = '\x0';
-				}
 
 			/* save the macro */
 			my_free(mac->x[MACRO_TEMPPATH]);
@@ -278,23 +278,19 @@ int read_main_config_file(char *main_config_file) {
 				break;
 				}
 
-			if((tmpdir = opendir((char *)value)) == NULL) {
-				(void)asprintf(&error_message, "Check result path is not a valid directory");
+			my_free(check_result_path);
+			check_result_path = nspath_absolute(value, config_file_dir);
+			/* make sure we don't have a trailing slash */
+			if(check_result_path[strlen(check_result_path) - 1] == '/')
+				check_result_path[strlen(check_result_path) - 1] = '\x0';
+
+			if((tmpdir = opendir(check_result_path)) == NULL) {
+				asprintf(&error_message, "Check result path '%s' is not a valid directory", check_result_path);
 				error = TRUE;
 				break;
 				}
 			closedir(tmpdir);
 
-			my_free(temp_path);
-			if((temp_path = (char *)strdup(value))) {
-				strip(temp_path);
-				/* make sure we don't have a trailing slash */
-				if(temp_path[strlen(temp_path) - 1] == '/')
-					temp_path[strlen(temp_path) - 1] = '\x0';
-				}
-
-			my_free(check_result_path);
-			check_result_path = (char *)strdup(temp_path);
 			}
 
 		else if(!strcmp(variable, "max_check_result_file_age"))
@@ -309,7 +305,7 @@ int read_main_config_file(char *main_config_file) {
 				}
 
 			my_free(lock_file);
-			lock_file = (char *)strdup(value);
+			lock_file = nspath_absolute(value, config_file_dir);
 			}
 
 		else if(!strcmp(variable, "global_host_event_handler")) {
@@ -444,16 +440,16 @@ int read_main_config_file(char *main_config_file) {
 			log_initial_states = (atoi(value) > 0) ? TRUE : FALSE;
 			}
 
-                else if(!strcmp(variable, "log_current_states")) {
+		else if(!strcmp(variable, "log_current_states")) {
 
-                        if(strlen(value) != 1 || value[0] < '0' || value[0] > '1') {
-                                asprintf(&error_message, "Illegal value for log_current_states");
-                                error = TRUE;
-                                break;
-                                }
+			if(strlen(value) != 1 || value[0] < '0' || value[0] > '1') {
+				asprintf(&error_message, "Illegal value for log_current_states");
+				error = TRUE;
+				break;
+				}
 
-                        log_current_states = (atoi(value) > 0) ? TRUE : FALSE;
-                        }
+			log_current_states = (atoi(value) > 0) ? TRUE : FALSE;
+			}
 
 		else if(!strcmp(variable, "retain_state_information")) {
 
@@ -710,7 +706,7 @@ int read_main_config_file(char *main_config_file) {
 				}
 
 			my_free(log_archive_path);
-			log_archive_path = (char *)strdup(value);
+			log_archive_path = nspath_absolute(value, config_file_dir);
 			}
 
 		else if(!strcmp(variable, "enable_event_handlers"))
@@ -1141,10 +1137,16 @@ int read_main_config_file(char *main_config_file) {
 			continue;
 		else if(strstr(input, "state_retention_file=") == input)
 			continue;
-		else if(strstr(input, "object_cache_file=") == input)
-			object_cache_file = (char *)strdup(value);
-		else if(strstr(input, "precached_object_file=") == input)
-			object_precache_file = (char *)strdup(value);
+		else if(strstr(input, "object_cache_file=") == input) {
+			my_free(object_cache_file);
+			object_cache_file = nspath_absolute(value, config_file_dir);
+			my_free(mac->x[MACRO_OBJECTCACHEFILE]);
+			mac->x[MACRO_OBJECTCACHEFILE] = strdup(object_cache_file);
+		}
+		else if(strstr(input, "precached_object_file=") == input) {
+			my_free(object_precache_file);
+			object_precache_file = nspath_absolute(value, config_file_dir);
+		}
 		else if(!strcmp(variable, "allow_empty_hostgroup_assignment")) {
 			allow_empty_hostgroup_assignment = (atoi(value) > 0) ? TRUE : FALSE;
 			}
@@ -1401,6 +1403,12 @@ int pre_flight_check(void) {
 		logit(NSLOG_VERIFICATION_WARNING, TRUE, "%s", "Warning: Nothing specified for illegal_macro_output_chars variable!\n");
 		warnings++;
 		}
+	else {
+		char *p;
+		for(p = illegal_output_chars; *p; p++) {
+			illegal_output_char_map[(int)*p] = 1;
+			}
+		}
 
 	if(verify_config) {
 		printf("\n");
@@ -1420,13 +1428,13 @@ int pre_flight_check(void) {
 
 		printf("Timing information on configuration verification is listed below.\n\n");
 
-		printf("CONFIG VERIFICATION TIMES          (* = Potential for speedup with -x option)\n");
+		printf("CONFIG VERIFICATION TIMES\n");
 		printf("----------------------------------\n");
 		printf("Object Relationships: %.6lf sec\n", runtime[0]);
-		printf("Circular Paths:       %.6lf sec  *\n", runtime[1]);
+		printf("Circular Paths:       %.6lf sec\n", runtime[1]);
 		printf("Misc:                 %.6lf sec\n", runtime[2]);
 		printf("                      ============\n");
-		printf("TOTAL:                %.6lf sec  * = %.6lf sec (%.1f%%) estimated savings\n", runtime[3], runtime[1], (runtime[1] / runtime[3]) * 100.0);
+		printf("TOTAL:                %.6lf sec\n", runtime[3]);
 		printf("\n\n");
 		}
 

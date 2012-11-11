@@ -52,6 +52,87 @@
 #include <mcheck.h>
 #endif
 
+static int is_worker;
+
+static void set_loadctl_defaults(void)
+{
+	struct rlimit rlim;
+
+	/* Workers need to up 'em, master needs to know 'em */
+	getrlimit(RLIMIT_NOFILE, &rlim);
+	rlim.rlim_cur = rlim.rlim_max;
+	setrlimit(RLIMIT_NOFILE, &rlim);
+	loadctl.nofile_limit = rlim.rlim_max;
+	getrlimit(RLIMIT_NPROC, &rlim);
+	rlim.rlim_cur = rlim.rlim_max;
+	setrlimit(RLIMIT_NPROC, &rlim);
+	loadctl.nproc_limit = rlim.rlim_max;
+
+	/*
+	 * things may have been configured already. Otherwise we
+	 * set some sort of sane defaults here
+	 */
+	if (!loadctl.jobs_max) {
+		loadctl.jobs_max = loadctl.nproc_limit - 100;
+		if (!is_worker && loadctl.jobs_max > (loadctl.nofile_limit - 50) * wproc_num_workers_online) {
+			loadctl.jobs_max = (loadctl.nofile_limit - 50) * wproc_num_workers_online;
+		}
+	}
+
+	if (!loadctl.jobs_limit)
+		loadctl.jobs_limit = loadctl.jobs_max;
+
+	if (!loadctl.backoff_limit)
+		loadctl.backoff_limit = online_cpus() * 2.5;
+	if (!loadctl.rampup_limit)
+		loadctl.rampup_limit = online_cpus() * 0.8;
+	if (!loadctl.backoff_change)
+		loadctl.backoff_change = loadctl.jobs_limit * 0.3;
+	if (!loadctl.rampup_change)
+		loadctl.rampup_change = loadctl.backoff_change * 0.25;
+	if (!loadctl.check_interval)
+		loadctl.check_interval = 60;
+	if (!loadctl.jobs_min)
+		loadctl.jobs_min = online_cpus() * 20; /* pessimistic */
+}
+
+static int nagios_core_worker(const char *path)
+{
+	int sd, ret;
+	char response[128];
+
+	is_worker = 1;
+
+	set_loadctl_defaults();
+
+	sd = nsock_unix(path, NSOCK_TCP | NSOCK_CONNECT);
+	if (sd < 0) {
+		printf("Failed to connect to query socket '%s': %s: %s\n",
+			   path, nsock_strerror(sd), strerror(errno));
+		return 1;
+	}
+
+	ret = nsock_printf_nul(sd, "@wproc register name=Core Worker %d;pid=%d;max_jobs=20", getpid(), getpid());
+	if (ret < 0) {
+		printf("Failed to register as worker.\n");
+		return 1;
+	}
+
+	ret = read(sd, response, 3);
+	if (ret != 3) {
+		printf("Failed to read response from wproc manager\n");
+		return 1;
+	}
+	if (memcmp(response, "OK", 3)) {
+		read(sd, response + 3, sizeof(response) - 4);
+		response[sizeof(response) - 2] = 0;
+		printf("Failed to register with wproc manager: %s\n", response);
+		return 1;
+	}
+
+	enter_worker(sd, start_cmd);
+	return 0;
+}
 
 int main(int argc, char **argv, char **env) {
 	int result;
@@ -64,6 +145,8 @@ int main(int argc, char **argv, char **env) {
 	time_t now;
 	char datestring[256];
 	nagios_macros *mac;
+	const char *worker_socket = NULL;
+	int i;
 
 #ifdef HAVE_GETOPT_H
 	int option_index = 0;
@@ -77,11 +160,13 @@ int main(int argc, char **argv, char **env) {
 			{"precache-objects", no_argument, 0, 'p'},
 			{"use-precached-objects", no_argument, 0, 'u'},
 			{"enable-timing-point", no_argument, 0, 'T'},
+			{"worker", required_argument, 0, 'W'},
 			{0, 0, 0, 0}
 		};
 #define getopt(argc, argv, o) getopt_long(argc, argv, o, long_options, &option_index)
 #endif
 
+	memset(&loadctl, 0, sizeof(loadctl));
 	mac = get_global_macros();
 
 	/* make sure we have the correct number of command line arguments */
@@ -90,7 +175,7 @@ int main(int argc, char **argv, char **env) {
 
 	/* get all command line arguments */
 	while(1) {
-		c = getopt(argc, argv, "+hVvdspuxT");
+		c = getopt(argc, argv, "+hVvdspuxTW");
 
 		if(c == -1 || c == EOF)
 			break;
@@ -128,6 +213,9 @@ int main(int argc, char **argv, char **env) {
 			case 'T':
 				enable_timing_point = TRUE;
 				break;
+			case 'W':
+				worker_socket = optarg;
+				break;
 
 			case 'x':
 				printf("Warning: -x is deprecated and will be removed\n");
@@ -142,10 +230,14 @@ int main(int argc, char **argv, char **env) {
 #ifdef DEBUG_MEMORY
 	mtrace();
 #endif
+	/* if we're a worker we can skip everything below */
+	if(worker_socket) {
+		exit(nagios_core_worker(worker_socket));
+	}
 
 	if(daemon_mode == FALSE) {
 		printf("\nNagios Core %s\n", PROGRAM_VERSION);
-		printf("Copyright (c) 2009-2011 Nagios Core Development Team and Community Contributors\n");
+		printf("Copyright (c) 2009-present Nagios Core Development Team and Community Contributors\n");
 		printf("Copyright (c) 1999-2009 Ethan Galstad\n");
 		printf("Last Modified: %s\n", PROGRAM_MODIFICATION_DATE);
 		printf("License: GPL\n\n");
@@ -184,11 +276,11 @@ int main(int argc, char **argv, char **env) {
 		printf("  -s, --test-scheduling        Shows projected/recommended check scheduling and other\n");
 		printf("                               diagnostic info based on the current configuration files.\n");
 		printf("  -T, --enable-timing-point    Enable timed commentary on initialization\n");
-		/*printf("  -o, --dont-verify-objects    Don't verify object relationships - USE WITH CAUTION!\n");*/
-		printf("  -x, --dont-verify-paths      Don't check for circular object paths - USE WITH CAUTION!\n");
+		printf("  -x, --dont-verify-paths      Deprecated (Don't check for circular object paths)\n");
 		printf("  -p, --precache-objects       Precache object configuration\n");
 		printf("  -u, --use-precached-objects  Use precached object config file\n");
 		printf("  -d, --daemon                 Starts Nagios in daemon mode, instead of as a foreground process\n");
+		printf("  -W, --worker /path/to/socket Act as a worker for an already running daemon\n");
 		printf("\n");
 		printf("Visit the Nagios website at http://www.nagios.org/ for bug fixes, new\n");
 		printf("releases, online documentation, FAQs, information on subscribing to\n");
@@ -199,39 +291,20 @@ int main(int argc, char **argv, char **env) {
 		}
 
 
-	/* config file is last argument specified */
-	config_file = (char *)strdup(argv[optind]);
+	/*
+	 * config file is last argument specified.
+	 * Make sure it uses an absolute path
+	 */
+	config_file = nspath_absolute(argv[optind], NULL);
 	if(config_file == NULL) {
 		printf("Error allocating memory.\n");
 		exit(ERROR);
 		}
 
 	/* make sure the config file uses an absolute path */
-	if(config_file[0] != '/') {
-
-		/* save the name of the config file */
-		buffer = (char *)strdup(config_file);
-
-		/* reallocate a larger chunk of memory */
-		config_file = (char *)realloc(config_file, MAX_FILENAME_LENGTH);
-		if(config_file == NULL) {
-			printf("Error allocating memory.\n");
-			exit(ERROR);
-			}
-
-		/* get absolute path of current working directory */
-		getcwd(config_file, MAX_FILENAME_LENGTH);
-
-		/* append a forward slash */
-		strncat(config_file, "/", 1);
-		config_file[MAX_FILENAME_LENGTH - 1] = '\x0';
-
-		/* append the config file to the path */
-		strncat(config_file, buffer, MAX_FILENAME_LENGTH - strlen(config_file) - 1);
-		config_file[MAX_FILENAME_LENGTH - 1] = '\x0';
-
-		my_free(buffer);
-		}
+	buffer = strdup(config_file);
+	config_file_dir = strdup(dirname(buffer));
+	free(buffer);
 
 	/*
 	 * let's go to town. We'll be noisy if we're verifying config
@@ -239,6 +312,13 @@ int main(int argc, char **argv, char **env) {
 	 */
 	if(verify_config || test_scheduling || precache_objects) {
 		reset_variables();
+		/*
+		 * if we don't beef up our resource limits as much as
+		 * we can, it's quite possible we'll run headlong into
+		 * EAGAIN due to too many processes when we try to
+		 * drop privileges later.
+		 */
+		set_loadctl_defaults();
 
 		if(verify_config)
 			printf("Reading configuration data...\n");
@@ -269,7 +349,7 @@ int main(int argc, char **argv, char **env) {
 				printf("\n");
 				printf("     Make sure you are specifying the name of the MAIN configuration file on\n");
 				printf("     the command line and not the name of another configuration file.  The\n");
-				printf("     main configuration file is typically '/usr/local/nagios/etc/nagios.cfg'\n");
+				printf("     main configuration file is typically '%s'\n", DEFAULT_CONFIG_FILE);
 				}
 
 			printf("\n***> One or more problems was encountered while processing the config files...\n");
@@ -350,6 +430,23 @@ int main(int argc, char **argv, char **env) {
 	/* else start to monitor things... */
 	else {
 
+		/*
+		 * if we're called with a relative path we must make
+		 * it absolute so we can launch our workers.
+		 * If not, we needn't bother, as we're using execvp()
+		 */
+		if (strchr(argv[0], '/')) {
+			nagios_binary_path = nspath_absolute(argv[0], NULL);
+			if (access(nagios_binary_path, X_OK) < 0) {
+				logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: failed to access() %s: %s\n", nagios_binary_path, strerror(errno));
+				logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: Spawning workers will be impossible. Aborting.\n");
+				exit(EXIT_FAILURE);
+				}
+			}
+		else {
+			nagios_binary_path = strdup(argv[0]);
+		}
+
 		nagios_iobs = iobroker_create();
 
 		/* keep monitoring things until we get a shutdown command */
@@ -357,12 +454,14 @@ int main(int argc, char **argv, char **env) {
 
 			/* reset program variables */
 			reset_variables();
+			timing_point("Variables reset\n");
 
 			/* get PID */
 			nagios_pid = (int)getpid();
 
 			/* read in the configuration files (main and resource config files) */
 			result = read_main_config_file(config_file);
+			timing_point("Main config file read\n");
 
 			/* NOTE 11/06/07 EG moved to after we read config files, as user may have overridden timezone offset */
 			/* get program (re)start time and save as macro */
@@ -387,6 +486,7 @@ int main(int argc, char **argv, char **env) {
 			neb_init_modules();
 			neb_init_callback_list();
 #endif
+			timing_point("NEB module API initialized\n");
 
 			/* this must be logged after we read config data, as user may have changed location of main log file */
 			logit(NSLOG_PROCESS_INFO, TRUE, "Nagios %s starting... (PID=%d)\n", PROGRAM_VERSION, (int)getpid());
@@ -400,20 +500,43 @@ int main(int argc, char **argv, char **env) {
 			/* write log version/info */
 			write_log_file_info(NULL);
 
+			/* handle signals (interrupts) before we do any socket I/O */
+			setup_sighandler();
+
 			/*
 			 * Initialize query handler and event subscription service.
 			 * This must be done before modules are initialized, so
 			 * the modules can use our in-core stuff properly
 			 */
-			qh_init(qh_socket_path);
+			qh_init(qh_socket_path ? qh_socket_path : DEFAULT_QUERY_SOCKET);
+			timing_point("Query handler initialized\n");
 			nerd_init();
+			timing_point("NERD initialized\n");
+
+			/* initialize check workers */
+			if(init_workers(num_check_workers) < 0) {
+				logit(NSLOG_RUNTIME_ERROR, TRUE, "Failed to spawn workers. Aborting\n");
+				exit(EXIT_FAILURE);
+			}
+			timing_point("%u workers spawned\n", wproc_num_workers_spawned);
+			i = 0;
+			while (i < 50 && wproc_num_workers_online < wproc_num_workers_spawned) {
+				iobroker_poll(nagios_iobs, 50);
+				i++;
+			}
+			timing_point("%u workers connected\n", wproc_num_workers_online);
+
+			/* now that workers have arrived we can set the defaults */
+			set_loadctl_defaults();
 
 #ifdef USE_EVENT_BROKER
 			/* load modules */
 			neb_load_all_modules();
+			timing_point("Modules loaded\n");
 
 			/* send program data to broker */
 			broker_program_state(NEBTYPE_PROCESS_PRELAUNCH, NEBFLAG_NONE, NEBATTR_NONE, NULL);
+			timing_point("First callback made\n");
 #endif
 
 			/* read in all object config data */
@@ -449,13 +572,14 @@ int main(int argc, char **argv, char **env) {
 				exit(ERROR);
 				}
 
-			init_event_queue();
+			timing_point("Object configuration parsed and understood\n");
 
 			/* write the objects.cache file */
 			fcache_objects(object_cache_file);
+			timing_point("Objects cached\n");
 
-			/* handle signals (interrupts) */
-			setup_sighandler();
+			init_event_queue();
+			timing_point("Event queue initialized\n");
 
 
 #ifdef USE_EVENT_BROKER
@@ -489,46 +613,56 @@ int main(int argc, char **argv, char **env) {
 				}
 
 			/* initialize status data unless we're starting */
-			if(sigrestart == FALSE)
+			if(sigrestart == FALSE) {
 				initialize_status_data(config_file);
+				timing_point("Status data initialized\n");
+				}
 
 			/* read initial service and host state information  */
 			initialize_retention_data(config_file);
+			timing_point("Retention data initialized\n");
 			read_initial_state_information();
+			timing_point("Initial state information read\n");
 
 			/* initialize comment data */
 			initialize_comment_data(config_file);
+			timing_point("Comment data initialized\n");
 
 			/* initialize scheduled downtime data */
 			initialize_downtime_data(config_file);
+			timing_point("Downtime data initialized\n");
 
 			/* initialize performance data */
 			initialize_performance_data(config_file);
+			timing_point("Performance data initialized\n");
 
 			/* initialize the event timing loop */
 			init_timing_loop();
+			timing_point("Event timing loop initialized\n");
 
 			/* initialize check statistics */
 			init_check_stats();
+			timing_point("check stats initialized\n");
 
 			/* check for updates */
 			check_for_nagios_updates(FALSE, TRUE);
+			timing_point("Update check concluded\n");
 
 			/* update all status data (with retained information) */
 			update_all_status_data();
+			timing_point("Status data updated\n");
 
 			/* log initial host and service state */
 			log_host_states(INITIAL_STATES, NULL);
 			log_service_states(INITIAL_STATES, NULL);
+			timing_point("Initial states logged\n");
 
 			/* reset the restart flag */
 			sigrestart = FALSE;
 
 			/* fire up command file worker */
 			launch_command_file_worker();
-
-			/* initialize check workers */
-			init_workers(num_check_workers);
+			timing_point("Command file worker launched\n");
 
 #ifdef USE_EVENT_BROKER
 			/* send program data to broker */
@@ -540,6 +674,7 @@ int main(int argc, char **argv, char **env) {
 			my_free(mac->x[MACRO_EVENTSTARTTIME]);
 			asprintf(&mac->x[MACRO_EVENTSTARTTIME], "%lu", (unsigned long)event_start);
 
+			timing_point("Entering event execution loop\n");
 			/***** start monitoring all services *****/
 			/* (doesn't return until a restart or shutdown signal is encountered) */
 			event_execution_loop();
@@ -582,6 +717,7 @@ int main(int argc, char **argv, char **env) {
 			if(sigshutdown == TRUE) {
 				free_worker_memory(WPROC_FORCE);
 				iobroker_destroy(nagios_iobs, IOBROKER_CLOSE_SOCKETS);
+				nagios_iobs = NULL;
 
 				/* make sure lock file has been removed - it may not have been if we received a shutdown command */
 				if(daemon_mode == TRUE)

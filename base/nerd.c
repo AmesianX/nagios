@@ -40,7 +40,6 @@ struct subscription {
 
 
 static nebmodule nerd_mod; /* fake module to get our callbacks accepted */
-static int nerd_sock; /* teehee. nerd-socks :D */
 static struct nerd_channel **channels;
 static unsigned int num_channels, alloc_channels;
 static unsigned int chan_host_checks_id, chan_service_checks_id;
@@ -67,7 +66,7 @@ static int nerd_register_channel_callbacks(struct nerd_channel *chan)
 	for(i = 0; i < chan->num_callbacks; i++) {
 		int result = neb_register_callback(chan->callbacks[i], &nerd_mod, 0, chan->handler);
 		if(result != 0) {
-			logit(NSLOG_RUNTIME_ERROR, TRUE, "Failed to register callback %d for channel '%s': %d\n",
+			logit(NSLOG_RUNTIME_ERROR, TRUE, "nerd: Failed to register callback %d for channel '%s': %d\n",
 				  chan->callbacks[i], chan->name, result);
 			return -1;
 		}
@@ -119,6 +118,7 @@ static int cancel_channel_subscription(struct nerd_channel *chan, int sd)
 		if(subscr->sd == sd) {
 			cancelled++;
 			free(list);
+			free(subscr);
 			if(prev) {
 				prev->next = next;
 			} else {
@@ -130,7 +130,7 @@ static int cancel_channel_subscription(struct nerd_channel *chan, int sd)
 	}
 
 	if(cancelled) {
-		logit(NSLOG_INFO_MESSAGE, TRUE, "Cancelled %d subscription%s to channel '%s' for %d\n",
+		logit(NSLOG_INFO_MESSAGE, TRUE, "nerd: Cancelled %d subscription%s to channel '%s' for %d\n",
 			  cancelled, cancelled == 1 ? "" : "s", chan->name, sd);
 	}
 
@@ -202,7 +202,7 @@ static int broadcast(unsigned int chan_id, void *buf, unsigned int len)
 
 		next = list->next;
 
-		result = send(subscr->sd, buf, len, MSG_NOSIGNAL);
+		result = send(subscr->sd, buf, len, 0);
 		if(result < 0) {
 			if (errno == EAGAIN)
 				return 0;
@@ -269,7 +269,6 @@ static const char *host_parent_path(host *leaf, char sep)
 		host_parent_path_cache = calloc(num_objects.hosts, sizeof(char *));
 	}
 	if(host_parent_path_cache[h->id]) {
-		printf("Found cached path for host '%s'\n", h->name);
 		return host_parent_path_cache[h->id];
 	}
 
@@ -282,7 +281,7 @@ static const char *host_parent_path(host *leaf, char sep)
 			break;
 	}
 
-	ret = malloc(len) + 1;
+	ret = malloc(len + 1);
 	for(list = stack; list; list = next) {
 		char *ppart = (char *)list->object_ptr;
 		next = list->next;
@@ -292,7 +291,7 @@ static const char *host_parent_path(host *leaf, char sep)
 		pos += strlen(ppart);
 	}
 	ret[pos++] = 0;
-	host_parent_path_cache[h->id] = ret;
+	host_parent_path_cache[leaf->id] = ret;
 	return ret;
 }
 
@@ -338,7 +337,6 @@ static int nerd_deinit(void)
 {
 	unsigned int i;
 
-	iobroker_close(nagios_iobs, nerd_sock);
 	if(host_parent_path_cache) {
 		for(i = 0; i < num_objects.hosts; i++) {
 			my_free(host_parent_path_cache[i]);
@@ -352,6 +350,7 @@ static int nerd_deinit(void)
 
 		for(list = chan->subscriptions; list; list = next) {
 			struct subscription *subscr = (struct subscription *)list->object_ptr;
+			iobroker_close(nagios_iobs, subscr->sd);
 			next = list->next;
 			free(list);
 			free(subscr);
@@ -389,7 +388,7 @@ int nerd_mkchan(const char *name, int (*handler)(int, void *), unsigned int call
 
 	channels[num_channels++] = chan;
 
-	logit(NSLOG_INFO_MESSAGE, TRUE, "NERD channel %s registered successfully\n", chan->name);
+	logit(NSLOG_INFO_MESSAGE, TRUE, "nerd: Channel %s registered successfully\n", chan->name);
 	return num_channels - 1;
 }
 
@@ -401,7 +400,6 @@ static int nerd_qh_handler(int sd, char *request, unsigned int len)
 	struct nerd_channel *chan;
 	int action;
 
-	printf("Got request '%s'\n", request);
 	while(request[len] == 0 || request[len] == '\n')
 		request[len--] = 0;
 	chan_name = strchr(request, ' ');
@@ -424,7 +422,6 @@ static int nerd_qh_handler(int sd, char *request, unsigned int len)
 
 	chan = find_channel(chan_name);
 	if(!chan) {
-		printf("Failed to find channel %s\n", chan_name);
 		return 400;
 	}
 
@@ -442,7 +439,7 @@ int nerd_init(void)
 	nerd_mod.deinit_func = nerd_deinit;
 
 	if(qh_register_handler("nerd", 0, nerd_qh_handler) < 0) {
-		logit(NSLOG_RUNTIME_ERROR, TRUE, "Error: Failed to register 'nerd' with query handler\n");
+		logit(NSLOG_RUNTIME_ERROR, TRUE, "nerd: Failed to register with query handler\n");
 		return ERROR;
 	}
 

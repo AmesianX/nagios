@@ -60,7 +60,7 @@ static int t_okv(int success, const char *fmt, va_list ap)
 	passed += !!success;
 	failed += !success;
 
-	if (fmt && (!success || t_verbose)) {
+	if (fmt && (!success || t_verbose || (t_verbose = !!getenv("TEST_VERBOSE")))) {
 		t_indent(t_depth);
 		if (success) {
 			printf("%sPASS%s ", green, reset);
@@ -78,7 +78,7 @@ int t_ok(int success, const char *fmt, ...)
 {
 	va_list ap;
 
-	if (fmt && t_verbose) {
+	if (fmt) {
 		va_start(ap, fmt);
 		t_okv(success, fmt, ap);
 		va_end(ap);
