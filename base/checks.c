@@ -1332,9 +1332,12 @@ void check_for_orphaned_services(void) {
 		if(expected_time < current_time) {
 
 			/* log a warning */
-			logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: The check of service '%s' on host '%s' looks like it was orphaned (results never came back).  I'm scheduling an immediate check of the service...\n", temp_service->description, temp_service->host_name);
+			logit(NSLOG_RUNTIME_WARNING, TRUE, "Warning: The check of service '%s' on host '%s' looks like it was orphaned (results never came back; last_check=%lu; next_check=%lu).  I'm scheduling an immediate check of the service...\n", temp_service->description, temp_service->host_name, temp_service->last_check, temp_service->next_check);
 
 			log_debug_info(DEBUGL_CHECKS, 1, "Service '%s' on host '%s' was orphaned, so we're scheduling an immediate check...\n", temp_service->description, temp_service->host_name);
+			log_debug_info(DEBUGL_CHECKS, 1, "  next_check=%lu (%s); last_check=%lu (%s);\n",
+						   temp_service->next_check, ctime(&temp_service->next_check),
+						   temp_service->last_check, ctime(&temp_service->last_check));
 
 			/* decrement the number of running service checks */
 			if(currently_running_service_checks > 0)
@@ -1525,18 +1528,6 @@ int is_service_result_fresh(service *temp_service, time_t current_time, int log_
 /******************************************************************/
 /*************** COMMON ROUTE/HOST CHECK FUNCTIONS ****************/
 /******************************************************************/
-
-/* execute a scheduled host check using either the 2.x or 3.x logic */
-int perform_scheduled_host_check(host *hst, int check_options, double latency) {
-
-	log_debug_info(DEBUGL_FUNCTIONS, 0, "perform_scheduled_host_check()\n");
-
-	run_scheduled_host_check(hst, check_options, latency);
-
-	return OK;
-	}
-
-
 
 /* schedules an immediate or delayed host check */
 void schedule_host_check(host *hst, time_t check_time, int options) {

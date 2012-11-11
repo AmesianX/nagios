@@ -16,7 +16,14 @@
 
 #define WPROC_FORCE  (1 << 0)
 
+extern unsigned int wproc_num_workers_spawned;
+extern unsigned int wproc_num_workers_online;
+extern unsigned int wproc_num_workers_desired;
+
+extern void wproc_reap(int jobs, int msecs);
+extern int wproc_can_spawn(struct load_control *lc);
 extern void free_worker_memory(int flags);
+extern int workers_alive(void);
 extern int init_workers(int desired_workers);
 extern int wproc_run_check(check_result *cr, char *cmd, nagios_macros *mac);
 extern int wproc_notify(char *cname, char *hname, char *sdesc, char *cmd, nagios_macros *mac);

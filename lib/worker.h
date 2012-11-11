@@ -23,9 +23,9 @@
  * take care to use different MSG_DELIM_LEN depending on if we're
  * sending or receiving. Change this if PAIR_SEP alters.
  */
-#define MSG_DELIM "\0\0\0" /**< message limiter */
-#define MSG_DELIM_LEN (sizeof(MSG_DELIM) - 1) /**< message delimiter length */
-#define MSG_DELIM_LEN_SEND (MSG_DELIM_LEN - 1) /**< msg delim len when sendin */
+#define MSG_DELIM "\1\0\0" /**< message limiter */
+#define MSG_DELIM_LEN (sizeof(MSG_DELIM)) /**< message delimiter length */
+#define MSG_DELIM_LEN_SEND (MSG_DELIM_LEN) /**< msg delim len when sendin */
 #define MSG_DELIM_LEN_RECV (MSG_DELIM_LEN) /**< msg delimm len when receivin */
 #define PAIR_SEP 0 /**< pair separator for buf2kvvec() and kvvec2buf() */
 #define KV_SEP '=' /**< key/value separator for buf2kvvec() and kvvec2buf() */
@@ -63,6 +63,29 @@ typedef struct worker_process {
 	struct worker_process *next_wp; /**< next worker in list */
 } worker_process;
 
+typedef struct iobuf {
+	int fd;
+	unsigned int len;
+	char *buf;
+} iobuf;
+
+typedef struct execution_information execution_information;
+
+typedef struct child_process {
+	unsigned int id, timeout;
+	char *cmd;
+	int ret;
+	struct kvvec *request;
+	iobuf outstd;
+	iobuf outerr;
+	execution_information *ei;
+} child_process;
+
+/**
+ * Callback for enter_worker that simply runs a command
+ */
+extern int start_cmd(child_process *cp);
+
 /**
  * Spawn a worker process
  * @param[in] init_func The initialization function for the worker
@@ -70,6 +93,38 @@ typedef struct worker_process {
  * @return A worker process struct on success (for the parent). Null on errors
  */
 extern worker_process *spawn_worker(void (init_func)(void *), void *init_arg);
+
+/**
+ * Spawn any random helper process
+ * @param argv The (NULL-sentinel-terminated) argument vector
+ * @return 0 on success, < 0 on errors
+ */
+extern int spawn_helper(char **argv);
+
+/**
+ * To be called when a child_process has completed to ship the result to nagios
+ * @param cp The child_process that describes the job
+ * @param reason 0 if everything was OK, 1 if the job was unable to run
+ * @return 0 on success, non-zero otherwise
+ */
+extern int finish_job(child_process *cp, int reason);
+
+/**
+ * Start to poll the socket and call the callback when there are new tasks
+ * @param sd A socket descriptor to poll
+ * @param cb The callback to call upon completion
+ */
+extern void enter_worker(int sd, int (*cb)(child_process*));
+
+/**
+ * Build a buffer from a key/value vector buffer.
+ * The resulting kvvec-buffer is suitable for sending between
+ * worker and master in either direction, as it has all the
+ * right delimiters in all the right places.
+ * @param kvv The key/value vector to build the buffer from
+ * @return NULL on errors, a newly allocated kvvec buffer on success
+ */
+extern struct kvvec_buf *build_kvvec_buf(struct kvvec *kvv);
 
 /**
  * Send a key/value vector as a bytestream through a socket

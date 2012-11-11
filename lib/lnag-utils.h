@@ -63,6 +63,26 @@
 # define offsetof(t, f) ((unsigned long)&((t *)0)->f)
 #endif
 
+/** character map initialization for .bss-allocated char maps */
+#define CHAR_MAP_INIT(k) { \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, \
+	}
+
 /** Use this macro to dynamically increase vector lengths */
 #define alloc_nr(x) (((x)+16)*3/2)
 
@@ -151,7 +171,7 @@ static inline int online_cpus(void)
 		return (int)psd.psd_proc_cnt;
 #endif
 
-	return 0;
+	return 1;
 }
 
 NAGIOS_END_DECL
